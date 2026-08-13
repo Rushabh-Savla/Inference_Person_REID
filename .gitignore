@@ -64,3 +64,39 @@ clips_/
 # ------------------------
 *.tmp
 *.cache
+
+
+# ------------------------
+# Generated outputs
+# ------------------------
+experiments/videos/
+experiments/clips/
+experiments/archive/
+
+# Runtime reports
+logs/runtime/
+
+# Local databases
+qdrant_storage/
+
+# Test artifacts
+sheets/
+
+# Calibration outputs (keep only if generated)
+# calibration/
+
+# Misc
+run.pid
+
+# Generated outputs
+experiments/videos/
+experiments/clips/
+experiments/archive/
+
+logs/runtime/
+
+# Debug visualization outputs
+sheets/
+
+# Runtime DB
+qdrant_storage/

@@ -1,0 +1,105 @@
+# BoT-SORT with APPEARANCE association -- this project's tracker.
+#
+# WHY THIS FILE EXISTS
+# ====================
+# Until 2026-08-04 this project tracked with ultralytics' stock `bytetrack.yaml`,
+# which associates detections to tracks on IoU and motion ONLY -- no appearance cue
+# of any kind. `reconcile.py`'s docstring assumes "one ByteTrack track is (barring an
+# id switch) provably one person", and every prototype, threshold and veto in the
+# identity layer rests on that parenthesis. It does not hold here.
+#
+# MEASURED, on run 20260804_064551/094039 clips. The operator read contact sheets of
+# each tracklet's two temporal halves (tests/calibration/contact_sheet_halves.py) and
+# found that BOTH halves of cam_219:6 and cam_219:14 are DIFFERENT PEOPLE -- one
+# track_id covering two identities. Four tracklets checked in cam_213 and cam_224
+# were each one person. So 2 of 2 examined in cam_219 switched, 0 of 4 elsewhere.
+#
+# WHY cam_219 SPECIFICALLY. It is the close-mounted camera: median crop height 754 px
+# on a 1080-line frame, people filling the view, passing in front of one another at
+# nearly identical box sizes. IoU-plus-motion association has nothing to separate two
+# similar boxes that swap places, so the id follows the box rather than the person.
+# That is the textbook failure case for an appearance-free tracker, and cam_219 is
+# exactly where the operator reported ids changing.
+#
+# WHY A SWITCH IS WORSE THAN A FRAGMENT, which sets the direction of every value
+# below. CLAUDE.md section 5 says a false merge corrupts two identities' histories
+# while a false split just gives one person a spare id that reconciliation can still
+# repair. A switch IS a false merge, committed at the tracker where nothing
+# downstream can see it: the tracklet's prototype becomes a mean over two people, so
+# it merges with the wrong people AND splits from the right ones -- both of the
+# operator's symptoms at once. A fragment is the recoverable direction, and reconcile
+# exists to reassemble fragments. So this config is deliberately biased toward
+# FRAGMENTING rather than toward holding a track together.
+# =============================================================================
+
+tracker_type: botsort
+
+# ---- the actual fix -------------------------------------------------------
+# THE ONE CHANGE THAT MATTERS: give association an appearance cue. Stock
+# bytetrack.yaml and botsort.yaml both ship with_reid False, so a person swap that
+# is geometrically plausible is accepted. `model: auto` uses the detector's own
+# features, which is weaker than a dedicated ReID model but costs no extra forward
+# pass -- and any appearance signal beats none, which is the current state.
+#
+# NOTE this is NOT src/reid/'s FastReID model and must not be confused with it.
+# That one runs later, on committed crops, and decides identity. This one only
+# helps the tracker decide which box continues which track inside one camera.
+with_reid: True
+model: auto
+
+# Minimum appearance similarity for ReID to accept a match. Ultralytics' own comment
+# on this key is "raise to avoid identity swaps", which is precisely the failure
+# here. Left at the stock 0.8 on purpose: one change at a time, and raising it
+# before with_reid has been measured would confound the two.
+appearance_thresh: 0.8
+# Minimum IoU for two boxes to be considered close enough to compare appearance at
+# all. Stock. Lowering it would let appearance rescue distant boxes; that is a
+# separate experiment.
+proximity_thresh: 0.5
+
+# ---- shorten the window a lost track can be stolen in --------------------
+# Stock is 30 frames. Ultralytics' comment: "higher handles occlusion, increases ID
+# switches risk". At cam_219's ~24 fps, 30 frames keeps a lost track alive for 1.25
+# seconds -- ample time for the person to leave and someone else to walk into the
+# same region and inherit the id, which is what a handover switch looks like. Both
+# confirmed switches localise near a track boundary (cam_219:6 cuts at 37/40,
+# cam_219:14 at 3/40), which is the signature of exactly that.
+#
+# 15 frames is ~0.6 s. The cost is more fragments across brief occlusions, which is
+# the recoverable direction, and reconcile's Phase 1 is built to rejoin them.
+track_buffer: 15
+
+# ---- static cameras, so no global motion compensation --------------------
+# All four cameras are fixed. sparseOptFlow estimates and removes camera motion that
+# does not exist, which costs time per frame and can only add noise to the motion
+# model. `none` is the honest setting for a fixed mount.
+gmc_method: none
+
+# ---- unchanged from stock, listed so nothing is implicit ------------------
+# Every one of these is ultralytics' default. They are written out rather than
+# omitted because a tracker config that lists only its overrides makes the next
+# person diff two files to learn what is in force.
+track_high_thresh: 0.25   # first-stage match threshold
+track_low_thresh: 0.1     # second-stage, low-score recovery
+new_track_thresh: 0.25    # start a new track if nothing matches this well
+match_thresh: 0.8         # association similarity threshold
+fuse_score: True          # fuse detection score into the matching cost
+
+# =============================================================================
+# HOW TO TELL WHETHER THIS WORKED -- and it is NOT an identity count.
+#
+# Capture a run, then re-run the switch scan and compare against the pre-change
+# numbers on 20260804_094039:
+#
+#   python tests/calibration/find_track_switches.py --clips . --min-side-frac 0.25
+#   python tests/calibration/find_track_switches.py --clips . --min-side-frac 0.05
+#
+# Expect: FEWER tracklets with a large gap AND large spread, and MORE tracklets
+# overall in cam_219 (that is the fragmentation this trades for, and it is the
+# intended direction). Then confirm the survivors with contact sheets -- the scan
+# says a track is temporally inconsistent, never why.
+#
+# A rise in identity count is EXPECTED and is not a regression on its own. More
+# fragments means more tracklets for reconcile to rejoin; judge the output by
+# watching output_cam_*.mp4, per CLAUDE.md section 4.
+# =============================================================================

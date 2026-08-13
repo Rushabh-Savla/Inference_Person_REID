@@ -1,0 +1,1438 @@
+# =============================================================================
+# config.yaml -- all the knobs for the pipeline. main.py reads this at startup.
+# =============================================================================
+
+source:
+  # Default videos (one entry per camera; each gets its own detector/tracker).
+  # These are just the DEFAULTS -- override them at runtime with
+  #   python main.py --videos a.mp4 b.mp4        (or)   --videos-dir /path
+  # so you never have to edit this file to process different footage.
+  # #67: these used to point at placeholder_video/, which does not exist -- so a
+  # bare `python main.py` failed on a fresh checkout with a confusing error. They
+  # now point at footage that ships with the repo. Override at runtime with
+  # --videos / --videos-dir; for cameras use --mode live with rtsp:// URLs, or
+  # SOURCE_VIDEOS in .env (see source.env_urls below).
+  videos:
+    - name: register_file
+      path: register_file.avi
+
+  # #30: credentials in an rtsp:// URL on the command line are visible to every
+  # user on the box via `ps`, and land in shell history. Put them in the untracked
+  # .env instead and reference them here:
+  #
+  #   .env:     CAM_213=rtsp://admin:secret@192.168.0.213:554/1/1
+  #             CAM_224=rtsp://admin:secret@192.168.0.224:554/ch01/0
+  #   config:   env_urls: [CAM_213, CAM_224]
+  #
+  # Each name is looked up in the environment at startup; a missing one is
+  # reported and skipped rather than silently dropping a camera. Empty = off, and
+  # --videos still overrides everything.
+  env_urls: []
+  # 0 = process the whole video. Set e.g. 60 for a quick CPU smoke test.
+  max_frames: 0
+  # 0 = native resolution. Positive width downscales every frame (keeps aspect)
+  # before detect/track/embed. QHD (2560px) on CPU is very slow; 1280 is a
+  # big speedup for dev with little ReID cost. Use 0 for a final full-res run.
+  resize_width: 0
+
+  # STREAM URLs (rtsp:// / http:// ...) are handled by the real-time pipeline in
+  # src/live/ -- see the `live:` block below for its capture/reconnect settings.
+  # A run uses the live pipeline when run.mode is `live`, or when run.mode is
+  # `auto` and ANY source is a URL. File inputs use the file-batch flow.
+
+  # RTSP transport + timeouts (REMEDIATION_PLAN.md #28/#29). Applied once at
+  # startup by video_source.rtsp_options_from_config, before any capture is
+  # opened -- FFmpeg reads its options at open time, so it cannot be set later.
+  rtsp:
+    # tcp retransmits lost packets; FFmpeg's default (UDP) does not, and a lost
+    # packet in H.265 costs a reference frame, whose smeared successors feed both
+    # the detector AND the ReID crop -- poisoning a tracklet prototype at random.
+    # HONEST SCOPE: J.4 measured ZERO decode errors across four live streams on
+    # this network, so this is a sound default, NOT a fix for anything observed
+    # here. The broken references (294/682, 207/1573) were in recorded files.
+    transport: tcp            # tcp | udp | "" to leave it to FFmpeg
+    # THIS is the one that has bitten. With no socket timeout cap.read() can block
+    # forever, and a capture thread cannot re-check stop_event while blocked
+    # inside it -- so one wedged camera makes Ctrl-C unable to stop that thread,
+    # and the interrupt that should reach reconcile never arrives. A timeout turns
+    # an indefinite block into a failed read, which the reconnect path already
+    # handles. Milliseconds here; converted to FFmpeg's microseconds internally.
+    open_timeout_ms: 5000
+    read_timeout_ms: 5000
+    # Override the generated FFmpeg option string verbatim, for a build that wants
+    # different keys (the RTSP timeout option was renamed; both `timeout` and
+    # `stimeout` are sent by default because builds disagree). Leave unset
+    # normally. Set every value above to ""/0 to restore FFmpeg's own defaults.
+    # ffmpeg_options: "rtsp_transport;tcp|timeout;5000000"
+
+detector:
+  model: yolo11m.pt         # auto-downloaded on first run (already committed to the
+                             # deploy rsync, so the GPU box needs no network).
+                             #
+                             # 2026-07-30: RAISED from yolo11n.pt (~10x the FLOPs),
+                             # skipping yolo11s, to test whether detector CAPACITY is
+                             # what loses people -- cam_206 showed 5 people present
+                             # and only 1 detected at the start of a clip
+                             # (REMEDIATION_PLAN.md J.8). Nothing downstream can
+                             # invent a box YOLO never produced, so no threshold or
+                             # merge rule can fix a miss here.
+                             #
+                             # THIS IS A MEASUREMENT, NOT AN UPGRADE (plan 0.4). Keep
+                             # it only if the run shows BOTH:
+                             #   * more people found -- fewer "randomly starts
+                             #     detecting the rest" gaps, and per-camera tracklet
+                             #     counts that look like people rather than fragments
+                             #   * throughput still fine -- per-camera dropped% in the
+                             #     final metrics block stays near J.9's 0.4-2.9% and
+                             #     infer_q dropped stays small. 10x detector cost is
+                             #     the one change that could revive Phase 11, which
+                             #     J.1 declared dead AT yolo11n's cost.
+                             # Revert = this one line. Compare first with:
+                             #   python tests/calibration/compare_detector_models.py
+                             #
+                             # NOTE `imgsz` is never passed, so Ultralytics' 640
+                             # applies: a 4x downscale on the 2560x1440 cameras. Part A
+                             # rejected imgsz 1280 as a no-op, but that was measured on
+                             # yolo11n -- if capacity helps, resolution is the next
+                             # lever and its verdict needs re-measuring on this model.
+  confidence_threshold: 0.4  # drop boxes less confident than this
+  iou: 0.60                  # NMS overlap threshold. Was previously UNSET, silently
+                             # inheriting Ultralytics' 0.7 default -- a load-bearing
+                             # value that deserves to be visible. LOWER suppresses
+                             # MORE aggressively => fewer duplicate boxes on one
+                             # person. Do NOT raise this to fix duplicates; raising
+                             # it produces more of them (it only helps the opposite
+                             # failure, one box merging two people).
+  person_class_id: 0         # COCO class 0 = person
+
+  # Per-camera overrides for anything above (angle, distance and lighting differ
+  # per view, so a single global floor is wrong for every camera by a different
+  # amount). Merged over the global values by detector.resolve_detector_cfg, which
+  # BOTH the live and file-batch paths call, so the two can never drift.
+  # Keys are camera names as they appear in source.videos / auto-named cam_<octet>.
+  # Empty = every camera uses the global values above. Example:
+  #   per_camera:
+  #     cam_224:
+  #       confidence_threshold: 0.50   # close view: afford a higher floor
+  #     cam_213:
+  #       confidence_threshold: 0.35   # wide/high view: small, partly-occluded people
+  per_camera: {} # wide/high view: small, partly-occluded people    
+  # Pose ensemble: when the box tracker merges two overlapping people into ONE
+  # box (two stacked bodies), a second pose model finds one skeleton per person
+  # and we split the box into individual people. Runs a 2nd model per frame.
+  pose_ensemble:
+    enabled: true
+    pose_model: yolo11l-pose.pt   # auto-downloaded on first run
+    min_containment: 0.6          # a pose body must be >= this fraction inside a
+                                  # tracker box to count as "in it" (split needs 2+)
+    conf: 0.25                    # pose model confidence floor
+
+tracker:
+  enabled: true
+  # CHANGED 2026-08-04 from ultralytics' stock `bytetrack.yaml`, which associates on
+  # IoU and motion ONLY -- no appearance cue at all. Full rationale and every value's
+  # reason is in the file itself; the summary of why is here because this is where
+  # someone looks first.
+  #
+  # THE DEFECT IT FIXES, measured rather than argued. reconcile.py assumes "one
+  # ByteTrack track is (barring an id switch) provably one person", and every
+  # prototype, threshold and veto rests on that parenthesis. It is false here: the
+  # operator read contact sheets of each tracklet's two temporal halves
+  # (tests/calibration/contact_sheet_halves.py) on run 20260804_094039 and found BOTH
+  # halves of cam_219:6 and cam_219:14 are DIFFERENT PEOPLE -- one track_id covering
+  # two identities. Four tracklets checked in cam_213/cam_224 were each one person.
+  # 2 of 2 in cam_219, 0 of 4 elsewhere.
+  #
+  # cam_219 is the close-mounted camera -- median crop height 754 px on a 1080-line
+  # frame, people filling the view and passing each other at nearly identical box
+  # sizes. That is the textbook case IoU-plus-motion association loses, and cam_219
+  # is exactly where the operator reported ids changing.
+  #
+  # A SWITCH IS A FALSE MERGE COMMITTED WHERE NOTHING DOWNSTREAM CAN SEE IT. The
+  # tracklet's prototype becomes a mean over two people, so it merges with the wrong
+  # people AND splits from the right ones -- both reported symptoms at once. By
+  # section 5 a fragment is the recoverable direction and reconcile exists to rejoin
+  # fragments, so the new config is deliberately biased toward fragmenting
+  # (with_reid on, track_buffer 30 -> 15).
+  #
+  # EXPECT MORE TRACKLETS AND MORE IDENTITIES, especially in cam_219. That is the
+  # trade being made, not a regression. Judge it with
+  # tests/calibration/find_track_switches.py plus contact sheets, and by watching
+  # output_cam_*.mp4 -- never by an identity count (section 4).
+  #
+  # VALIDATED ONLY AS FAR AS A SMOKE TEST: it loads, `with_reid: True` needs no extra
+  # download, and on 12 easy frames of register_file.avi it produces detections and
+  # track ids identical to bytetrack.yaml (48 dets, ids 1-4). Whether it removes the
+  # cam_219 switches needs a capture. Revert to `bytetrack.yaml` if it regresses.
+  # ===================== REVERTED SAME DAY, 2026-08-04 =====================
+  # trackers/botsort_reid.yaml made the output MUCH worse and is reverted. Before
+  # it, cross-camera id splitting was confined to cam_219. After it, the operator
+  # reports EVERY camera showing the same defect. Seventh reverted change.
+  #
+  # WHY IT BROKE, and the error is in the reasoning rather than the values.
+  # `track_buffer: 30 -> 15` was justified by CLAUDE.md section 5: a fragment is
+  # recoverable because reconcile's Phase 1 rejoins fragments, while a switch is
+  # not. THAT PREMISE IS FALSE ON THIS SYSTEM, and the same day's own measurements
+  # say so. Phase 1 merges same-camera fragments at 0.80-0.90, and re-appearance
+  # fragment pairs measure 0.57-0.62 (explain_merge_failure.py on 20260804_064551:
+  # cam_219 0020 vs 0008 = 0.574, cam_213 0031 vs 0035 = 0.630). Reconcile CANNOT
+  # rejoin the fragments a shorter buffer creates. So halving the buffer
+  # manufactured more of the exact failure the system has no mechanism to repair,
+  # in every camera at once.
+  #
+  # Compounding it: shorter tracks mean fewer observations per prototype, so every
+  # prototype got noisier, which degrades CROSS-camera matching too -- and
+  # min_tracklet_observations=3 deletes the shortest outright. That is why a change
+  # aimed at one camera's tracker damaged all of them.
+  #
+  # `with_reid: True` with `model: auto` is UNJUDGED. It was bundled with the buffer
+  # change, so this run cannot separate them, and it may well be fine or even
+  # helpful. If it is retried it must go in ALONE, at stock track_buffer: 30, and be
+  # judged on find_track_switches.py plus contact sheets rather than on ids.
+  #
+  # THE ID SWITCHES ARE STILL REAL AND STILL UNFIXED: cam_219:6 and cam_219:14 are
+  # each two people under one track_id, confirmed by eye. This was the wrong remedy,
+  # not a wrong diagnosis. The file is kept at trackers/botsort_reid.yaml with its
+  # rationale intact so the next attempt starts from what was learned.
+  config: bytetrack.yaml     # ships with ultralytics; "botsort.yaml" also works
+
+reid:
+  enabled: true
+  # OSNet-AIN person-ReID weights: same torchreid OSNet family as before, with
+  # Adaptive Instance Normalization for better generalization to unseen (this
+  # project's out-of-domain CCTV) footage. Swapped from plain osnet_x1_0 because
+  # that model's embeddings weren't discriminative enough on this footage
+  # (same-person cross-camera ~0.72 vs different-person ~0.55 -- too close).
+  # FastReID SBS ResNet101-IBN, trained on MSMT17 (1041 identities -- confirmed
+  # from the checkpoint's classifier shape). Upstream MODEL_ZOO numbers on MSMT17:
+  # Rank@1 84.8% / mAP 62.8%, against 83.9% / 60.6% for the R50-ibn variant.
+  #
+  # NOT IN GIT (537 MB, over GitHub's 100 MB per-file limit -- see .gitignore).
+  # Fetch it onto each machine:
+  #   curl -L -o src/reid/weights/msmt_sbs_R101-ibn.pth \
+  #     https://github.com/JDAI-CV/fast-reid/releases/download/v0.1.1/msmt_sbs_R101-ibn.pth
+  # or move it with deploy.sh / scp the way yolo11m.pt is handled (0.75).
+  #
+  # Previous default, still selectable (model: osnet_ain_x1_0, tap: post_relu):
+  #   src/reid/weights/osnet_ain_x1_0.pth  -- 512-d, torchreid OSNet-AIN.
+  weights: src/reid/weights/msmt_sbs_R101-ibn.pth
+  # WHICH BACKBONE computes the embedding. One of the keys registered in
+  # src/reid/backends.py::BACKENDS -- fastreid_sbs_R101_ibn | fastreid_sbs_R50_ibn
+  # | osnet_ain_x1_0 | osnet_ibn_x1_0 | osnet_x1_0. Must AGREE with `weights`
+  # above; the checkpoint guard fails loud on a mismatch rather than emitting
+  # garbage embeddings (verified: an R50 backend refuses the R101 file).
+  #
+  # R50 vs R101 is one line here plus the matching checkpoint -- same backend,
+  # same 2048-d, so it costs no schema change to compare later.
+  #
+  # =========================== SWITCHING THIS ============================
+  # Two consequences, neither optional:
+  #
+  # 1. EVERY THRESHOLD IN THIS FILE IS VOID. 2048-d post-bnneck FastReID
+  #    features are a different space, not better numbers in the same one.
+  #    Measured on random crops: 60.5% of dimensions are NEGATIVE and 0% are
+  #    exactly zero, against OSNet post-ReLU's 0% negative / 21% zero. Cosines
+  #    can now go negative, so the whole scale has moved -- identity.threshold,
+  #    reconcile.threshold, same/cross_camera_threshold and every number in
+  #    Part H all need re-deriving. NEVER compare a score log across backbones.
+  #
+  # 2. THE QDRANT COLLECTION MUST BE REBUILT. 512-d vectors and 2048-d vectors
+  #    cannot share a collection; the store's dimension guard says so at
+  #    startup. Wipe it (main.py --reset, or delete qdrant_data/) before the
+  #    first run on the new backbone.
+  #
+  # Measure before trusting it, on identical footage:
+  #   python tests/calibration/measure_score_separation.py register_file.avi 90 6
+  #   CALIB_REID_MODEL=osnet_ain_x1_0 CALIB_REID_WEIGHTS=src/reid/weights/osnet_ain_x1_0.pth \
+  #     python tests/calibration/measure_score_separation.py register_file.avi 90 6
+  # =======================================================================
+  model: fastreid_sbs_R101_ibn
+  # FEATURE TAP (#39). Where in the network the embedding is taken from.
+  #   post_relu -- what has always shipped. torchreid's OSNet ends in
+  #                fc = Sequential(Linear, BatchNorm1d, ReLU) and eval-mode
+  #                forward() returns that whole block, so the embedding is confined
+  #                to the NON-NEGATIVE orthant: 21% of dimensions are exactly zero,
+  #                0% negative, and therefore the cosine between ANY two embeddings
+  #                is >= 0. That squeeze upward is why different people score as
+  #                high as 0.78-0.94 here.
+  #   post_bn   -- tap before the ReLU, keeping the negative half of the space.
+  #
+  # MEASURED (register_file.avi, both sample sizes): post_bn improved the
+  # separation margin in EVERY scoring mode -- +0.055 -> +0.086 at 48 frames,
+  # +0.108 -> +0.157 at 90 -- and lowered the different-person ceiling from 0.845
+  # to 0.782 and 0.892 to 0.858. The DIRECTION held at both sizes; the magnitudes
+  # did not. At matched false-accept rates recall was comparable, so this buys
+  # CALIBRATION ROBUSTNESS more than raw accuracy on the footage available.
+  #
+  # CHANGING THIS VOIDS EVERY THRESHOLD IN THIS FILE. It is a different feature
+  # space, not a better version of the same one -- same_camera_threshold,
+  # cross_camera_threshold and every number in Part H are all re-scaled. Never
+  # compare a score log across taps.
+  #
+  # To adopt it: switch the tap, then re-derive the bars on a captured run and
+  # watch the videos, all of which is now offline:
+  #   python tests/calibration/measure_score_separation.py register_file.avi 90 6
+  #   python tests/calibration/sweep_reconcile_thresholds.py <run_id> --cross 0.4,0.5,0.6,0.7
+  #   python tests/calibration/rerender_from_clips.py <run_id> --cross <chosen>
+  #
+  # ONLY APPLIES TO THE OSNet BACKENDS. FastReID has no tap to choose: upstream's
+  # EmbeddingHead returns the post-bnneck feature unconditionally at eval, and its
+  # MODEL.HEADS.NECK_FEAT setting affects the TRAINING losses only. So with a
+  # fastreid_* model this must be `n/a` -- the backend RAISES on anything else
+  # rather than accept a key that looks load-bearing and does nothing.
+  # (Convenient side effect: FastReID is post-BN by construction, which is the
+  # side our own #39 measurement preferred.)
+  tap: n/a
+  # #56: crops per forward pass. The batch used to be sized by however many people
+  # were in view, which is an OOM on a smaller GPU exactly when the scene is
+  # busiest. Chunking is embedding-invariant (measured 5.2e-08) because eval-mode
+  # BatchNorm uses running statistics. 0 = unbounded.
+  max_batch: 32
+  device: auto               # auto | cpu | cuda | cuda:N -- same vocabulary as
+                             # live.run.device, resolved by the same helper
+                             # (src/live/capabilities.py::detect_device), so
+                             # "auto" means GPU when one is visible and CPU
+                             # otherwise, and asking for cuda on a box without
+                             # one falls back to cpu with a warning instead of
+                             # failing later mid-run.
+                             # SCOPE: this sets the device for the OSNet ReID
+                             # model on the FILE-BATCH path only. YOLO
+                             # detection/pose never receive a device
+                             # (src/detector.py), so Ultralytics picks CUDA on
+                             # its own whenever a GPU is visible. That is why
+                             # "auto" is the sensible default here: a hardcoded
+                             # cpu would put detection on the GPU and ReID on
+                             # the CPU in the same run. The live path takes its
+                             # ReID device from live.run.device, not this key.
+  interval: 10               # re-embed a given track at most once every N frames
+  # #47: when > 0 this WINS over `interval`, converting to a per-camera frame count
+  # from that camera's own measured rate. `interval` counts PROCESSED FRAMES, so a
+  # slower camera gets proportionally fewer embeddings per SECOND: cam_224 at
+  # 14.8 fps accumulated ~40% fewer observations per second than the 24.8 fps
+  # cameras, handing the weakest prototypes to the camera with the hardest matching
+  # job. 0.4s matches interval:10 at 25 fps, so this is the same rate for the fast
+  # cameras and MORE evidence for the slow one.
+  interval_sec: 0.4
+  ttl: 300                   # forget a track from the cache after N unseen frames
+  warmup_embeddings: 3       # embed the first N successful observations of a new track
+  # #52: frames to leave BETWEEN those warmup embeddings. They used to be taken on
+  # CONSECUTIVE frames -- near-identical crops of one instant, so a "3-view"
+  # prototype was really about one view. That hurts exactly the short tracklets
+  # that most need a strong prototype to clear the same-camera bar. 3 frames is
+  # ~0.12s at 25 fps: different enough to be a second look, far below `interval`
+  # so evidence still accrues quickly. 0 restores the back-to-back behaviour.
+  warmup_spacing: 3
+  # Cap on how many embeddings ONE track_id contributes over its life (0 = off).
+  # A stable track's global id is ALREADY decided once and never re-matched (see
+  # identity/service.py: the (camera, track_id) -> global_id cache), so occlusion
+  # cannot flip a track's id regardless of this knob. This cap is a separate
+  # PRODUCTION lever: it stops re-embedding a settled track, saving forward passes
+  # and keeping later (occluded) frames out of the gallery -- valuable when tracks
+  # run for minutes across hundreds of cameras.
+  #   TRADE-OFF (measured on the sample clip): fewer views -> weaker per-track
+  #   prototype -> the borderline cross-camera match (cosine ~0.87 vs threshold
+  #   0.85) is LOST. So it defaults OFF; only enable it for long-track / high-
+  #   camera-count deployments, and keep it >= reconcile.min_tracklet_observations.
+  max_embeddings_per_track: 0
+  quality:
+    min_keypoint_conf: 0.0  # a joint counts as visible above this confidence
+    min_visible_kp: 0.0      # RECORD ONLY. Not the 0.5 you want -- yet.
+                             #
+                             # Gating at CAPTURE is irreversible: a rejected crop
+                             # is never embedded, so no vector exists and you
+                             # cannot ask "what would 0.4 have done" without
+                             # another capture. Recording it stores the vector AND
+                             # the metric, so one capture answers 0.3 / 0.4 / 0.5 /
+                             # 0.6 offline, and the question that matters --
+                             # does filtering flip 219:33's ranking of 224:32
+                             # (0.654) above 224:31 (0.700) -- is arithmetic over
+                             # vectors already in Qdrant.
+                             # Set 0.5 once the filter says it helps.
+    enabled: true            # reject bad crops before embedding/storing
+    min_width: 24
+    min_height: 64
+    min_area: 2500
+    min_box_area_ratio: 0.002
+    min_blur: 20.0           # Laplacian variance; raise if blurry crops leak in
+    min_brightness: 20.0
+    max_brightness: 235.0
+    min_aspect: 0.20         # width / height
+    max_aspect: 1.20
+    max_occlusion_ratio: 0.5 # reject a crop if another person's box covers more
+                             # than this fraction of it (multi-person crop).
+                             # Tried tightening to 0.35 after the osnet_ain_x1_0
+                             # swap to fight a rare occlusion-triggered false
+                             # merge, but it measurably hurt overall accuracy
+                             # (97% -> 89%) by rejecting too many real crops.
+                             # Reverted -- see identity.verification comments.
+
+# Vector store (Qdrant). Inference owns this gallery end-to-end: it writes
+# embeddings AND assigns identities against it -- no separate registration step,
+# no external service. This is the ONLY store the pipeline uses.
+store:
+  enabled: true
+  path: qdrant_data          # persistent LOCAL Qdrant folder (dev / single process)
+  # For PRODUCTION, point at a Qdrant SERVER instead of the local folder. Set the
+  # url here (non-secret) OR via the QDRANT_URL env var; when a url is present it
+  # overrides `path`. The API key is a SECRET -- read only from the QDRANT_API_KEY
+  # env var (see .env), never from this committed file.
+  url: http://localhost:6333 # local Docker Qdrant server; clear this to use path
+
+# Identity Service (Stage 7): turns stored embeddings into stable global ids,
+# merging tracks/cameras that are the same person into one identity.
+identity:
+  enabled: true
+  threshold: 0.63 # cosine to accept a match (used only when verification.enabled
+                             # is false, below). CALIBRATE per deployment -- measured
+                             # on this project's footage with osnet_x1_0_msmt17:
+                             # different people's prototype cosine tops out ~0.57,
+                             # genuine cross-video same-person matches reach 0.70-0.80.
+                             # Re-measure with
+                             # tests/calibration/measure_score_separation.py
+                             # if the ReID weights or camera domain change. Left at
+                             # 0.63 after the osnet_ain_x1_0 swap: raising it to 0.68
+                             # alongside the verifier changes below measurably hurt
+                             # accuracy (97% -> 89%) and was reverted. Note this knob
+                             # isn't even on the live decision path while
+                             # verification.enabled is true, below -- see there.
+  top_k: 50                  # nearest candidates to consider before deciding
+  bank_size: 20              # recent good embeddings kept per global identity
+  min_score_gap: 0.03        # best identity must beat runner-up by this much
+
+  # ADR-002 Upgrade 1: camera-aware re-ranking (real k-reciprocal + Jaccard,
+  # CVPR'24 CA-Jaccard) over identity prototypes, between raw KNN candidate
+  # retrieval and the accept/reject decision. See src/identity/reranking.py.
+  rerank:
+    enabled: true
+    k1: 8                          # neighbourhood size for reciprocal-set construction
+    cross_camera_k1_boost: 4       # widen k1 by this much for cross-camera reciprocity
+                                    # checks, since cross-camera similarity runs lower
+    lambda_: 0.7                   # final_score = lambda*cosine + (1-lambda)*(1-jaccard_dist)
+
+  # ADR-002 Upgrade 2: verification layer. Replaces the rigid
+  # threshold+min_score_gap gate with a scored combination of signals. This is a
+  # HEURISTIC (hand-set weights) for now -- every decision's feature vector is
+  # logged to log_path so a real MLP/GBT can be trained on accumulated
+  # deployment data later, with no change to the calling code.
+  # See src/identity/verifier.py.
+  verification:
+    enabled: true
+    accept_threshold: 0.55   # P(same identity) must clear this to accept. Tried
+                             # raising to 0.62 after the osnet_ain_x1_0 swap (to
+                             # fight a rare occlusion-triggered false merge), but
+                             # it measurably hurt overall accuracy (97% -> 89%,
+                             # more false splits) and was reverted. The false
+                             # merge is better fixed at its root cause (bad crop
+                             # during occlusion) than by raising the global bar.
+    min_prob_gap: 0.05       # winner must beat runner-up P(same) by this much.
+                             # Same revert as accept_threshold above.
+    log_path: logs/verification_decisions.jsonl
+
+  # Offline reconciliation (Stage 7b): after ALL cameras finish, rebuild global
+  # ids from camera-local tracklets and merge the ones that are the same person
+  # across cameras -- e.g. someone who entered two cameras at the same instant,
+  # which the sticky live decision cannot catch.
+  reconcile:
+    enabled: true
+    # CHANGED 2026-08-05, 0.63 -> 0.55, against OPERATOR LABELS on run 20260805_093512.
+    # Two of the three labelled people fail CROSS-camera, and at 0.63 no same-camera
+    # bar can recover more than 1 of 3 -- the cross bar is the binding constraint and
+    # every previous attempt moved only the same-camera bars. Grid in `scoring` below.
+    threshold: 0.55          # prototype cosine to merge cross-camera; blank = use
+                             # identity.threshold. Set explicitly here because this
+                             # runs independently of the verifier (see verifier.py) --
+                             # it must be recalibrated whenever identity.threshold is.
+                             #
+                             # REVERTED from 0.45 to 0.63 on 2026-08-04, together with
+                             # `scoring` (consensus -> prototype). The pair of numbers
+                             # was live for exactly one run, 20260804_064551, and
+                             # explain_merge_failure.py on that run showed the mode
+                             # change had made the defect WORSE -- see `scoring` below
+                             # for the measurement. Reverting them together because
+                             # each mode has its own scale and they were set together.
+                             #
+                             # ALSO WORTH KNOWING, and the reason this key was never
+                             # the lever for the reported symptom: when two clusters
+                             # SHARE a camera, this threshold is not consulted at all.
+                             # strictest_same_camera_bar() applies instead. On run
+                             # 20260804_064551 the operator's split person was judged
+                             # at 0.90 (cam_219's bar), never at this value.
+                             #
+                             # The superseded 0.45 measurement, kept because it was
+                             # real: on run 20260803_131521 with --scoring consensus at
+                             # consensus_top_frac 0.25,
+                             # sweep_reconcile_thresholds.py --scoring consensus, at
+                             # this file's consensus_top_frac 0.25, i.e. the estimator
+                             # that actually ships:
+                             #   0.40 -> 27 ids, max 3, multi 8, lowest accepted 0.453
+                             #   0.45 -> 27 ids, max 3, multi 8, lowest accepted 0.453
+                             #   0.50 -> 29 ids, max 3, multi 6
+                             #   0.55 -> 31 ids, max 3, multi 4
+                             # 0.40 and 0.45 are BYTE-IDENTICAL, so the answer is
+                             # insensitive across that span; 0.45 is its top edge, the
+                             # highest bar that keeps every link. Above 0.50 the
+                             # cam_219 <-> cam_224 pairings start dying off.
+                             #
+                             # EVERYTHING BELOW THIS LINE IS PROTOTYPE-SPACE HISTORY.
+                             # Kept because the measurements were real, but none of it
+                             # constrains the value above -- consensus is a different
+                             # scale, and comparing a score across modes is the same
+                             # error as comparing one across backbones.
+                             #
+                             # THE VALUE WAS 0.63 AND THE MEASUREMENT BELOW SAYS 0.70.
+                             # That is not an oversight in the measurement, it is a
+                             # revert: commit a77895fe ("back to run 2's reconcile
+                             # settings") put this number back to 0.63 and left the
+                             # comment claiming 0.70, so the file has been arguing
+                             # against itself since 2026-07-30. Corrected here rather
+                             # than silently, because reading a stale narrative beside
+                             # a live number is exactly the trap in Part L.3.
+                             #
+                             # THE MEASUREMENT, which still stands (plan #41, the
+                             # first time this value was ever calibrated). Offline
+                             # sweep on run 20260730_111232: at 0.63 two accepted
+                             # cross-camera merges sat BELOW the measured
+                             # different-person ceiling of 0.661 (0.639 and 0.659),
+                             # and clusters grow by union, so two weak links in a row
+                             # fuse three strangers. At 0.70 that count is 0 while
+                             # identities spanning >1 camera are UNCHANGED -- "the
+                             # only free move in the whole sweep".
+                             #
+                             # CAVEAT that is why it is not simply restored: that
+                             # sweep ran with the cross-camera simultaneity veto OFF
+                             # and Phase-1 mutual-best OFF, because neither was passed
+                             # to reconcile_tracklets by the sweep script (fixed
+                             # 2026-07-31). Both are ON in production, so the numbers
+                             # above describe a clustering that does not ship.
+                             # Re-confirm on the now-faithful sweep, then move value
+                             # and comment TOGETHER. See REMEDIATION_PLAN.md M.4.1.
+                             #
+                             # Run 20260731_060425 shows the cost of 0.63 directly:
+                             # cross-camera merges accepted at 0.649 and 0.677, at or
+                             # below that same 0.661 ceiling, and those foreign
+                             # members are what temporal-veto the correct merge of
+                             # the operator's reid 1 / reid 11 split (Part M).
+                             #
+                             # 0.75 is the open question. It additionally cleans
+                             # reid 10 (a 0.724 link) but SPLITS a 10-tracklet
+                             # cam_213+cam_219 cluster and drops cross-camera
+                             # identities 12 -> 8. Whether that cluster is one
+                             # person is unresolved; do not go to 0.75 until it is.
+                             # Above that it collapses: 0.85 leaves ONE identity
+                             # spanning cameras, which breaks the product claim.
+    same_camera_threshold: 0.90  # stricter merge for fragmented tracks in one camera.
+                                 # GLOBAL DEFAULT -- per_camera below overrides it.
+    # ┌──────────────────────────────────────────────────────────────────────────┐
+    # │ MEASURED IN FASTREID SPACE, 2026-08-04. THIS VALUE IS TOO STRICT.        │
+    # │ Value NOT changed -- see "why not changed yet" at the bottom.            │
+    # └──────────────────────────────────────────────────────────────────────────┘
+    # First re-anchoring measurement since the backbone switch. Until 2026-08-04 it
+    # could not be taken at all: measure_score_separation.py crashed on FastReID
+    # (it reached into torchreid OSNet's `fc` block for its tap comparison), so
+    # there was no way to derive a threshold for the model actually running. Fixed;
+    # both scripts below now run on any backend.
+    #
+    #   python tests/calibration/measure_reconcile_thresholds.py register_file.avi 48 4
+    #   python tests/calibration/measure_score_separation.py   register_file.avi 48 6
+    #
+    # A. SAME PERSON, prototype vs prototype (one track split into two DISJOINT
+    #    halves -- exactly what a dropped-then-reacquired track looks like):
+    #        0.75 -> 100.0% of fragments merge
+    #        0.80 -> 100.0%
+    #        0.85 ->  75.0%
+    #        0.90 ->  50.0%   <-- THE CONFIGURED VALUE. Half are refused.
+    #        0.95 ->  25.0%
+    #
+    # B. DIFFERENT PEOPLE, proven distinct by co-occurrence in one frame (needs no
+    #    operator labels -- one body cannot be two simultaneous detections):
+    #        n=6  mean=0.276  p95=0.427  MAX=0.434
+    #        0% wrong merges at 0.63 AND at 0.90 -- strangers are nowhere near.
+    #
+    # C. THE WINDOW:
+    #        same-person fragments  min=0.810  p5=0.821
+    #        different people       MAX=0.434  p95=0.427
+    #        any bar in (0.434, 0.810) is PERFECT on this sample.
+    #        0.90 is OUTSIDE it, above the fragment distribution.
+    #
+    # Corroborated independently by measure_score_separation.py on the same clip:
+    # the different-person ceiling is ~0.46-0.50 across all four scoring modes and
+    # STABLE between 24 and 48 frames (prototype MAX 0.503 -> 0.477), while
+    # same-person p5 is 0.594. The feature space itself confirms the old bars do not
+    # belong here: 62.2% of dimensions NEGATIVE and 0% exactly zero, against OSNet
+    # post-ReLU's 0% negative / 21% zero.
+    #
+    # WHICH VALUE THE EVIDENCE SUPPORTS: 0.80, not the window's midpoint. The two
+    # failure modes are asymmetric -- too low fuses two people (unrecoverable), too
+    # high splits one person (reconcile can still fix it) -- so per the "prefer a
+    # split" bias, pick near the TOP of the window. 0.80 still merges 100% of
+    # fragments and keeps +0.37 of headroom over the measured stranger MAX for when
+    # the sample grows. Note cam_213 and cam_224 already override to exactly 0.80,
+    # so this would only move cam_219 and cam_206.
+    #
+    # WHY NOT CHANGED YET: `MAX` grows with sample size and n=6 proven-distinct
+    # pairs is small, so the window's LOWER edge is soft (its upper edge, from the
+    # fragment distribution, is the one that bounds the bar and is the side that
+    # matters). More importantly, a bar must be watched on video before it ships --
+    # two settings previously chosen from numbers alone made the videos worse. Rank
+    # first, then look:
+    #   python tests/calibration/sweep_reconcile_thresholds.py <run_id> \
+    #     --same "cam_219=0.90,cam_224=0.80 ; cam_219=0.80,cam_224=0.80"
+    #   python tests/calibration/rerender_from_clips.py <run_id> --same "cam_219=0.80,cam_224=0.80"
+    # Then move the value and this block TOGETHER.
+    #
+    # ALSO SUPERSEDED IF YOU DO: the note under per_camera below says cam_219 is
+    # "deliberately LEFT at the global 0.90". That was written in OSNet space about a
+    # July run, and lowering the global overrides it.
+
+    # PER-CAMERA same-camera bars (REMEDIATION_PLAN.md #40). Only
+    # `same_camera_threshold` is honoured here; any other key is IGNORED with a
+    # warning (see reconcile.resolve_same_camera_thresholds), because `threshold` is
+    # a property of a camera PAIR and the rest are whole-run settings. Camera names
+    # are the runtime names -- stream URLs are auto-named cam_<last-IP-octet>, so
+    # replacing a camera renames it and this block must follow. A name that produces
+    # no tracklets is reported in the reconcile log rather than silently ignored.
+    #
+    # WHY THIS IS NOT ONE GLOBAL NUMBER. Measured on run 20260730_093723 (286
+    # decisions, 4 cameras) with the analyser in tests/calibration: the per-subject
+    # same/different boundaries OVERLAP across cameras -- p95 of the "top different"
+    # score (0.816) is ABOVE p5 of the "worst same" score (0.719) -- so no single
+    # bar separates cleanly. Eligible same-camera partners per subject at 0.90:
+    #
+    #     cam_206: 9.0 (55 subjects,  6 with none)   <- 0.90 works here
+    #     cam_224: 0.5 (17 subjects, 12 with none)
+    #     cam_219: 0.3 ( 6 subjects,  4 with none)
+    #     cam_213: 0.0 (11 subjects, 11 with none)   <- ZERO merges, ever
+    #
+    # A camera with no same-camera merging cannot join one person's front-view and
+    # back-view fragments, so each fragment is absorbed cross-camera into a
+    # DIFFERENT cluster: that is the observed "reid 2 by his front, reid 7 by his
+    # back" in cam_213 and "reid 3 becomes reid 7 at a bad angle" in cam_224.
+    # 37% of all subjects had no eligible partner; the highest score the bar
+    # rejected was 0.899.
+    #
+    # cam_219 is deliberately LEFT at the global 0.90 even though it also orphans
+    # (4 of 6): it has only 7 tracklets, mean 264 observations each, so it has
+    # little fragmentation to repair and changing it would confound this run's
+    # comparison. Move it only after diffing this run against the previous one.
+    #
+    # These two values are a HYPOTHESIS from one run, not a calibration (decision
+    # D9). Change ONE thing, re-run, and diff the analyser's sections 1/2/5:
+    #   python tests/calibration/analyze_decision_log.py logs/reconcile_decisions_<run_id>.jsonl
+    # MEASURED on run 20260730_111232 with
+    # tests/calibration/sweep_reconcile_thresholds.py, which re-clusters a
+    # finished run's stored observations offline -- so both values below were
+    # chosen from real data, not from one live run each.
+    # ===================== CHANGED 2026-08-05, AGAINST LABELS =====================
+    # cam_219 0.90 -> 0.55 (it had NO override and inherited the global) and
+    # cam_213 0.80 -> 0.55. This is the FIRST threshold change in this project chosen
+    # against operator-confirmed pairs rather than against an identity count, which is
+    # how all seven reverted changes were chosen. Tool:
+    #   python tests/calibration/sweep_against_labels.py 20260804_064551
+    #
+    # It runs the REAL reconcile over the run's REAL stored vectors at every cell of a
+    # 2-D bar grid and scores each cell on two things that are labelled or provable:
+    #   * the 3 operator-confirmed same-person pairs (CLAUDE.md 3b) -- one cluster?
+    #   * PROVABLE false merges: 28 pairs co-present in one camera for >0.5s, which
+    #     are two people by construction -- did any land in one cluster?
+    #
+    #   cam_213 ->      0.90    0.80    0.70    0.60    0.55    0.50
+    #   cam_219 0.90     1/3     1/3     2/3     2/3     2/3     2/3      <- SHIPPED
+    #   cam_219 0.80     1/3     1/3     1/3     2/3     2/3     2/3
+    #   cam_219 0.70     2/3     2/3     2/3     2/3     2/3     2/3
+    #   cam_219 0.60     2/3     2/3     2/3     3/3     3/3     3/3
+    #   cam_219 0.55     2/3     2/3     2/3     3/3     3/3     3/3      <- CHOSEN
+    #   cam_219 0.50     2/3     2/3     2/3     3/3     3/3     3/3
+    #
+    # PROVABLE FALSE MERGES WERE **ZERO IN ALL 36 CELLS**, including 0.50/0.50. The
+    # false-merge fear that has driven every conservative choice here does not
+    # materialise on this run at any bar. Identities go 15 -> 8.
+    #
+    # WHY 0.55/0.55 AND NOT THE LOOSEST OR THE STRICTEST 3/3 CELL. It is the
+    # strictest cell with all four neighbours also clean, so it survives a +/-0.05
+    # step in either bar. 0.70/0.63 also reaches 3/3 but is ISOLATED -- a single clean
+    # cell is fitted to three labels, a 3x3 plateau is not.
+    #
+    # WHAT IS NOT ESTABLISHED, and this is the honest limit:
+    #   * n = 3 labelled pairs. A hypothesis with a plateau, not a calibration.
+    #   * "zero provable false merges" is NECESSARY, NOT SUFFICIENT. Co-presence can
+    #     only convict pairs that share a frame; two people who never co-occur can
+    #     still be fused and this reference cannot see it.
+    #   * 15 -> 8 identities is a big move and a COUNT CANNOT JUDGE IT (section 4).
+    #   * IT HAS NOT BEEN WATCHED. Run 20260804_064551's clips were overwritten (see
+    #     CLAUDE.md 7), so watch it on 20260804_120409, which still has footage:
+    #       python tests/calibration/rerender_from_clips.py 20260804_120409 \
+    #           --same "cam_219=0.55,cam_213=0.55"
+    #     REVERT IS THESE TWO VALUES. If it over-merges on video, put cam_219 back to
+    #     0.90 and cam_213 to 0.80 and record what you saw here.
+    # ==============================================================================
+    # Waives cross-camera reciprocal-best for pairs scoring at or above this.
+    # 0.0 = OFF, the shipped behaviour: a pair must be each other's single best.
+    #
+    # WHY: with three similar people in one room, mutual-best deadlocks -- A's
+    # best is X, X's best is B, so neither pair is mutual and both are refused.
+    # Run 20260806_095141: 10 cross-camera merges refused at 0.677-0.773, only 2
+    # accepted. Turning reciprocal-best fully OFF instead produced a false merge
+    # (guy A's cam_224 tracklet absorbed into guy B's cluster). This is the
+    # middle position.
+    #
+    # CHOOSING A VALUE. Above the run's provable-stranger p95, never below.
+    # 20260806_095141 measured p95 0.627, max 0.779 -- so 0.70 waives the guard
+    # only for pairs stronger than 95% of known strangers, while 0.60 would waive
+    # it for pairs weaker than some of them.
+    #     python tests/calibration/compare_backbones_on_run.py <run>   # prints p95
+    #
+    # WATCH THE VIDEO. This can only ADD merges, and a false merge fuses two
+    # people's histories with no un-merge available (CLAUDE.md section 5).
+    reciprocal_best_waiver: 0.0
+    per_camera:
+      cam_219:
+        same_camera_threshold: 0.60
+        # Had NO override until now, so it inherited the global 0.90. The note below
+        # claiming it was "deliberately LEFT at 0.90" is SUPERSEDED: its stated
+        # premise was "only 7 tracklets, mean 264 observations each, so little
+        # fragmentation to repair", and on 20260804_064551 cam_219 has 15 tracklets
+        # with ZERO of 23 eligible same-camera pairs clearing 0.90 -- measured on all
+        # five surviving runs, 0 of 114. Its confirmed pair scores 0.574 and its
+        # measured co-present stranger max is 0.458, so the window is (0.458, 0.574].
+        # The LIVE path already moved for the same reason and sits at 0.70
+        # (live.identity.same_camera_threshold, lowered twice off "29/42 same-camera
+        # reacquisitions failed JUST under 0.90, max 0.898"); offline was the last
+        # holdout at 0.90 and nothing recorded the divergence.
+      cam_213:
+        same_camera_threshold: 0.60
+        # WAS 0.80, whose note read: "KEPT at 0.80. The operator's front/back
+        # complaint in this camera is tracklets 46+51, which merge at 0.815 -- at
+        # 0.85 they split again and the symptom returns. None of the three confirmed
+        # false merges (reid 5, 6, 10) involved a cam_213 same-camera merge."
+        # That is still true and 0.55 does not contradict it -- 0.815 clears 0.55 too.
+        # What 0.80 could NOT do is merge cam_213's own confirmed pair 31+35 at
+        # 0.630, which no cell at 0.70 or above reaches. cam_213 also has FEWER THAN 3
+        # co-present pairs in every run, so it has no stranger reference at all and
+        # its bar cannot be bounded from below by measurement -- the label is the only
+        # evidence there is, which is a reason to watch this camera first
+        
+      cam_224:
+        same_camera_threshold: 0.60
+      # REVERTED to 0.80 on 2026-07-30, after the operator watched the videos.
+      #
+      # The reasoning for raising it to 0.90 is below and still reads well; the
+      # OUTPUT got worse anyway. Raising it split one person into many numbers,
+      # which the operator rated worse than the false merges it removed. Both
+      # states are wrong -- that is #45a -- but this is the one that was rated
+      # less wrong on screen, so this is where the config sits until a change is
+      # validated on a re-rendered video BEFORE it ships.
+      #
+      # Superseded reasoning, kept because the measurements were real:
+      #
+      # It caused two of the three false merges the operator saw:
+      #   reid 6  <- cam_224 58+112 @ 0.823 and 58+120 @ 0.872
+      #   reid 5  <- cam_224 26+110 @ 0.845
+      # Raising it back to the global 0.90 removes exactly those tracklets and
+      # nothing else; 0.87 is NOT enough (it keeps 120 via the 0.872 merge).
+      #
+      # Why the J.6 evidence for 0.80 stopped applying: it was measured when
+      # cam_224 and cam_213 were fed by yolo11n. With yolo11m, cam_213 went from
+      # 85 observations to 1400 (mean 7.7 -> 28.6 per tracklet). Prototypes built
+      # from ~7 crops are noisy, which is WHY nothing cleared 0.90 back then. The
+      # detector change fixed the cause; the lowered bar then became pure risk.
+      # Tightening it also RAISED identities spanning >1 camera (9 -> 12), because
+      # over-merged same-camera clusters had been swallowing tracklets that should
+      # have formed their own cross-camera identity.
+      #
+      # Do not re-add cam_224 here without re-running the sweep -- and if the
+      # detector changes again, re-derive BOTH cameras.
+
+    # HOW TWO TRACKLETS ARE COMPARED (REMEDIATION_PLAN.md #45a).
+    #   prototype     -- cosine of the two MEANS. What has always shipped.
+    #   max_exemplar  -- max(prototype, best single observation pair). What the
+    #                    live engine uses, documented there as "more robust than a
+    #                    mean alone when a person flips front/back".
+    #   consensus     -- mean of the top `consensus_top_frac` of all observation
+    #                    pairs. Needs MANY matching views, not one.
+    #
+    # WHY THIS EXISTS. A mean is the wrong summary for a person who changes
+    # appearance mode. Someone seen front-on and then from behind has two clusters
+    # of observations and their mean sits between them, matching NEITHER view -- so
+    # their own two fragments score LOW, while two different people in similar
+    # clothing, whose means both sit in the "average person" region, score HIGH.
+    # That is why J.6 found the per-subject boundaries OVERLAPPING and why no
+    # threshold worked from either direction: 0.80 in cam_224 fused strangers into
+    # one reid, 0.90 shattered one person into many.
+    #
+    # Measured on the synthetic front/back counterexample
+    # (tests/live/test_reconcile_scoring_modes.py, 23 checks):
+    #   prototype    one person's two visits 0.640, BELOW two strangers at 0.800
+    #   max_exemplar same person 1.000, strangers 0.800  -- ordering fixed, BUT one
+    #                bad crop in ten fuses two people (1.000)
+    #   consensus    same person 1.000, strangers 0.800, and the same bad crop
+    #                scores only 0.880 -- fixes the split WITHOUT that hole
+    # Part H agrees independently: consensus had the lowest different-person
+    # ceiling of the three modes at both sample sizes.
+    #
+    # TRIED `consensus` ON 2026-08-04 AND REVERTED THE SAME DAY. It ran for exactly
+    # one run, 20260804_064551, and made the reported defect WORSE. This is the sixth
+    # tuning change to be reverted for hurting accuracy (CLAUDE.md section 3).
+    #
+    # THE MEASUREMENT THAT REVERTED IT --
+    # explain_merge_failure.py 20260804_064551 1 2, per shared camera, one person's
+    # own two fragments scored against that camera's bar:
+    #
+    #   camera    fragment pair            prototype   max_exemplar   consensus   bar
+    #   cam_213   0031 vs 0035             0.630 fail   0.663 fail    0.567 fail  0.80
+    #   cam_219   0020 vs 0008             0.574 fail   0.600 fail    0.468 fail  0.90
+    #   cam_224   0001 vs 0030             0.907 PASS   0.907 PASS    0.582 fail  0.80
+    #
+    # Consensus LOWERED all three, and cam_224's pair crossed from PASS to FAIL --
+    # which is exactly the operator's "cam_224 went reid 1, then reid 2, then back to
+    # reid 1". Under prototype those two fragments merge in Phase 1 and that
+    # flip-flop does not happen. max_exemplar is weakly the best of the three on
+    # every row, and is what the live engine already uses -- the obvious next
+    # candidate, but it must be watched on video before it ships, not reasoned about.
+    #
+    # WHY THE SWEEP DID NOT CATCH THIS: sweep_reconcile_thresholds.py reports
+    # cluster SHAPE (ids, max, multi). Consensus looked better there -- max cluster 3
+    # instead of 7 -- and that reading was wrong, because no headcount existed to say
+    # whether 7 was a weld or a correctly-followed person. It was a person. Judge a
+    # mode on the FRAGMENT-PAIR table above, which explain_merge_failure.py prints,
+    # not on cluster counts.
+    #
+    # ORIGINAL REASONING FOR THE CHANGE, kept because the front/back argument still
+    # stands and only the remedy was wrong:
+    #
+    # THE SYMPTOM IT FIXES, reported by the operator: one person carried a DIFFERENT
+    # reid in cam_219 than in cam_224, front angle vs back angle, and offline
+    # reconcile did not repair it. That is this block's opening paragraph happening
+    # in production -- and cam_219 + cam_224 SHARE A ROOM, so they see opposite sides
+    # of the same person AT THE SAME INSTANT. A mean over front and back views is
+    # then the worst possible summary, systematically, not occasionally.
+    #
+    # MEASURED on run 20260803_131521 (3 cameras, 1753 observations) with
+    # sweep_reconcile_thresholds.py --scoring prototype,consensus. The sweep reads
+    # consensus_top_frac from this file, so its consensus rows ARE this estimator:
+    #
+    #   prototype, cross 0.50..0.80 : max cluster stays 7 at EVERY bar
+    #   consensus, cross 0.40..0.80 : max cluster is 3 at EVERY bar
+    #
+    # Under prototype, cam_224's tracklets 1/48/79/103 were welded together
+    # same-camera and no cross-camera bar could separate them -- exactly the "a
+    # cluster welded inside a camera cannot be split by any cross bar" case. That
+    # weld is why cam_219 had nothing to link to. Under consensus the weld does not
+    # form at any bar, and each cam_219 tracklet pairs with ONE cam_224 tracklet:
+    #   219(49)->224(48)  219(10)->224(79)  219(11)->224(5)   219(12)->224(3)
+    #   219(85)->224(77)  219(112)->224(103) 219(116)->224(1)
+    # Four of those pairings (112/103, 116/1, 12/3, 10/79) prototype never made at
+    # ANY threshold.
+    #
+    # NOT EVIDENCE, deliberately: the identity COUNT. People walk in and out of this
+    # room, so no run has a count to hit, and CLAUDE.md section 4 is the standing
+    # reminder that a count cannot tell one person from three.
+    #
+    # STILL UNVERIFIED, and the reason to watch the next run's video: whether the
+    # clusters above are correct, and consensus's own different-person ceiling, which
+    # has never been measured in FastReID space. Re-derive the same-camera bars too --
+    # consensus also re-pairs cam_213 (88+93 under prototype, 88+119 here).
+    # PHASE 2's same-camera bar, separate from PHASE 1's above. null = use Phase 1's
+    # value, which is byte-identical to everything shipped so far.
+    #
+    # WHY THE TWO WERE EVER ONE NUMBER, AND WHY THAT IS THE BUG. Both phases can
+    # assert "these same-camera pieces are one person", but on very different
+    # evidence: Phase 1 compares two SINGLE tracklets, Phase 2 compares two CLUSTERS
+    # that are each already assembled from several tracklets, denoised over far more
+    # observations, and already past their own Phase-1 and reciprocal-best checks. A
+    # cluster-level agreement at cosine X is stronger evidence than a tracklet-pair
+    # agreement at the same X, so holding both to one number over-constrains Phase 2.
+    #
+    # MEASURED, run 20260804_064551 (the operator's reported split):
+    #   the person's two clusters each span cam_213 + cam_219 + cam_224, so
+    #   strictest_same_camera_bar picks cam_219's 0.90 -- and they score 0.840.
+    #   The join fails by 0.060.
+    #   Lowering cam_219 to 0.80 DOES open it, but the same lowering simultaneously
+    #   admits three unverified PHASE 1 pairs in cam_219 (16+39 0.897, 42+49 0.866,
+    #   8+38 0.855 -- the last is the wrong capture the per_camera note warns about).
+    #   Re-rendered and confirmed: exactly those three Phase-1 merges, no cluster
+    #   join, 15 -> 12 identities. One number cannot serve both phases.
+    #
+    # Capped at each camera's Phase-1 bar, so this can only ever RELAX Phase 2, never
+    # tighten it -- a claim with more evidence must not face a stricter standard.
+    #
+    # DIRECTION OF RISK, stated plainly: this LOWERS a bar, and a false merge fuses
+    # two people's histories, which is the unrecoverable error (CLAUDE.md section 5).
+    # That is why it ships null. What bounds the risk is that Phase 2 still requires
+    # reciprocal-best between clusters and still applies every HARD physical veto
+    # (same-camera time overlap, cross-camera co-presence, geometric reachability),
+    # none of which any appearance score can override.
+    #
+    # TO ADOPT IT: sweep, then WATCH, then move this value and this comment together.
+    #   python tests/calibration/sweep_reconcile_thresholds.py <run_id>
+    #   python tests/calibration/rerender_from_clips.py <run_id>   # prints every merge
+    # Judge it on whether the operator's person carries ONE id across cameras, never
+    # on the identity count (section 4). Regression-pinned by
+    # tests/live/test_reconcile_cluster_bar.py (11 checks, incl. that null is a no-op).
+    cluster_same_camera_threshold: null
+
+    # ============ MEASURED 2026-08-05: max_exemplar is the better mode ============
+    # NOT YET ADOPTED, deliberately -- the mode and the bar must move together (a mode
+    # change voids every threshold, see below), and bundling two changes is what sank
+    # the tracker attempt. Adopt it AFTER a capture with real labels.
+    #
+    # Scored on run 20260804_064551 against the 3 operator-confirmed pairs plus 28
+    # PROVABLE strangers (co-present in one camera >0.5s), via
+    #   python tests/calibration/sweep_against_labels.py 20260804_064551
+    # Best setting reaching ALL 3 labels with ZERO provable false merges:
+    #
+    #     mode           bar    identities   time     note
+    #     prototype      0.55            8   0.13s    what ships now
+    #     max_exemplar   0.65            7   0.22s    +0.10 MORE MARGIN
+    #     consensus       --            --     --     never reaches 3/3 (best 2/3)
+    #     view_medoid     0.65           8   2.65s    12x slower, no gain over max_ex
+    #
+    # max_exemplar reaches the same 3/3 at a bar 0.10 HIGHER, i.e. with more headroom,
+    # for ~0.1s. It independently corroborates AGENT_BRIEF, which already measured it
+    # as the only mode with a positive margin in EVERY camera (+0.075 cam_219,
+    # +0.212 cam_224, +0.280 cam_213). Two separate lines of evidence agree.
+    #
+    # ITS KNOWN RISK, unchanged: max over observation pairs means ONE bad crop can
+    # match a stranger at ~1.0. The sweep found zero provable false merges at every
+    # bar down to 0.50 -- but 28 co-present pairs is a weak net for exactly that
+    # failure, because it can only convict people who share a frame.
+    #
+    # AND A CLEAN NEGATIVE WORTH NOT REPEATING: raising max_observations_per_side from
+    # 64 to 0 (ALL observations) changes the label and false-merge results NOT AT ALL,
+    # in every mode. Median observations per tracklet on that run is 8, so the cap of
+    # 64 was never binding. "Compare more embeddings" is already happening; what limits
+    # accuracy is the POOLING FUNCTION (a mean throws view information away), not the
+    # sample size. Do not spend time raising the cap.
+    # ==============================================================================
+    scoring: prototype
+    consensus_top_frac: 0.25   # what FRACTION of observation pairs must agree.
+                               # Part H's "top half" was measured on whole tracks,
+                               # where most view pairs match; between a mostly-front
+                               # fragment and a mostly-back one only a minority do
+                               # (32 of 100 in the fixture), so 0.5 averages in
+                               # mismatched pairs and buries the signal at 0.727.
+                               # Lower = closer to max_exemplar and its weakness.
+    max_observations_per_side: 64   # cap per tracklet/cluster for the pairwise
+                                    # product; evenly spaced, never random, so a
+                                    # replay reproduces the score exactly. 0 = no cap.
+
+    # RECIPROCAL BEST in the SAME-CAMERA phase (plan item, operator's priority 3).
+    # Phase 2 has always required two clusters to be each other's best partner;
+    # Phase 1 never did, so it merged EVERY above-bar pair in score order. That is
+    # how one weak edge pulls a stranger in: in run 20260730_111232, cam_224's
+    # tracklet 58 had its best partner at 0.937 (16) and yet ALSO merged with 112
+    # at 0.823 and 120 at 0.872, fusing two people into one reid. Mutual-best
+    # refuses both without moving any threshold -- it removes the over-merge /
+    # under-merge trade instead of repositioning it.
+    #
+    # COST: someone fragmented into 3+ pieces gets only one mutual-best pair per
+    # round in Phase 1; the rest consolidate in Phase 2's rounds instead, so they
+    # arrive later rather than never.
+    #
+    # Test with NO other change, on a captured run, and watch the video:
+    #   python tests/calibration/rerender_from_clips.py <id> --same-reciprocal
+    # That flag was DOCUMENTED HERE BUT NEVER PARSED until 2026-07-31, so the test
+    # this line describes silently measured no change at all. It works now, and the
+    # re-render also inherits this key from config, so the default already matches
+    # production and the flag is only needed to force it on. See Part M.7 item M-c.
+    same_camera_reciprocal_best: true
+
+    # ITERATE PHASE 1 (REMEDIATION_PLAN.md M.9.11). OFF = one pass, which is what
+    # has always shipped.
+    #
+    # Phase 1's own comment used to claim that a person fragmented into 3+ pieces
+    # would be consolidated later by Phase 2's rounds. That is false: Phase 2's
+    # `mergeable_cross` requires a CROSS-camera member pair, so two clusters that
+    # both sit in one camera are excluded outright and the promised consolidation
+    # never happens.
+    #
+    # Measured on run 20260731_060425, cam_206, ONE person in three fragments:
+    #     206/26 <-> 206/43 = 0.916  merged (each other's best)
+    #     206/12 <-> 206/43 = 0.906  ABOVE the 0.90 bar, REFUSED
+    # 12's best partner is 43; 43's best is 26. Mutual-best rejected an edge that
+    # cleared the bar by 0.006, 12 was orphaned, and it was then captured
+    # cross-camera at 0.771 into a DIFFERENT person's identity -- the operator's
+    # "it misidentified someone in cam_206 as reid 1, then a few seconds later they
+    # get reid 6". No bar fixes this: the edge is already above the bar, and
+    # lowering cam_206 to 0.85/0.80 leaves 206/12 exactly where it was while fusing
+    # cam_206's crowd (25 -> 21 -> 20 identities).
+    #
+    # ON lets a fragment compete against the CLUSTER its sibling formed instead of
+    # losing once and never being reconsidered. It relaxes nothing: every merge
+    # still clears that camera's bar and still has to be a mutual best. Round 1 is
+    # identical to the single pass by construction, so OFF is exactly the old
+    # behaviour.
+    #
+    # Test it alone, on a captured run, and watch cam_206 at 0-7s:
+    #   python tests/calibration/sweep_reconcile_thresholds.py <id> --same-rounds
+    #   python tests/calibration/rerender_from_clips.py <id> --same-rounds
+    same_camera_rounds: true
+# MUTUAL-EXCLUSION AMBIGUITY MARGIN (Phase 2 only). 0.0 = OFF, which is what
+    # has always shipped.
+    #
+    # Refuses a cluster's merge when its top TWO eligible candidates are PROVABLY
+    # different people -- they carry a hard temporal conflict with each other --
+    # and their scores differ by less than this. At most one of them can be the
+    # right answer, so a small gap makes the pick a coin flip.
+    #
+    # MEASURED, run 20260805_115845, operator-confirmed. {cam_219:33, cam_219:39}
+    # chose {cam_224:31,45,55} at 0.700 over {cam_224:32} at 0.654 -- and
+    # cam_224:32 was the right person. The two candidates are co-present in
+    # cam_224 for 4.1s over 13 instants, so they are provably two people.
+    #
+    # THE GAP IS SMALLER THAN THE BIAS IT LOST TO. Cluster prototypes are means of
+    # means, so they denoise with member count: cam_224:32 scores 0.596 / 0.595 /
+    # 0.552 against the winner's three members individually but 0.666 against
+    # their mean. A 47-observation cluster beat an 11-observation singleton on
+    # evidence volume, not on similarity.
+    #
+    # AND THE WRONG PICK CANNOT BE UNDONE. Once cam_224:31 was in, cam_224:32 was
+    # co-present with a member and vetoed in every later round. The operator saw
+    # this as "reid 11 in cam_224 was reid 4 in cam_213 and reid 9 in cam_219".
+    #
+    # WHY NOT top2_margin INSTEAD: analyze_decision_log section 3 measured 86.7%
+    # of same-camera near-ties as one person's own fragments, where a blanket
+    # margin gate REJECTS CORRECT MERGES. This gate requires the runner-up to be
+    # a provably different person, so it cannot fire on fragmentation.
+    #
+    # PREDICTED EFFECT on 20260805_115845, checked against the decision log
+    # before this was written: exactly ONE merge disappears, the wrong one
+    # (219:33 + 224:31 @ 0.700). Every other accepted merge has a runner-up gap
+    # of 0.125 or more, or only one eligible candidate. If anything else changes,
+    # this patch is wrong -- revert to 0.0.
+    #
+    # STILL REQUIRED: watch it.
+    #   python tests/calibration/rerender_from_clips.py 20260805_115845
+    exclusive_ambiguity_margin: 0.05
+    # CROSS-CAMERA SIMULTANEITY VETO (#38, Phase 7). conflict() used to skip every
+    # cross-camera pair, so two tracklets overlapping IN TIME in cameras that
+    # cannot both see one person still merged on appearance alone. A person in
+    # cam_213 and a different person in cam_219 at the same moment is a physical
+    # impossibility no cosine can excuse -- and it is a leading candidate for the
+    # "one number on two people" symptom, which no threshold addresses.
+    #
+    # Needs wall-clock `ts`, which reconcile now reads (#26); frame indices are
+    # per-camera and not comparable at 15 vs 25 fps.
+    #
+    # `covisible` = never vetoed. A number = veto when the two tracklets overlap by
+    # MORE than that many seconds. A pair NOT listed is unconstrained (decision D1:
+    # silence loses protection rather than splitting a real person), and startup
+    # names every unlisted pair so that is visible instead of silent.
+    #
+    # Tolerances are generous on purpose: `ts` is RECEIVE time, not capture time
+    # (#15), so it carries network jitter, decode-cost differences and frame-rate
+    # quantisation. 1.0s vetoes only sustained overlap, not timing noise.
+    #
+    # OFF by default -- it has never run on real footage. Turn on ALONE.
+    # ANCHOR CAMERA. null = OFF, which is what has always shipped.
+    #
+    # anchor_camera alone changes only Phase 2's MERGE ORDER: pairs touching the
+    # anchor are merged first, while the other side is still a singleton and
+    # therefore faces the cross-camera threshold rather than the stricter
+    # strictest_same_camera_bar it would face after 219<->224 had already merged.
+    # Everyone still gets an identity. Reversible, no new state.
+    anchor_cameras: [cam_213]        # e.g. cam_213
+
+    # require_anchor turns it into an ENROLMENT rule: a cluster with no anchor
+    # member is UNREGISTERED -- global_id cleared, renders as UNRESOLVED.
+    #
+    # ON RUN 20260806_073648 THIS WOULD UNREGISTER 10 OF 13 IDENTITIES. Only
+    # GID 3, 4 and 5 contained a cam_213 member. Everyone who never crossed
+    # cam_213, and every cam_219/cam_224 tracklet that failed to LINK to one,
+    # loses their identity.
+    #
+    # TWO THINGS TO VERIFY ON VIDEO BEFORE ENABLING:
+    #   1. Can anyone reach the cam_219/cam_224 room without passing cam_213?
+    #      live.topology calls it "the only way in/out" but that has never been
+    #      checked. If it is wrong, those people are permanently unregistered.
+    #   2. cam_213 is the weakest camera in the system -- 14.9 observations per
+    #      tracklet on that run, 11 suppressed, 2 of 464 cross-camera pairs
+    #      merged. A failed cam_213 link now costs a person their identity
+    #      rather than costing them one link.
+    require_anchor: false
+    covisibility:
+      enabled: true
+      default_tolerance_sec: 1.0
+      pairs:
+        - [cam_224, cam_219, covisible]   # same room, overlapping views
+        - [cam_213, cam_219, 1.0]
+        - [cam_213, cam_224, 1.0]
+        - [cam_213, cam_206, 1.0]
+        - [cam_206, cam_219, 1.0]
+        - [cam_206, cam_224, 1.0]
+
+    min_tracklet_observations: 3  # a real identity needs >= this many observations;
+                                   # shorter tracks are detector noise, not people
+    require_reciprocal_best: false     # merge a pair only if they are each other's best
+                                       # match -- stops look-alike over-merging on
+                                       # weak/out-of-domain models. See reconcile.py.
+
+    # ---- Phase 1 instrumentation (REMEDIATION_PLAN.md) ----------------------
+    # Records EVERY merge decision -- accepted and rejected alike -- with all six
+    # gates evaluated independently (no short-circuiting) and the full annotated
+    # candidate vector. Purely diagnostic: it changes no decision, which
+    # tests/live/test_phase1_decision_log.py asserts by comparing the reconciled
+    # result with and without a log attached.
+    #
+    # Before this existed reconcile emitted four log lines, all of them successes,
+    # so "why did this merge NOT happen" was unanswerable -- which is why four
+    # rounds of threshold tuning were reverted without learning anything.
+    #
+    # <run_id> is substituted with the run timestamp. Blank/null disables logging.
+    decision_log: logs/reconcile_decisions_<run_id>.jsonl
+
+    top2_margin:
+      # Runner-up margin: "is there a UNIQUELY plausible match", which is a
+      # different question from the absolute threshold's "is there a plausible
+      # match". Reconcile has never had this rule (reciprocal-best fills the role),
+      # so it ships INERT and is enabled only once the logged distribution shows it
+      # rejects something reciprocal-best does not. See REMEDIATION_PLAN.md Phase 9.
+      threshold: null        # null = computed and logged, ENFORCES NOTHING
+      # Which variant would gate if a threshold were set. Exactly one can ever
+      # gate -- there is no way to express "both" -- because gating on two margins
+      # at once makes the system much harder to reason about and tune.
+      #   eligible    -- runner-up over candidates that survived the
+      #                  ranking-independent hard constraints (selection safety:
+      #                  a candidate that can never be picked should not suppress
+      #                  a good merge)
+      #   all_scored  -- runner-up over everything above the floor (evidence
+      #                  quality: a near-tie means the embedding cannot separate
+      #                  the two, whether or not the runner-up is available)
+      # Both are ALWAYS logged regardless; this only picks the one that could gate.
+      basis: eligible
+
+# =============================================================================
+# GEOMETRY (src/geometry/) -- where people are standing, used ONLY to rule out
+# the physically impossible. Not a tracker: nothing here does 3D tracking, and
+# nothing here can create or merge an identity. It can only refuse a merge.
+#
+# THE ONE RULE EVERYTHING ELSE FOLLOWS FROM:
+#   The LIVE RUN records geometry. OFFLINE RECONCILE only CONSUMES it.
+# Each observation's floor position is computed once, at capture, and stored in
+# its Qdrant payload. Reconcile reads that; it never loads a calibration, applies
+# a homography, or re-derives a position. So one run has ONE geometry, decided
+# once, and re-reconciling it next year gives the same answer. Asserted by
+# tests/live/test_geometry_not_recomputed.py. Full rationale: ADR-003D.
+#
+# UNITS ARE **FLOOR UNITS**, NOT METRES. The floor frame is fitted from camera
+# imagery alone, which fixes the plane only up to an arbitrary scale. Nothing here
+# claims metres and no metre-based threshold appears below -- the speed ceiling is
+# measured from this deployment's own footage in the same unit as the distances,
+# so the unknown scale cancels exactly. Metres become available only when a trusted
+# metric reference is recorded in the calibration (verified floor plan / CAD,
+# verified architectural dimension, or an independently measured reference
+# distance), and they are needed only to relate SEPARATE floor groups.
+#
+# WHICH CAMERAS THIS CAN COVER. A floor frame needs cameras whose views overlap,
+# because the frame is fitted from people's own foot points seen from both. Here
+# that is cam_219 + cam_224 (same room). cam_206 and cam_213 overlap nothing, so
+# NO geometry is derivable for them from imagery -- they stay appearance-only until
+# real-world distances between the camera regions are supplied. That is a fact
+# about the camera placement, not a gap in the code.
+#
+# FILE-BATCH MODE HAS NO GEOMETRY. The batch path's IdentityService._commit stores
+# neither bbox nor ts, so there is nothing to position. To run geometry over
+# RECORDED footage, use `--mode live` on the files: the live pipeline records bbox,
+# ts and floor position exactly as it does for RTSP.
+geometry:
+  # Master switch for RECORDING. false = today's behaviour exactly: no positions
+  # written, and every consumer treats their absence as "no opinion".
+  #
+  # Ships OFF because there is no calibration record yet. Fit one first (needs no
+  # camera time and no measuring -- it uses a finished run's stored observations):
+  #   python tools/fit_floor_frame.py <run_id>
+  # then set this true for the next capture.
+  #
+  # RECORDING IS NOT RECOVERABLE AFTER THE FACT. The live RTSP feed is never
+  # recorded, so a position not written during the run is gone. Leave recording on
+  # once a calibration exists, even while the veto below is off.
+  enabled: false
+
+  calibration_path: calibration/floor_frame.json
+  # <run_id> is substituted with the run timestamp. This sidecar is ANALYSIS input,
+  # never a reconcile input -- it carries the image-space foot point, so a better
+  # calibration can be applied offline without re-running detection.
+  log_path: logs/geometry_<run_id>.jsonl
+
+  # The reachability veto, consumed by OFFLINE RECONCILE.
+  reconcile:
+    # Gated separately from recording on purpose: recording is additive and safe,
+    # while this changes identities. Turn it on ALONE, on a captured run, and watch
+    # the video -- a cluster count cannot tell you whether a cluster is one person
+    # or three (see REMEDIATION_PLAN.md Part A):
+    #   python tests/calibration/sweep_reconcile_thresholds.py <run_id> --geometry
+    #   python tests/calibration/rerender_from_clips.py <run_id> --geometry
+    enabled: false
+
+    # Cross-camera timestamp uncertainty, seconds. `ts` is when a frame was DECODED
+    # locally, not when photons hit the sensor, so two cameras' stamps for one
+    # instant differ by their encoder + network + decoder buffering. ADDED to every
+    # elapsed time, so over-stating it only ever makes the veto MORE permissive.
+    # 0.5 is ADR-003A's ceiling rather than its 150 ms target, deliberately.
+    clock_error_sec: 0.5
+
+    # Multiplies the MEASURED speed ceiling to get the veto line. The ceiling comes
+    # from p99.9 of observed same-track speeds in the run being reconciled -- one
+    # ByteTrack track is provably one person, so that distribution is this floor's
+    # real answer and needs no metric scale. 1.5 leaves room for someone moving
+    # faster than anything in that run (a run, a stumble).
+    #
+    # THIS IS THE ONLY TUNABLE HERE, AND IT SHOULD BE RAISED, NEVER LOWERED, WHEN IN
+    # DOUBT. A wrong veto is unrecoverable: reconcile cannot un-split a person whose
+    # merge it refused, which is precisely how the old live.topology min-transit
+    # veto destroyed a run (links 5 -> 1, topology_pruned=508). A MISSED veto costs
+    # nothing new -- it leaves a false merge that already happens today.
+    safety_factor: 1.5
+
+display:
+  show_window: false         # true = OpenCV windows; false = headless. Only the
+                             # file-batch flow uses this; the live pipeline is
+                             # headless (its deliverable is output_<cam>.mp4).
+  save_annotated: true       # write output_<name>.mp4 with boxes + ids
+  window_scale: 1.0
+  output_fps: 20.0           # fps for the saved/annotated output videos. Not read
+                             # from the source (a file run uses this regardless of
+                             # the source's real fps).
+
+# =============================================================================
+# REAL-TIME LIVE PIPELINE (src/live/). Handles STREAM sources (and files under
+# --mode live): per-camera capture -> scheduler -> inference -> identity ->
+# render -> writer, all threaded and load-shedding for real time. On stop it
+# runs the offline reconcile (live.reconcile) to settle correct cross-camera ids
+# and re-render output_<cam>.mp4. SEPARATE from the file-batch flow above; when
+# the file-batch path runs (batch mode, or auto with file inputs) nothing here
+# executes.
+# =============================================================================
+live:
+  run:
+    mode: auto              # live (always the live pipeline) | auto (live if any
+                            # source is a stream URL, else file-batch) | batch
+                            # (file-batch; stream URLs are rejected)
+    device: auto            # auto (GPU if available else CPU) | cuda:0 | cpu
+    max_duration_sec: 0     # 0 = until stopped (q / Ctrl-C)
+  capture:
+    nvdec: auto             # auto | on | off. NVDEC decode is a SERVER task; CPU
+                            # decode is used until a GPU decode lib is available.
+    reconnect_attempts: 5
+    reconnect_base_delay: 1
+    reconnect_max_delay: 30
+    max_frame_staleness_ms: 100   # scheduler skips frames older than this
+    # #48: when > 0 this WINS, expressing staleness in each camera's own FRAME
+    # PERIODS instead of one absolute bound. 100ms is 2.5 frame periods at 25 fps
+    # but only 1.5 at 15 fps -- the same number is a different rule per camera, and
+    # it is strictest on the camera with the fewest frames to spare, which is
+    # backwards. 2.5 periods keeps today's behaviour for the 25 fps cameras and
+    # gives cam_224 the same relative allowance. 0 = absolute bound only.
+    max_frame_staleness_periods: 2.5
+
+    # ---- MEDIA TIME for RECORDED sources (src/live/frame.py, "two clocks") ----
+    # A live camera's `ts` is stamped at frame read, which is milliseconds after the
+    # event -- so it doubles as "when did this happen", and all four cameras share
+    # one machine clock, which is what makes cross-camera timing comparable.
+    #
+    # A RECORDED FILE breaks that. Frames decode as fast as the disk allows (125+ fps
+    # measured), so read time tracks decode progress, not events. Feed two files to
+    # `--mode live` and the difference between their timestamps reflects THREAD
+    # SCHEDULING. Every cross-camera temporal rule -- the co-presence veto, and all
+    # of geometry's co-temporal pairing -- would then be built on invented
+    # simultaneity that looks completely plausible.
+    #
+    # So for a file source the capture stage also stamps MEDIA time,
+    # `offset + frame_index / fps`, and everything that asks "when did this happen"
+    # uses that instead (Frame.event_ts(), the stored payload's `ts`, geometry). The
+    # pipeline's own machinery -- scheduler freshness, writer pacing, the live
+    # engine's TTLs -- deliberately stays on the wall clock.
+    #
+    # `file_time_offsets` shifts one camera's media timeline, in seconds, to line up
+    # files that were not started at the same instant. Leave EMPTY when every
+    # recording was started together: 0 then means "all files begin at t=0", which is
+    # the truth. A positive value means this camera's recording started LATER than
+    # the others by that much.
+    #
+    # Verify rather than assume: after a run, the fit's held-out reprojection error
+    # is the check. A wrong offset shows up as a large residual that no calibration
+    # can reduce, because you are pairing one person's feet with where they were a
+    # second earlier.
+    file_time_offsets: {}
+    #   cam_224: 1.35     # this file started 1.35 s after the others
+  inference:
+    max_batch_size: 8       # forced to 1 on CPU (device-aware)
+    t_batch_ms: 40          # dispatch a batch at max_batch_size OR this timeout.
+                            # Raised 15->40 for Stage 2: a ~40ms window gathers a
+                            # frame from EACH camera into one batch so they can be
+                            # processed CONCURRENTLY (one worker per camera). Still
+                            # well under one frame period; adds negligible latency.
+    max_inference_queue: 4
+                            # #51: was 2. On a CPU-with-file run the queue was where
+                            # 629 of 637 dropped batches died -- but J.1 measured the
+                            # REAL rate on production hardware at 10 frames in 40s,
+                            # so this was never the production bottleneck it looked
+                            # like. Raised modestly rather than deepened: each slot
+                            # holds a full batch of frames at ~6 MB each, and an
+                            # observed peak depth of 900 would have been ~5.6 GB of
+                            # RAM. 4 absorbs a brief inference stall without letting
+                            # latency grow, which is the whole point of dropping.
+                            # NOTE: `max_skip_cycles` used to sit here, documented as a
+                            # "scheduler starvation bound". NOTHING in the code ever read
+                            # it -- BatchScheduler has no rotation state. Removed rather
+                            # than implemented, because the scheduler is already fair by
+                            # construction (measured 33.3/33.3/33.4% across 3 cameras at
+                            # max_batch_size=1): slot.get() CLEARS the slot, so a
+                            # just-served camera is empty on the next pass and the next
+                            # camera wins. A redundant bound would add state for nothing.
+    max_workers: 0          # Stage 2 inference parallelism. 0 = one worker per camera
+                            # (recommended). Each worker owns a camera's detector +
+                            # ByteTrack; the shared ReID extractor is lock-serialised.
+    pose_ensemble: false    # LIVE ONLY. false = skip the 2nd (pose) detection model
+                            # per frame -> ~2x detection throughput -> far fewer dropped
+                            # frames -> stabler ByteTrack -> less identity fragmentation.
+                            # The pose model only splits merged 2-people boxes; the
+                            # throughput win matters more while inference is the choke.
+                            # Batch path is unaffected (it reads detector.pose_ensemble).
+                            # Re-enable once Stage 2 batched inference restores headroom.
+  identity:
+    max_queue: 64           # bound of the identity input queue AND of each
+                            # per-camera lane in the anti-starvation fair buffer
+    assign_latency_budget_ms: 5
+    min_evidence_obs: 3     # evidence gate before ASSIGNED (never assign on 1st obs)
+    same_camera_threshold: 0.70   # same-camera lane: cold reactivation of a dropped
+                                  # then re-acquired track. Lowered 0.90 -> 0.85 from
+                                  # A100 run #4: 29/42 same-camera reacquisitions failed
+                                  # JUST under 0.90 (max 0.898) -> the person minted a new
+                                  # id instead of reclaiming theirs = fragmentation, which
+                                  # also crowds cross-camera matching. Co-present false
+                                  # merges are separately blocked by the co-active veto, so
+                                  # lowering this is safe for the on-screen case. Tune from
+                                  # the same-cam reacquire histogram in the run summary.
+                                  #
+                                  # Lowered again 0.85 -> 0.70 from RTSPS run 20260729_162934
+                                  # (3 cams, 90.6s, cuda:0). The SAME failure repeated one
+                                  # notch down: attempts=22 ok=7 rejected_below_thr=15,
+                                  # max_rejected 0.841 -- just under 0.85 again. Histogram
+                                  # [<.5:1 .5-.6:1 .6-.7:2 .7-.8:8 .8-.9:4 .9+:6] puts the
+                                  # LARGEST bin at .7-.8, which identity.threshold's
+                                  # calibration note (~line 136) identifies as the genuine
+                                  # same-person range (different people top out ~0.57).
+                                  # 0.85 sat ABOVE the same-person cluster, so live minted
+                                  # 25 ids for 7 real people (offline reconcile: 35 tracklets
+                                  # -> 7 identities) and on-screen ids flipped on every turn
+                                  # and crossing. 0.70 sits below the cluster and still well
+                                  # clear of the ~0.57 different-people ceiling.
+                                  #
+                                  # Why this is stricter in effect than reconcile's 0.90:
+                                  # reconcile scores tracklet PROTOTYPES averaged over many
+                                  # observations (denoised, 0.905-0.995 in that run), while
+                                  # this lane scores a partial live aggregate off noisy
+                                  # single crops. Same 0-1 scale, different distributions --
+                                  # the two numbers are NOT comparable.
+    cross_camera_threshold: 0.60  # cross-camera lane: link the same person across cams.
+                                  # Lowered 0.63 -> 0.60 from A100 run #2: 9 real
+                                  # cross-camera matches landed just under 0.63
+                                  # (max sub-threshold 0.628), while different-person
+                                  # prototype cosine tops out ~0.55-0.57, so 0.60 keeps
+                                  # a safe margin. Re-check the x-camera line + eyeball
+                                  # outputs for false merges after changing.
+    accept_margin: 0.03     # cross-camera runner-up margin (ported from identity.min_score_gap)
+    bank_size: 20           # exemplar embeddings kept per live identity; scoring
+                            # blends the bank MEAN (prototype) with the strongest
+                            # single exemplar (medoid-style) -- ported from
+                            # identity.bank_size / service.py::_bank_score
+    split_contradiction_margin: 0.05
+  # OFFLINE reconciliation for the LIVE path -- the "correct-answer-at-the-end"
+  # flow. The live RTSP feed is NEVER recorded. During the run each camera's
+  # PROCESSED (clean) frames + box geometry are captured to a transient temp clip
+  # (._live_src_<cam>.mp4) and every FRESH ReID observation (embedding + bbox +
+  # confidence + timestamp) is persisted to the store. On stop (Ctrl-C / sources
+  # ended / max_duration) the SAME proven offline reconcile the file path uses
+  # rebuilds cross-camera identities and re-renders output_<cam>.mp4 with the
+  # CORRECT reids -- same person = same id/colour in every camera. The merge
+  # thresholds are taken from identity.reconcile.* (0.63 / 0.90 / reciprocal-best)
+  # so a live run and a file run reconcile IDENTICALLY. Set enabled: false to
+  # restore the old immediate-on-Ctrl-C live-annotated output (paced WriterStage).
+  reconcile:
+    enabled: true
+    sample_stride: 1        # store every Nth FRESH embedding per track. Fresh
+                            # embeddings already arrive only every reid.interval
+                            # frames (they are NOT per-frame), so this is a second,
+                            # optional subsample on top of that. 1 = keep every
+                            # fresh observation (matches the file-batch path).
+    # #65: per-camera ceiling on the transient clip, in GB. 0 = unlimited, which
+    # is what shipped -- clips grew at ~1.2-2.2 MB/s each with no cap, no rotation
+    # and no free-space check, so four cameras fill ~21 GB/hour until the disk dies
+    # and takes the run with it. Hitting the cap stops RECORDING for that camera;
+    # the run's identities are unaffected, only the offline re-render is truncated.
+    max_clip_gb: 4.0
+    keep_frames: true       # keep the per-camera processed-frame clips after the
+                            # final render, together with the
+                            # ._live_src_<cam>.annotations.json box geometry the
+                            # render stage writes beside each one.
+                            #
+                            # ON since 2026-07-30, and it should stay on while
+                            # reconcile is being tuned. Clip + sidecar + the run's
+                            # embeddings in Qdrant are a COMPLETE record of the run,
+                            # so reconcile and the render can be replayed offline at
+                            # any settings:
+                            #   python tests/calibration/rerender_from_clips.py <run_id> --cross 0.70,0.75
+                            # That turns "try another threshold" from a five-minute
+                            # capture with people walking the room into a local job
+                            # that produces watchable videos on the SAME footage and
+                            # the SAME track ids -- the only way two settings can
+                            # honestly be compared.
+                            #
+                            # COST: ~1.2-2.2 MB/s per camera (see plan #65), so a
+                            # 5-minute 4-camera run keeps roughly 1.8 GB. Set false
+                            # once tuning is done, or prune old ._live_src_* by hand.
+  output:
+    write_video: true
+    video_path: output_<cam>.mp4
+    codec: h264             # software x264; falls back to mp4v
+    pacing: wallclock
+    fps_default: 20
+    resolution: native
+    max_writer_queue: 16
+    offline_overlay_after_sec: 3   # after this gap, write CAMERA OFFLINE frames
+  metrics:
+    log_interval_sec: 10
+    report_peaks: true
+  # Cross-camera physical-impossibility veto (src/live/topology.py; documented in
+  # ARCHITECTURE.md section 8.2 and README section 10). FAIL-OPEN: when
+  # disabled or with no edges, appearance alone decides every link, and any
+  # camera NOT named below is never blocked. Camera names MUST match the runtime
+  # names -- stream URLs are auto-named cam_<last-IP-octet> (see main.py
+  # _camera_name_from_source), so the mapping is: camera1=cam_224, camera2=cam_219,
+  # camera3=cam_213 (chokepoint), camera4=cam_206.
+  topology:
+    # Cross-camera physical-impossibility veto -- ENABLED with MEASURED transit
+    # times (minimum seconds to physically move between adjacent cameras). During
+    # cross-camera matching a candidate identity is PRUNED if less than the
+    # shortest-path minimum has elapsed since it was last seen (a person can't
+    # teleport): this both cuts cross-camera false-merges AND removes impossible
+    # competitors so the reachable true match can win the runner-up margin.
+    # Multi-hop pairs auto-sum along the shortest path through the cam_213
+    # chokepoint (e.g. cam_206 <-> cam_224 = 3 + 2 = 5s). cam_224 & cam_219 are
+    # co-visible (same room, overlapping views) -> 0: no time constraint (the
+    # co-active veto handles co-presence). Undirected. Format: [a, b, min_sec].
+    #
+    # DISABLED after A100 testing: with these cameras the view-to-view handoff is
+    # FASTER than the walking distance suggests (adjacent/overlapping fields of
+    # view), so a 2-3s minimum pruned the TRUE cross-camera match (linked collapsed
+    # 5 -> 1, topology_pruned=508). Min-transit vetoes only work when cameras are
+    # far apart with a real gap between views; here they are not. Back to
+    # appearance-only. (Set enabled: true only if you separate the cameras.)
+    enabled: false
+    edges:
+      - [cam_224, cam_219, 0]   # same room, co-visible (overlapping views)
+      - [cam_224, cam_213, 2]   # room -> chokepoint (measured)
+      - [cam_219, cam_213, 2]   # room -> chokepoint (measured)
+      - [cam_213, cam_206, 3]   # chokepoint <-> cam 4 (measured; only way in/out)
+  limits:
+    max_active_identities: 200  # LRU cap on the in-memory active set (bounds memory)
+    active_ttl: 300         # SECONDS unseen before a live identity is evicted from
+                            # the active set. NOTE: the live engine reasons in
+                            # wall-clock seconds (frame.ts), not frames -- frames are
+                            # per-camera and get dropped, so they aren't comparable
+                            # across the pipeline. Keep this GENEROUSLY larger than a
+                            # typical absence: an identity must survive a person's
+                            # time off-screen for same-camera cold reactivation and
+                            # cross-camera linking to reuse it rather than mint anew.
+    queue_warn_pct: 80
+    drop_warn_pct: 5

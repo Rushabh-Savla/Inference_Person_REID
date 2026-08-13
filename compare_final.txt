@@ -1,0 +1,110 @@
+[compare] 3 clip(s), 2 model(s), imgsz [640, 1280], first 900 frames each
+[compare] conf=0.4 iou=0.6 tracker=bytetrack.yaml
+[compare] NOTE iou is inert on an NMS-free (YOLO26) default path -- do not read an end-to-end result as an NMS result.
+
+==============================================================================
+cam_213   (./._live_src_cam_213.mp4)
+==============================================================================
+  model                 imgsz    dets   ids  meanlen  usable  nested   ms/f
+  --------------------------------------------------------------------------
+  yolo11m.pt              640     206     3     66.0       2       0     11
+  yolo11m.pt             1280     642    10     63.6       6       1     11
+  yolo11m-pose.pt         640     388    11     34.1       5       0     10
+  yolo11m-pose.pt        1280    1647    12    137.1       8       0     13
+    yolo11m.pt@640 track lengths: [99, 93, 6]
+    yolo11m.pt@1280 track lengths: [201, 109, 101, 92, 58, 27, 17, 16]
+    yolo11m-pose.pt@640 track lengths: [97, 92, 78, 38, 37, 13, 9, 4]
+    yolo11m-pose.pt@1280 track lengths: [639, 305, 280, 97, 92, 91, 89, 41]
+
+  VISIBLE-KEYPOINT FRACTION (COCO-17, joint conf >= 0.5)
+  Reference: seated at a desk = 13/17 = 0.76; standing behind
+  a desk = 15/17 = 0.88. A floor ABOVE ~0.55 cuts into the
+  seated population, which in this deployment is the norm.
+    model                     n    p05    p25    p50    p75    <0.3    <0.4    <0.5    <0.6
+    yolo11m-pose.pt         388   0.26   0.41   0.47   0.76    7.2%   19.3%   55.4%   65.7%
+    yolo11m-pose.pt        1647   0.24   0.35   0.41   0.53   11.5%   46.0%   66.2%   82.0%
+  The <X columns are the fraction of DETECTIONS a floor at X
+  would reject. Judge it against observations-per-tracklet:
+  reconcile DELETES a tracklet under min_tracklet_observations,
+  so a gate that halves a short track does not weaken it, it
+  removes the person.
+
+==============================================================================
+cam_219   (./._live_src_cam_219.mp4)
+==============================================================================
+  model                 imgsz    dets   ids  meanlen  usable  nested   ms/f
+  --------------------------------------------------------------------------
+  yolo11m.pt              640    2099     4    524.8       3       0     11
+  yolo11m.pt             1280    2076     3    692.0       3       0     13
+  yolo11m-pose.pt         640    2136     6    356.0       3       2     12
+  yolo11m-pose.pt        1280    2132     9    236.9       3       3     13
+    yolo11m.pt@640 track lengths: [900, 897, 298, 4]
+    yolo11m.pt@1280 track lengths: [900, 883, 293]
+    yolo11m-pose.pt@640 track lengths: [900, 900, 303, 16, 12, 5]
+    yolo11m-pose.pt@1280 track lengths: [900, 897, 295, 18, 10, 7, 3, 1]
+
+  VISIBLE-KEYPOINT FRACTION (COCO-17, joint conf >= 0.5)
+  Reference: seated at a desk = 13/17 = 0.76; standing behind
+  a desk = 15/17 = 0.88. A floor ABOVE ~0.55 cuts into the
+  seated population, which in this deployment is the norm.
+    model                     n    p05    p25    p50    p75    <0.3    <0.4    <0.5    <0.6
+    yolo11m-pose.pt        2136   0.65   0.71   0.76   0.76    0.8%    1.1%    1.8%    3.4%
+    yolo11m-pose.pt        2132   0.65   0.71   0.76   0.76    0.9%    1.1%    2.1%    3.6%
+  The <X columns are the fraction of DETECTIONS a floor at X
+  would reject. Judge it against observations-per-tracklet:
+  reconcile DELETES a tracklet under min_tracklet_observations,
+  so a gate that halves a short track does not weaken it, it
+  removes the person.
+
+==============================================================================
+cam_224   (./._live_src_cam_224.mp4)
+==============================================================================
+  model                 imgsz    dets   ids  meanlen  usable  nested   ms/f
+  --------------------------------------------------------------------------
+  yolo11m.pt              640    1418     7    202.6       5       0     11
+  yolo11m.pt             1280    1398     6    233.0       5       1     13
+  yolo11m-pose.pt         640    1498     6    249.7       5       0     12
+  yolo11m-pose.pt        1280    1532     9    170.2       6       0     14
+    yolo11m.pt@640 track lengths: [601, 319, 236, 174, 86, 1, 1]
+    yolo11m.pt@1280 track lengths: [602, 319, 225, 164, 83, 5]
+    yolo11m-pose.pt@640 track lengths: [611, 321, 247, 241, 76, 2]
+    yolo11m-pose.pt@1280 track lengths: [606, 323, 230, 228, 86, 43, 8, 6]
+
+  VISIBLE-KEYPOINT FRACTION (COCO-17, joint conf >= 0.5)
+  Reference: seated at a desk = 13/17 = 0.76; standing behind
+  a desk = 15/17 = 0.88. A floor ABOVE ~0.55 cuts into the
+  seated population, which in this deployment is the norm.
+    model                     n    p05    p25    p50    p75    <0.3    <0.4    <0.5    <0.6
+    yolo11m-pose.pt        1498   0.18   0.41   0.76   0.76   13.4%   23.2%   32.5%   36.9%
+    yolo11m-pose.pt        1532   0.18   0.47   0.76   0.82   12.1%   15.9%   26.9%   36.8%
+  The <X columns are the fraction of DETECTIONS a floor at X
+  would reject. Judge it against observations-per-tracklet:
+  reconcile DELETES a tracklet under min_tracklet_observations,
+  so a gate that halves a short track does not weaken it, it
+  removes the person.
+
+==============================================================================
+HOW TO READ THIS
+==============================================================================
+  RECALL IS THE VETO. If a pose model finds fewer people than yolo11m on the
+  same frames, stop -- nothing downstream can recover a box that was never
+  produced, and no threshold or merge rule reaches it.
+
+  `usable` MATTERS MORE THAN `ids`. A model that finds more people in
+  two-frame flickers is worse than one that finds fewer people properly:
+  reconcile suppresses anything under min_tracklet_observations, and the
+  operator's cam_213 failure was a 6-observation tracklet that matched nothing
+  at any bar. Compare `usable` and `meanlen` together, never the id count
+  alone (CLAUDE.md section 4).
+
+  `nested` IS THE ONE TO WATCH ON YOLO26. Those are boxes sitting inside other
+  boxes -- invisible to IoU NMS at any setting, and the mechanism that puts two
+  track ids on one body. If the NMS-free head drops this to ~0 while recall
+  holds, that is a structural fix rather than a tuning one.
+
+  VISIBILITY IS A DISTRIBUTION, NOT A THRESHOLD. Read where the mass sits
+  before choosing a floor. If p25 is already 0.76, the population is seated and
+  a 0.6 floor is cutting healthy crops.
+
+  AND THIS DECIDES WHICH MODEL TO CAPTURE WITH, NOT WHETHER IDS IMPROVE. That
+  still needs a run and a watch.

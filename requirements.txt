@@ -1,0 +1,77 @@
+# Runtime dependencies for the multi-camera person ReID pipeline.
+# Pins reflect the versions verified working in the project venv.
+# Install:  pip install -r requirements.txt
+
+# --- Detection + tracking -------------------------------------------------
+ultralytics==8.4.89        # YOLO11 detector + ByteTrack tracker
+
+# --- ReID model (appearance embeddings) -----------------------------------
+# torch 2.12.1: the default Linux PyPI wheel is CUDA-enabled and bundles the CUDA
+# runtime -- it uses an NVIDIA GPU when present (live pipeline device: auto) and
+# falls back to CPU otherwise. Same pin works on the CPU dev box AND the GPU
+# server; the server only needs a compatible NVIDIA driver. (For a specific CUDA
+# version, install torch/torchvision from the matching PyTorch wheel index first.)
+torch==2.12.1              # ReID + detection inference backend (CPU or CUDA)
+torchvision==0.27.1        # required by torchreid / ultralytics
+torchreid==0.2.5           # OSNet model definition (no longer the default model,
+                           # but osnet_* stay selectable via reid.model)
+
+# FastReID (the CURRENT default backbone, SBS ResNet101-IBN) is deliberately NOT
+# pinned here: it has no setup.py and is not pip-installable at all. The model
+# definition is VENDORED into src/reid/vendor/fastreid/ (5 files, torch-only) --
+# see that directory's PROVENANCE.md for the upstream commit and the exact edits.
+# Importing upstream as a package is not viable regardless: its
+# modeling/__init__.py eagerly imports RegNet, which needs `yacs` at module
+# scope, and fastreid/utils pulls termcolor + tabulate for coloured logging. None
+# of that is needed for a forward pass, so none of it is a dependency here.
+# The CHECKPOINT is not in git either (537 MB, over GitHub's 100 MB file limit):
+#   curl -L -o src/reid/weights/msmt_sbs_R101-ibn.pth \
+#     https://github.com/JDAI-CV/fast-reid/releases/download/v0.1.1/msmt_sbs_R101-ibn.pth
+
+# torchreid's PyPI wheel declares NO runtime dependencies (only dev/test extras),
+# so pip installs none of what it actually imports. These three are NOT optional:
+# `import torchreid` walks its whole dataset/engine package at import time, so
+# without them the ReID extractor dies with ModuleNotFoundError before it can
+# load a single crop. Verified in a clean venv containing only this file.
+#   scipy       -> torchreid/reid/data/datasets/image/grid.py does
+#                  `from scipy.io import loadmat` at module level.
+#   gdown       -> torchreid/reid/data/datasets/image/university1652.py does a
+#                  module-level `import gdown`.
+#   tensorboard -> torchreid's engine imports torch.utils.tensorboard, which
+#                  imports the tensorboard package at module level.
+scipy==1.15.3              # hard requirement of `import torchreid` (see above)
+gdown==5.2.2               # hard requirement of `import torchreid` (see above)
+tensorboard==2.21.0        # hard requirement of `import torchreid` (see above)
+
+# ByteTrack's data association (ultralytics/trackers/utils/matching.py) imports
+# `lap`. Ultralytics ships it only in its optional [solutions] extra, so without
+# this pin ultralytics tries to pip-install lap MID-RUN -- which fails on an
+# offline/locked-down box and silently mutates the env everywhere else.
+lap==0.5.13                # ByteTrack linear assignment (tracker.enabled: true)
+
+# DELIBERATELY NOT PINNED (checked, not needed):
+#   Cython        -> only speeds up torchreid's rank-evaluation metrics, which
+#                    this pipeline never calls. Its absence prints one harmless
+#                    "Cython evaluation is unavailable" warning at import.
+#   ultralytics extras ([export], [solutions], [logging]) -> export formats,
+#                    Streamlit demos and W&B/MLflow logging: none are used here.
+# The full set above was verified by installing ONLY this file into an empty venv
+# and running both paths end to end (file-batch and --mode live) on real footage.
+
+# --- Vector store ---------------------------------------------------------
+qdrant-client==1.18.0      # embedding storage + nearest-neighbour search
+
+# --- Core numerics / IO ---------------------------------------------------
+numpy==2.2.6
+opencv-python==5.0.0.93    # frame decode, crops, drawing, video writing
+PyYAML==6.0.3              # reads config.yaml
+
+# --- OS package, NOT pip-installable (optional) ---------------------------
+# tkinter: used once, in main.py, to read the screen size so the live display
+# window is scaled to fit. It is part of Python's standard library API but ships
+# as a SEPARATE OS package on Debian/Ubuntu/WSL, so a clean venv does not have
+# it and pip cannot supply it:
+#     sudo apt install python3-tk
+# Deliberately NOT a hard requirement: the import is guarded and falls back to
+# assuming 1080p, so a missing tkinter only means the display window may be
+# mis-sized on a non-1080p screen. Headless runs never touch it.

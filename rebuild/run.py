@@ -9,6 +9,8 @@ sys.path.insert(0, str(ROOT))
 
 from rebuild.batch_v2 import BatchPipelineV2  # noqa: E402
 from rebuild.batch_v3 import BatchPipelineV3  # noqa: E402
+from rebuild.batch_v4 import BatchPipelineV4  # noqa: E402
+from rebuild.live_v4 import run_live_v4  # noqa: E402
 from rebuild.live_v2 import run_live_v2  # noqa: E402
 
 
@@ -25,28 +27,42 @@ def parse_source(values):
 
 
 def main():
-    parser = argparse.ArgumentParser(description="Same-camera + cross-camera person ReID with a persistent global identity gallery")
+    parser = argparse.ArgumentParser(description="Same-camera + cross-camera person ReID with persistent body + face identity galleries")
     sub = parser.add_subparsers(dest="mode", required=True)
 
-    batch = sub.add_parser("batch", help="V3 recorded-video pipeline")
-    batch.add_argument("--config", default="rebuild/config_v3.yaml")
+    batch = sub.add_parser("batch", help="V4 recorded-video pipeline")
+    batch.add_argument("--config", default="rebuild/config_v4.yaml")
     batch.add_argument("--videos", nargs="*", default=[])
+
+    old3 = sub.add_parser("batch_v3", help="V3 baseline pipeline")
+    old3.add_argument("--config", default="rebuild/config_v3.yaml")
+    old3.add_argument("--videos", nargs="*", default=[])
 
     old = sub.add_parser("batch_v2", help="V2 baseline pipeline")
     old.add_argument("--config", default="rebuild/config.yaml")
     old.add_argument("--videos", nargs="*", default=[])
 
-    live = sub.add_parser("live", help="live/RTSP sources using the existing online gallery")
-    live.add_argument("--config", default="rebuild/config.yaml")
+    live = sub.add_parser("live", help="V4 live/RTSP sources")
+    live.add_argument("--config", default="rebuild/config_v4.yaml")
     live.add_argument("--sources", nargs="+", required=True)
     live.add_argument("--output-dir", default=None)
     live.add_argument("--show", action="store_true")
 
+    oldlive = sub.add_parser("live_v2", help="V2 live/RTSP baseline")
+    oldlive.add_argument("--config", default="rebuild/config.yaml")
+    oldlive.add_argument("--sources", nargs="+", required=True)
+    oldlive.add_argument("--output-dir", default=None)
+    oldlive.add_argument("--show", action="store_true")
+
     args = parser.parse_args()
     if args.mode == "batch":
+        BatchPipelineV4(args.config).run(args.videos)
+    elif args.mode == "batch_v3":
         BatchPipelineV3(args.config).run(args.videos)
     elif args.mode == "batch_v2":
         BatchPipelineV2(args.config).run(args.videos)
+    elif args.mode == "live":
+        run_live_v4(args.config, parse_source(args.sources), args.output_dir, args.show)
     else:
         run_live_v2(args.config, parse_source(args.sources), args.output_dir, args.show)
 

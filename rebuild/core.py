@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from pathlib import Path
 from typing import Dict, Iterable, List, Optional, Tuple
 
 import cv2
@@ -16,12 +15,10 @@ def unit(value: np.ndarray) -> np.ndarray:
 
 
 def crop(frame: np.ndarray, box: Tuple[int, int, int, int]) -> Optional[np.ndarray]:
-    x1, y1, x2, y2 = box
+    x1, y1, x2, y2 = [int(v) for v in box]
     h, w = frame.shape[:2]
-    x1 = max(0, min(w, int(x1)))
-    y1 = max(0, min(h, int(y1)))
-    x2 = max(0, min(w, int(x2)))
-    y2 = max(0, min(h, int(y2)))
+    x1, x2 = max(0, min(w, x1)), max(0, min(w, x2))
+    y1, y2 = max(0, min(h, y1)), max(0, min(h, y2))
     if x2 <= x1 or y2 <= y1:
         return None
     return frame[y1:y2, x1:x2]
@@ -33,19 +30,12 @@ def quality(image: np.ndarray, frame_shape: Tuple[int, int]) -> float:
     h, w = image.shape[:2]
     fh, fw = frame_shape
     gray = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
-    blur = float(cv2.Laplacian(gray, cv2.CV_64F).var())
-    bright = float(gray.mean())
-    area = float(h * w) / max(1.0, float(fh * fw))
-    blur_score = min(1.0, blur / 180.0)
-    bright_score = max(0.0, 1.0 - abs(bright - 128.0) / 128.0)
-    area_score = min(1.0, area / 0.05)
-    height_score = min(1.0, h / 240.0)
-    return float(
-        0.35 * blur_score
-        + 0.25 * bright_score
-        + 0.20 * area_score
-        + 0.20 * height_score
-    )
+    blur = min(1.0, float(cv2.Laplacian(gray, cv2.CV_64F).var()) / 180.0)
+    bright = max(0.0, 1.0 - abs(float(gray.mean()) - 128.0) / 128.0)
+    area = min(1.0, (h * w) / max(1.0, fh * fw * 0.05))
+    height = min(1.0, h / 240.0)
+    aspect = min(1.0, (h / max(1.0, w)) / 2.0)
+    return float(0.30 * blur + 0.20 * bright + 0.20 * area + 0.20 * height + 0.10 * aspect)
 
 
 @dataclass
@@ -64,10 +54,15 @@ class Observation:
 class Tracklet:
     camera: str
     track_id: int
+    segment: int
     fps: float
     observations: List[Observation] = field(default_factory=list)
     embeddings: List[np.ndarray] = field(default_factory=list)
     embedding_quality: List[float] = field(default_factory=list)
+
+    @property
+    def key(self) -> str:
+        return f"{self.camera}:{self.track_id}:{self.segment}"
 
     @property
     def start(self) -> float:
@@ -82,39 +77,38 @@ class Tracklet:
         return len(self.embeddings)
 
     def add_embedding(self, embedding: np.ndarray, score: float) -> int:
-        index = len(self.embeddings)
+        idx = len(self.embeddings)
         self.embeddings.append(unit(embedding))
         self.embedding_quality.append(float(score))
-        return index
+        return idx
 
-    def prototype(self, bank_size: int) -> np.ndarray:
+    def gallery(self, size: int) -> np.ndarray:
         if not self.embeddings:
-            raise ValueError("Tracklet has no embeddings")
-        order = np.argsort(self.embedding_quality)[::-1]
-        order = order[: max(1, min(bank_size, len(order)))]
-        weights = np.asarray(
-            [max(0.05, self.embedding_quality[i]) for i in order],
-            dtype=np.float32,
-        )
+            raise ValueError(f"No embeddings in {self.key}")
+        order = np.argsort(self.embedding_quality)[::-1][: max(1, min(size, len(self.embeddings)))]
+        return unit(np.stack([self.embeddings[i] for i in order]))
+
+    def prototype(self, size: int) -> np.ndarray:
+        order = np.argsort(self.embedding_quality)[::-1][: max(1, min(size, len(self.embeddings)))]
+        weights = np.asarray([max(0.10, self.embedding_quality[i]) for i in order], dtype=np.float32)
         matrix = np.stack([self.embeddings[i] for i in order])
         return unit((matrix * weights[:, None]).sum(axis=0) / weights.sum())
 
-    def gallery(self, bank_size: int) -> np.ndarray:
-        order = np.argsort(self.embedding_quality)[::-1]
-        order = order[: max(1, min(bank_size, len(order)))]
-        return unit(np.stack([self.embeddings[i] for i in order]))
 
-
-@dataclass
-class Identity:
-    gid: str
-    tracklets: List[str] = field(default_factory=list)
+@dataclass(frozen=True)
+class Match:
+    left: str
+    right: str
+    score: float
+    margin_left: float
+    margin_right: float
+    reciprocal: bool
 
 
 class UnionFind:
     def __init__(self, keys: Iterable[str]):
-        self.parent = {key: key for key in keys}
-        self.rank = {key: 0 for key in keys}
+        self.parent = {k: k for k in keys}
+        self.rank = {k: 0 for k in keys}
 
     def find(self, key: str) -> str:
         root = key
@@ -126,127 +120,97 @@ class UnionFind:
             key = nxt
         return root
 
-    def union(self, left: str, right: str) -> bool:
-        left = self.find(left)
-        right = self.find(right)
-        if left == right:
+    def union(self, a: str, b: str) -> bool:
+        a, b = self.find(a), self.find(b)
+        if a == b:
             return False
-        if self.rank[left] < self.rank[right]:
-            left, right = right, left
-        self.parent[right] = left
-        if self.rank[left] == self.rank[right]:
-            self.rank[left] += 1
+        if self.rank[a] < self.rank[b]:
+            a, b = b, a
+        self.parent[b] = a
+        if self.rank[a] == self.rank[b]:
+            self.rank[a] += 1
         return True
 
 
-class OfflineReconciler:
-    """Camera-agnostic tracklet graph reconciliation.
+class GlobalIdentityEngine:
+    """One shared global identity space for every camera.
 
-    The detector/tracker never assigns global IDs. This class sees finished
-    tracklets only, scores tracklet-to-tracklet appearance similarity, and then
-    forms global-identity components. Same-camera overlap is a hard physical
-    constraint; cross-camera simultaneous visibility is allowed.
+    The tracker never creates a global ID. Finished tracklets are compared against
+    every other finished tracklet using the same appearance representation.
+    Same-camera temporal overlap is a hard impossibility constraint; elapsed time
+    is NOT a reason to reject a ReID match.
     """
 
-    def __init__(
-        self,
-        same_threshold: float,
-        cross_threshold: float,
-        min_margin: float,
-        bank_size: int,
-        max_same_camera_gap_sec: float,
-    ):
-        self.same_threshold = float(same_threshold)
-        self.cross_threshold = float(cross_threshold)
-        self.min_margin = float(min_margin)
+    def __init__(self, threshold: float, margin: float, strong: float, bank_size: int):
+        self.threshold = float(threshold)
+        self.margin = float(margin)
+        self.strong = float(strong)
         self.bank_size = int(bank_size)
-        self.max_same_camera_gap_sec = float(max_same_camera_gap_sec)
 
     @staticmethod
-    def score(left: Tracklet, right: Tracklet, bank_size: int) -> float:
-        lp = left.prototype(bank_size)
-        rp = right.prototype(bank_size)
-        prototype = float(lp @ rp)
+    def overlap(a: Tracklet, b: Tracklet) -> bool:
+        return not (a.end < b.start or b.end < a.start)
 
-        lg = left.gallery(bank_size)
-        rg = right.gallery(bank_size)
-        pair = lg @ rg.T
-        flat = np.sort(pair.reshape(-1))
-        top = float(np.mean(flat[-min(3, flat.size):]))
-        return float(0.65 * prototype + 0.35 * top)
+    def allowed(self, a: Tracklet, b: Tracklet) -> bool:
+        if a.camera != b.camera:
+            return True
+        return not self.overlap(a, b)
 
-    @staticmethod
-    def overlap(left: Tracklet, right: Tracklet) -> bool:
-        return not (left.end < right.start or right.end < left.start)
+    def score(self, a: Tracklet, b: Tracklet) -> float:
+        ap = a.prototype(self.bank_size)
+        bp = b.prototype(self.bank_size)
+        prototype = float(ap @ bp)
+        ag = a.gallery(self.bank_size)
+        bg = b.gallery(self.bank_size)
+        pair = np.sort((ag @ bg.T).reshape(-1))
+        top = float(np.mean(pair[-min(5, len(pair)) :]))
+        return float(0.55 * prototype + 0.45 * top)
 
-    def allowed(self, left: Tracklet, right: Tracklet) -> bool:
-        if left.camera == right.camera:
-            if self.overlap(left, right):
-                return False
-            gap = max(0.0, max(right.start - left.end, left.start - right.end))
-            return gap <= self.max_same_camera_gap_sec
-        return True
-
-    def reconcile(self, tracklets: Dict[str, Tracklet]) -> Dict[str, str]:
-        keys = sorted(tracklets)
+    def reconcile(self, tracklets: Dict[str, Tracklet]) -> Tuple[Dict[str, str], List[Match]]:
+        usable = {k: v for k, v in tracklets.items() if v.count > 0}
+        keys = sorted(usable)
         if not keys:
-            return {}
+            return {}, []
 
-        scores: Dict[Tuple[str, str], float] = {}
-        best: Dict[str, List[Tuple[float, str]]] = {key: [] for key in keys}
+        ranked: Dict[str, List[Tuple[float, str]]] = {k: [] for k in keys}
+        pair_scores: Dict[Tuple[str, str], float] = {}
 
-        for index, left_key in enumerate(keys):
-            left = tracklets[left_key]
-            if left.count == 0:
-                continue
-            for right_key in keys[index + 1 :]:
-                right = tracklets[right_key]
-                if right.count == 0:
-                    continue
+        for i, left_key in enumerate(keys):
+            left = usable[left_key]
+            for right_key in keys[i + 1 :]:
+                right = usable[right_key]
                 if not self.allowed(left, right):
                     continue
-                value = self.score(left, right, self.bank_size)
-                scores[(left_key, right_key)] = value
-                best[left_key].append((value, right_key))
-                best[right_key].append((value, left_key))
+                score = self.score(left, right)
+                pair_scores[(left_key, right_key)] = score
+                ranked[left_key].append((score, right_key))
+                ranked[right_key].append((score, left_key))
 
-        for key in best:
-            best[key].sort(reverse=True)
+        for values in ranked.values():
+            values.sort(key=lambda x: x[0], reverse=True)
 
         uf = UnionFind(keys)
-        accepted = []
+        accepted: List[Match] = []
 
-        for (left_key, right_key), value in sorted(
-            scores.items(), key=lambda item: item[1], reverse=True
-        ):
-            left = tracklets[left_key]
-            right = tracklets[right_key]
-            threshold = self.same_threshold if left.camera == right.camera else self.cross_threshold
-            if value < threshold:
-                continue
-
-            left_best = best[left_key]
-            right_best = best[right_key]
-            left_rank = next((i for i, item in enumerate(left_best) if item[1] == right_key), None)
-            right_rank = next((i for i, item in enumerate(right_best) if item[1] == left_key), None)
-            if left_rank is None or right_rank is None:
-                continue
-
-            left_margin = value - (left_best[1][0] if left_rank == 0 and len(left_best) > 1 else left_best[0][0])
-            right_margin = value - (right_best[1][0] if right_rank == 0 and len(right_best) > 1 else right_best[0][0])
-
+        for (left_key, right_key), score in sorted(pair_scores.items(), key=lambda x: x[1], reverse=True):
+            left_rank = next(i for i, (_, k) in enumerate(ranked[left_key]) if k == right_key)
+            right_rank = next(i for i, (_, k) in enumerate(ranked[right_key]) if k == left_key)
             reciprocal = left_rank == 0 and right_rank == 0
-            strong = value >= min(0.92, threshold + 0.10)
-            if not reciprocal and not strong:
-                continue
-            if not strong and min(left_margin, right_margin) < self.min_margin:
-                continue
+            left_second = ranked[left_key][1][0] if left_rank == 0 and len(ranked[left_key]) > 1 else 0.0
+            right_second = ranked[right_key][1][0] if right_rank == 0 and len(ranked[right_key]) > 1 else 0.0
+            left_margin = score - left_second if left_rank == 0 else 0.0
+            right_margin = score - right_second if right_rank == 0 else 0.0
 
-            if self._component_would_overlap(uf, left_key, right_key, tracklets):
+            accept = score >= self.threshold and (
+                (reciprocal and min(left_margin, right_margin) >= self.margin)
+                or score >= self.strong
+            )
+            if not accept:
                 continue
-
+            if self._would_create_same_camera_overlap(uf, left_key, right_key, usable):
+                continue
             if uf.union(left_key, right_key):
-                accepted.append((left_key, right_key, value))
+                accepted.append(Match(left_key, right_key, score, left_margin, right_margin, reciprocal))
 
         roots: Dict[str, int] = {}
         mapping: Dict[str, str] = {}
@@ -257,111 +221,83 @@ class OfflineReconciler:
                 roots[root] = next_id
                 next_id += 1
             mapping[key] = f"G{roots[root]:06d}"
-        return mapping
 
-    def _component_would_overlap(
-        self,
-        uf: UnionFind,
-        left_key: str,
-        right_key: str,
-        tracklets: Dict[str, Tracklet],
-    ) -> bool:
-        left_root = uf.find(left_key)
-        right_root = uf.find(right_key)
-        if left_root == right_root:
+        return mapping, accepted
+
+    def _would_create_same_camera_overlap(self, uf: UnionFind, left: str, right: str, tracks: Dict[str, Tracklet]) -> bool:
+        lr, rr = uf.find(left), uf.find(right)
+        if lr == rr:
             return False
-
-        left_members = [key for key in tracklets if uf.find(key) == left_root]
-        right_members = [key for key in tracklets if uf.find(key) == right_root]
+        left_members = [k for k in tracks if uf.find(k) == lr]
+        right_members = [k for k in tracks if uf.find(k) == rr]
         for a in left_members:
             for b in right_members:
-                if tracklets[a].camera != tracklets[b].camera:
-                    continue
-                if self.overlap(tracklets[a], tracklets[b]):
+                if tracks[a].camera == tracks[b].camera and self.overlap(tracks[a], tracks[b]):
                     return True
         return False
 
+    def summarize_scores(self, tracklets: Dict[str, Tracklet]) -> Dict[str, float]:
+        values = []
+        keys = sorted(tracklets)
+        for i, a in enumerate(keys):
+            for b in keys[i + 1 :]:
+                if not self.allowed(tracklets[a], tracklets[b]):
+                    continue
+                values.append(self.score(tracklets[a], tracklets[b]))
+        if not values:
+            return {"count": 0, "min": 0.0, "mean": 0.0, "max": 0.0}
+        values = np.asarray(values, dtype=np.float32)
+        return {
+            "count": float(len(values)),
+            "min": float(values.min()),
+            "mean": float(values.mean()),
+            "max": float(values.max()),
+            "p50": float(np.percentile(values, 50)),
+            "p90": float(np.percentile(values, 90)),
+            "p95": float(np.percentile(values, 95)),
+            "p99": float(np.percentile(values, 99)),
+        }
 
-class LiveIdentityManager:
-    """Online layer using the same Identity/tracklet concepts as batch mode.
 
-    IDs remain provisional until enough embeddings exist. No camera receives a
-    special rule; a new track is matched against the same global gallery from
-    every source.
-    """
+class LiveGlobalGallery:
+    """Online global gallery using the same score and no camera-specific logic."""
 
-    def __init__(self, reconciler: OfflineReconciler, min_embeddings: int):
-        self.reconciler = reconciler
+    def __init__(self, threshold: float, margin: float, bank_size: int, strong: float, min_embeddings: int):
+        self.engine = GlobalIdentityEngine(threshold, margin, strong, bank_size)
         self.min_embeddings = int(min_embeddings)
         self.tracklets: Dict[str, Tracklet] = {}
-        self.identities: Dict[str, Identity] = {}
+        self.track_to_gid: Dict[str, str] = {}
+        self.gid_to_tracks: Dict[str, List[str]] = {}
         self.next_id = 1
 
-    def _key(self, camera: str, track_id: int) -> str:
-        return f"{camera}:{track_id}"
-
-    def update(
-        self,
-        camera: str,
-        track_id: int,
-        fps: float,
-        observation: Observation,
-        embedding: np.ndarray,
-    ) -> Optional[str]:
-        key = self._key(camera, track_id)
-        tracklet = self.tracklets.get(key)
-        if tracklet is None:
-            tracklet = Tracklet(camera=camera, track_id=track_id, fps=fps)
-            self.tracklets[key] = tracklet
-
-        tracklet.observations.append(observation)
-        tracklet.add_embedding(embedding, observation.quality)
-
-        if tracklet.count < self.min_embeddings:
-            return None
-
-        if key in self.identities_for_track():
-            return self.identities_for_track()[key]
-
-        current = tracklet.prototype(self.reconciler.bank_size)
-        candidates = []
-        for other_key, other in self.tracklets.items():
-            if other_key == key or other.count < self.min_embeddings:
-                continue
-            if other.camera == camera and self.reconciler.overlap(tracklet, other):
-                continue
-            score = self.reconciler.score(tracklet, other, self.reconciler.bank_size)
-            candidates.append((score, other_key))
-        candidates.sort(reverse=True)
-
-        if candidates:
-            score, other_key = candidates[0]
-            second = candidates[1][0] if len(candidates) > 1 else 0.0
-            threshold = (
-                self.reconciler.same_threshold
-                if self.tracklets[other_key].camera == camera
-                else self.reconciler.cross_threshold
-            )
-            if score >= threshold and score - second >= self.reconciler.min_margin:
-                gid = self.identities_for_track().get(other_key)
-                if gid is not None:
-                    self._bind(key, gid)
-                    return gid
-
+    def _new_gid(self) -> str:
         gid = f"G{self.next_id:06d}"
         self.next_id += 1
-        self._bind(key, gid)
-        self.identities[gid] = Identity(gid=gid, tracklets=[key])
+        self.gid_to_tracks[gid] = []
         return gid
 
-    def _bind(self, key: str, gid: str) -> None:
-        identity = self.identities.setdefault(gid, Identity(gid=gid))
-        if key not in identity.tracklets:
-            identity.tracklets.append(key)
-
-    def identities_for_track(self) -> Dict[str, str]:
-        out = {}
-        for gid, identity in self.identities.items():
-            for key in identity.tracklets:
-                out[key] = gid
-        return out
+    def add(self, tracklet: Tracklet) -> Tuple[str, str, float]:
+        self.tracklets[tracklet.key] = tracklet
+        if tracklet.count < self.min_embeddings:
+            return "PENDING", "pending", 0.0
+        candidates = []
+        for key, other in self.tracklets.items():
+            if key == tracklet.key or other.count < self.min_embeddings:
+                continue
+            if other.camera == tracklet.camera and self.engine.overlap(other, tracklet):
+                continue
+            score = self.engine.score(tracklet, other)
+            candidates.append((score, key))
+        candidates.sort(reverse=True)
+        if candidates:
+            best, other_key = candidates[0]
+            second = candidates[1][0] if len(candidates) > 1 else 0.0
+            other_gid = self.track_to_gid.get(other_key)
+            if other_gid and best >= self.engine.threshold and (best - second >= self.engine.margin or best >= self.engine.strong):
+                self.track_to_gid[tracklet.key] = other_gid
+                self.gid_to_tracks.setdefault(other_gid, []).append(tracklet.key)
+                return other_gid, "reidentified", best
+        gid = self._new_gid()
+        self.track_to_gid[tracklet.key] = gid
+        self.gid_to_tracks[gid].append(tracklet.key)
+        return gid, "new", 1.0

@@ -1,5 +1,5 @@
 detector:
-  model: yolo11n.pt
+  model: weights/yolo11m.pt
   conf: 0.35
   iou: 0.60
   tracker: bytetrack.yaml

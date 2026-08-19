@@ -8,7 +8,7 @@ from typing import Dict
 
 import numpy as np
 
-from core import Tracklet, OfflineReconciler, Observation
+from core import GlobalIdentityEngine, Observation, Tracklet
 
 
 def auc(positive, negative):
@@ -23,84 +23,65 @@ def auc(positive, negative):
     return wins / float(len(positive) * len(negative))
 
 
-def load_tracklets(root: Path):
+def load_tracklets(root: Path) -> Dict[str, Tracklet]:
     rows = json.loads((root / "cache" / "tracklets.json").read_text(encoding="utf-8"))
     packed = np.load(root / "cache" / "tracklet_embeddings.npz")
     out: Dict[str, Tracklet] = {}
     for row in rows:
-        key = row["key"]
         track = Tracklet(
             camera=row["camera"],
             track_id=int(row["track_id"]),
+            segment=int(row["segment"]),
             fps=float(row["fps"]),
         )
         start = float(row["start"])
         end = float(row["end"])
         track.observations = [
-            Observation(
-                camera=track.camera,
-                frame=0,
-                timestamp=start,
-                track_id=track.track_id,
-                bbox=(0, 0, 1, 1),
-                detection_score=1.0,
-                quality=1.0,
-            ),
-            Observation(
-                camera=track.camera,
-                frame=0,
-                timestamp=end,
-                track_id=track.track_id,
-                bbox=(0, 0, 1, 1),
-                detection_score=1.0,
-                quality=1.0,
-            ),
+            Observation(track.camera, 0, start, track.track_id, (0, 0, 1, 1), 1.0, 1.0),
+            Observation(track.camera, 0, end, track.track_id, (0, 0, 1, 1), 1.0, 1.0),
         ]
-        matrix = np.asarray(packed[key], dtype=np.float32)
-        track.embeddings = [row for row in matrix]
-        track.embedding_quality = [float(value) for value in row["quality"]]
-        out[key] = track
+        matrix = np.asarray(packed[row["key"]], dtype=np.float32)
+        track.embeddings = [v for v in matrix]
+        track.embedding_quality = [float(v) for v in row["quality"]]
+        out[row["key"]] = track
     return out
 
 
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--run", default="rebuild_outputs")
-    parser.add_argument("--labels", default=None)
+    parser.add_argument("--labels", default=None, help="JSONL with {a,b,verdict:same|different}")
     args = parser.parse_args()
 
     root = Path(args.run)
     tracklets = load_tracklets(root)
     mapping = json.loads((root / "track_to_global.json").read_text(encoding="utf-8"))
-
-    camera_ids = {}
+    ids = {}
     for key, gid in mapping.items():
-        camera = key.split(":", 1)[0]
-        camera_ids.setdefault(gid, set()).add(camera)
+        ids.setdefault(gid, set()).add(tracklets[key].camera)
 
-    overlapping = []
+    overlap_violations = []
     for left, right in combinations(mapping, 2):
         if mapping[left] != mapping[right]:
             continue
-        if tracklets[left].camera != tracklets[right].camera:
-            continue
-        if not (tracklets[left].end < tracklets[right].start or tracklets[right].end < tracklets[left].start):
-            overlapping.append((left, right, mapping[left]))
+        a, b = tracklets[left], tracklets[right]
+        if a.camera == b.camera and not (a.end < b.start or b.end < a.start):
+            overlap_violations.append((left, right, mapping[left]))
 
     print("===== CLEAN REID EVALUATION =====")
     print(f"tracklets: {len(mapping)}")
     print(f"global IDs: {len(set(mapping.values()))}")
-    print(f"multi-camera IDs: {sum(len(value) > 1 for value in camera_ids.values())}")
-    print(f"same-camera overlap violations: {len(overlapping)}")
-    for left, right, gid in overlapping[:20]:
-        print(f"  VIOLATION {gid}: {left} <-> {right}")
+    print(f"multi-camera IDs: {sum(len(v) > 1 for v in ids.values())}")
+    print(f"same-camera overlap violations: {len(overlap_violations)}")
+    for row in overlap_violations[:20]:
+        print("  VIOLATION", row)
 
     if not args.labels:
-        print("No labels supplied; accuracy is intentionally not invented.")
+        print("No ground-truth labels supplied; identity accuracy is not claimed.")
         return
 
-    positives = []
-    negatives = []
+    engine = GlobalIdentityEngine(0.60, 0.04, 0.72, 8)
+    positives, negatives = [], []
     missing = 0
     for line in Path(args.labels).read_text(encoding="utf-8").splitlines():
         if not line.strip():
@@ -108,27 +89,21 @@ def main():
         row = json.loads(line)
         if row.get("verdict") not in {"same", "different"}:
             continue
-        left = row["a"]
-        right = row["b"]
-        if left not in tracklets or right not in tracklets:
+        a, b = row["a"], row["b"]
+        if a not in tracklets or b not in tracklets:
             missing += 1
             continue
-        score = OfflineReconciler.score(tracklets[left], tracklets[right], 8)
-        if row["verdict"] == "same":
-            positives.append(score)
-        else:
-            negatives.append(score)
+        score = engine.score(tracklets[a], tracklets[b])
+        (positives if row["verdict"] == "same" else negatives).append(score)
 
     print(f"labelled same pairs: {len(positives)}")
     print(f"labelled different pairs: {len(negatives)}")
     print(f"missing labelled tracklets: {missing}")
     print(f"ROC AUC: {auc(positives, negatives):.4f}")
     if positives:
-        print(f"same score mean: {np.mean(positives):.4f}")
-        print(f"same score min: {np.min(positives):.4f}")
+        print(f"same: mean={np.mean(positives):.4f} min={np.min(positives):.4f} p10={np.percentile(positives, 10):.4f} median={np.median(positives):.4f}")
     if negatives:
-        print(f"different score mean: {np.mean(negatives):.4f}")
-        print(f"different score max: {np.max(negatives):.4f}")
+        print(f"different: mean={np.mean(negatives):.4f} max={np.max(negatives):.4f} p90={np.percentile(negatives, 90):.4f} median={np.median(negatives):.4f}")
 
 
 if __name__ == "__main__":

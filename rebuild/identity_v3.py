@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from typing import Dict, Iterable, List, Tuple
+from typing import Dict, List, Tuple
 
 import numpy as np
 
@@ -40,20 +40,24 @@ class Tracklet:
             same = [x.vector for x in self.features if x.kind == kind]
             if same:
                 best = float(np.max(np.stack(same) @ vector))
-                if best >= novelty and quality <= max(x.quality for x in self.features if x.kind == kind) + 0.02:
+                old = max(x.quality for x in self.features if x.kind == kind)
+                if best >= novelty and quality <= old + 0.02:
                     return False
-        self.features.append(Feature(vector, kind, float(quality), self.camera, float(meta.get("timestamp", 0.0)), dict(meta)))
+        stamp = float(meta.get("timestamp", 0.0))
+        first = not self.observations
+        self.features.append(Feature(vector, kind, float(quality), self.camera, stamp, dict(meta)))
         self.features = sorted(self.features, key=lambda x: x.quality, reverse=True)[: max(1, int(limit))]
         self.observations.append(dict(meta))
-        self.start = min(self.start, float(meta.get("timestamp", self.start))) if self.observations else float(meta.get("timestamp", 0.0))
-        self.end = max(self.end, float(meta.get("timestamp", self.end)))
+        if first:
+            self.start = stamp
+            self.end = stamp
+        else:
+            self.start = min(self.start, stamp)
+            self.end = max(self.end, stamp)
         return True
 
     def count(self) -> int:
         return len(self.features)
-
-    def kinds(self) -> set[str]:
-        return {x.kind for x in self.features}
 
     def evidence(self) -> float:
         if not self.features:
@@ -75,8 +79,6 @@ class Identity:
     def add(self, track: Tracklet, trusted: bool, bank: int, quality: float) -> None:
         target = self.trusted if trusted else self.candidate
         for item in track.features:
-            if item.kind not in {"full", "upper", "lower", "light"}:
-                continue
             if item.quality < quality:
                 continue
             same = [x.vector for x in target if x.kind == item.kind]
@@ -92,9 +94,6 @@ class Identity:
             self.geometry.append(track.shape)
             self.geometry = self.geometry[-bank:]
 
-    def all(self) -> List[Feature]:
-        return self.trusted + self.candidate
-
 
 @dataclass(frozen=True)
 class Decision:
@@ -109,14 +108,7 @@ class Decision:
 
 
 class GlobalIdentityV3:
-    """Persistent identity gallery.
-
-    Unlike V2, identities are first-class objects. A new tracklet is searched
-    against every existing identity gallery before a new global ID is created.
-    Trusted and candidate observations are separated to reduce identity drift.
-    Part features are secondary evidence; the full-body ReID feature remains the
-    primary signal whenever it exists.
-    """
+    """Persistent global identity search with trusted multi-view galleries."""
 
     def __init__(self, threshold: float = 0.61, margin: float = 0.035,
                  strong: float = 0.74, support: int = 2, gallery: int = 24,
@@ -158,7 +150,8 @@ class GlobalIdentityV3:
         if not left or not right:
             return 0.0, 0
         groups: Dict[str, Tuple[float, int]] = {}
-        for kind in {x.kind for x in left} | {x.kind for x in right}:
+        kinds = {x.kind for x in left} | {x.kind for x in right}
+        for kind in kinds:
             a = [x for x in left if x.kind == kind]
             b = [x for x in right if x.kind == kind]
             if not a or not b:
@@ -190,7 +183,7 @@ class GlobalIdentityV3:
     def score(self, track: Tracklet, identity: Identity) -> Tuple[float, int]:
         return self.pair(track.features, identity.trusted or identity.candidate)
 
-    def search(self, track: Tracklet, tracks: Dict[str, Tracklet]) -> List[Tuple[float, int, str, float]]:
+    def search(self, track: Tracklet, tracks: Dict[str, Tracklet]):
         found = []
         for gid, identity in self.identities.items():
             if self.conflict(track, identity, tracks):
@@ -205,13 +198,6 @@ class GlobalIdentityV3:
         return found
 
     def assign(self, track: Tracklet, tracks: Dict[str, Tracklet]) -> Decision:
-        if track.key in self.mapping:
-            gid = self.mapping[track.key]
-            self.identities[gid].add(track, False, self.gallery, self.promote)
-            result = Decision(track.key, gid, "track", 1.0, 1.0, self.support, 0.0, track.camera)
-            self.decisions.append(result)
-            return result
-
         ranked = self.search(track, tracks)
         if ranked:
             best, support, gid, _ = ranked[0]
@@ -252,24 +238,17 @@ class GlobalIdentityV3:
         for track in sorted(pending, key=lambda x: (-x.evidence(), x.camera, x.key)):
             self.assign(track, tracks)
 
-        # A final gallery pass lets later trusted observations rescue a weak
-        # earlier decision without using pairwise union-find clustering.
         for track in sorted(tracks.values(), key=lambda x: (x.start, x.camera, x.key)):
-            if track.key not in self.mapping:
-                continue
-            current = self.mapping[track.key]
-            self.identities[current].add(track, False, self.gallery, self.promote)
-
+            if track.key in self.mapping:
+                self.identities[self.mapping[track.key]].add(track, False, self.gallery, self.promote)
         return dict(self.mapping), list(self.decisions)
 
     def gallery_map(self) -> Dict[str, np.ndarray]:
         out = {}
         for gid, identity in self.identities.items():
             values = [x.vector for x in identity.trusted]
-            if not values:
-                continue
-            matrix = np.stack(values)
-            out[gid] = matrix.astype(np.float32)
+            if values:
+                out[gid] = np.stack(values).astype(np.float32)
         return out
 
     def summary(self, tracks: Dict[str, Tracklet]) -> dict:
@@ -280,14 +259,8 @@ class GlobalIdentityV3:
         reasons: Dict[str, int] = {}
         for item in self.decisions:
             reasons[item.reason] = reasons.get(item.reason, 0) + 1
-        cross = sum(1 for item in self.decisions if item.reason == "reidentified" and len(groups.get(item.gid, [])) > 1)
-        return {
-            "tracklets": len(tracks),
-            "global_ids": len(set(self.mapping.values())),
-            "multi_camera": multi,
-            "multi_camera_count": len(multi),
-            "reasons": reasons,
-            "cross_reidentified": cross,
-            "gallery_features": sum(len(x.trusted) for x in self.identities.values()),
-            "candidate_features": sum(len(x.candidate) for x in self.identities.values()),
-        }
+        return {"tracklets": len(tracks), "global_ids": len(set(self.mapping.values())),
+                "multi_camera": multi, "multi_camera_count": len(multi),
+                "reasons": reasons,
+                "gallery_features": sum(len(x.trusted) for x in self.identities.values()),
+                "candidate_features": sum(len(x.candidate) for x in self.identities.values())}

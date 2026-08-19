@@ -10,10 +10,14 @@ reid:
   device: auto
   max_batch: 32
   interval: 5
+  illumination_variant: true
+  min_quality: 0.20
 
 identity:
-  min_embeddings: 4
-  bank_size: 8
+  min_embeddings: 6
+  new_id_embeddings: 8
+  bank_size: 12
+  global_passes: 3
   match_threshold: 0.60
   match_margin: 0.04
   strong_threshold: 0.72

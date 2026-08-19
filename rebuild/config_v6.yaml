@@ -25,6 +25,35 @@ face:
   strong_quality: 0.64
   bank: 8
 
+# BatchPipelineV5 is used only as the feature-collection base class.
+# This compatibility block prevents its constructor from failing before V6
+# replaces the identity engine with GlobalIdentityV6.
+identity_v5:
+  match_threshold: 0.61
+  match_margin: 0.035
+  strong_threshold: 0.74
+  support: 2
+  gallery: 24
+  novelty: 0.985
+  promote_quality: 0.70
+  new_count: 3
+  evidence_threshold: 0.55
+  stable_threshold: 0.61
+  rescue_body: 0.56
+  rescue_support: 4
+  rescue_stable: 2
+  rescue_margin: 0.04
+  face_threshold: 0.78
+  face_rescue: 0.84
+  face_margin: 0.04
+  face_quality: 0.60
+  face_strong_quality: 0.66
+  face_gallery: 8
+  face_novelty: 0.985
+  merge_body: 0.74
+  merge_support: 3
+  merge_face: 0.90
+
 identity_v6:
   # V6 does not create a permanent GID per tracklet. It first builds
   # provisional track associations and then creates canonical identities.

@@ -1,0 +1,84 @@
+detector:
+  model: weights/yolo11m.pt
+  conf: 0.35
+  iou: 0.60
+  tracker: bytetrack.yaml
+
+reid:
+  model: fastreid_sbs_R101_ibn
+  weights: src/reid/weights/msmt_sbs_R101-ibn.pth
+  device: auto
+  max_batch: 32
+  interval: 5
+  part_interval: 15
+  illumination_variant: true
+  min_quality: 0.20
+
+face:
+  model: buffalo_l
+  device: auto
+  det_size: [640, 640]
+  interval: 15
+  min_detection: 0.55
+  min_size: 32
+  min_quality: 0.42
+  strong_quality: 0.64
+  bank: 8
+
+# Kept for compatibility with BatchPipelineV4 initialization.
+identity_v4:
+  match_threshold: 0.61
+  match_margin: 0.035
+  strong_threshold: 0.74
+  support: 2
+  gallery: 24
+  novelty: 0.985
+  promote_quality: 0.70
+  new_count: 3
+  face_threshold: 0.70
+  face_strong_threshold: 0.80
+  face_margin: 0.06
+  face_quality: 0.48
+  face_strong_quality: 0.64
+  body_conflict: 0.52
+
+identity_v5:
+  # V3 operating point retained for normal body matches.
+  match_threshold: 0.61
+  match_margin: 0.035
+  strong_threshold: 0.74
+  support: 2
+  gallery: 24
+  novelty: 0.985
+  promote_quality: 0.70
+  new_count: 3
+
+  # Adaptive rescue path: several consistent observations can beat a weak
+  # single-frame score without globally lowering the normal threshold.
+  evidence_threshold: 0.55
+  stable_threshold: 0.61
+  rescue_body: 0.56
+  rescue_support: 4
+  rescue_stable: 2
+  rescue_margin: 0.04
+
+  # Face is supporting evidence and can rescue a borderline body candidate.
+  face_threshold: 0.78
+  face_rescue: 0.84
+  face_margin: 0.04
+  face_quality: 0.60
+  face_strong_quality: 0.66
+  face_gallery: 8
+  face_novelty: 0.985
+
+  # Conservative identity-level fragmentation merge.
+  merge_body: 0.74
+  merge_support: 3
+  merge_face: 0.90
+
+tracking:
+  fragment_gap_sec: 2.0
+
+input:
+  videos: []
+  output_dir: rebuild_outputs

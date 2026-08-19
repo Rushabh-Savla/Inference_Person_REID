@@ -1,0 +1,57 @@
+detector:
+  model: weights/yolo11m.pt
+  conf: 0.35
+  iou: 0.60
+  tracker: bytetrack.yaml
+
+reid:
+  model: fastreid_sbs_R101_ibn
+  weights: src/reid/weights/msmt_sbs_R101-ibn.pth
+  device: auto
+  max_batch: 32
+  interval: 5
+  part_interval: 15
+  illumination_variant: true
+  min_quality: 0.20
+
+face:
+  model: buffalo_l
+  device: auto
+  det_size: [640, 640]
+  interval: 15
+  min_detection: 0.55
+  min_size: 32
+  min_quality: 0.42
+  strong_quality: 0.64
+  bank: 8
+
+identity_v6:
+  # V6 does not create a permanent GID per tracklet. It first builds
+  # provisional track associations and then creates canonical identities.
+  body_strong: 0.70
+  body_medium: 0.62
+  face_strong: 0.84
+  face_confirm: 0.78
+
+  # Same-camera lost-track reassociation window.
+  same_camera_gap_sec: 3.0
+  same_camera_distance: 4.5
+  same_camera_score: 0.50
+
+  # Gallery and promotion policy.
+  gallery: 24
+  promote_quality: 0.70
+  face_gallery: 8
+  face_novelty: 0.985
+
+  # Controlled identity merge support.
+  merge_face: 0.90
+  identity_gap_sec: 60.0
+  min_cluster_support: 1
+
+tracking:
+  fragment_gap_sec: 2.0
+
+input:
+  videos: []
+  output_dir: rebuild_outputs

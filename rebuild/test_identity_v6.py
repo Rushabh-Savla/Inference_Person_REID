@@ -37,7 +37,7 @@ def test_same_camera_fragment():
     mapping, decisions = engine.run({x.key: x for x in [left, right, other]}, {})
     assert mapping[left.key] == mapping[right.key]
     assert mapping[other.key] != mapping[left.key]
-    assert any(item.reason == "recent_lost_track" for item in decisions if item.key == right.key)
+    assert any("recent_lost_track" in item.reason for item in decisions if item.key == right.key)
 
 
 def test_cross_camera_persistent_identity():

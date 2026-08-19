@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import json
-import os
 import sys
 from pathlib import Path
 from typing import Dict, List, Tuple
@@ -24,15 +23,17 @@ class BatchPipeline:
         with open(config_path, "r", encoding="utf-8") as handle:
             self.cfg = yaml.safe_load(handle) or {}
 
-        self.out = Path(self.cfg.get("input", {}).get("output_dir", "rebuild_outputs"))
+        self.out = Path(
+            self.cfg.get("input", {}).get("output_dir", "rebuild_outputs")
+        )
         self.out.mkdir(parents=True, exist_ok=True)
         self.cache = self.out / "cache"
         self.cache.mkdir(parents=True, exist_ok=True)
 
         det = self.cfg["detector"]
-        self.detector_cfg = det
-
         reid = self.cfg["reid"]
+        ident = self.cfg["identity"]
+
         device = None if str(reid.get("device", "auto")).lower() == "auto" else reid.get("device")
         self.extractor = ReIDExtractor(
             weights=reid["weights"],
@@ -41,27 +42,26 @@ class BatchPipeline:
             model=reid.get("model"),
         )
 
-        ident = self.cfg["identity"]
+        self.detector_cfg = det
+        self.interval = max(1, int(reid.get("interval", 5)))
+        self.min_embeddings = int(ident["min_embeddings"])
+        self.max_track_gap_sec = float(ident["max_same_camera_gap_sec"])
+
         self.reconciler = OfflineReconciler(
             same_threshold=float(ident["same_threshold"]),
             cross_threshold=float(ident["cross_threshold"]),
             min_margin=float(ident["min_margin"]),
             bank_size=int(ident["bank_size"]),
-            max_same_camera_gap_sec=float(ident["max_same_camera_gap_sec"]),
+            max_same_camera_gap_sec=self.max_track_gap_sec,
         )
 
         self.tracklets: Dict[str, Tracklet] = {}
-        self.embedding_store: List[np.ndarray] = []
-        self.observations: List[Observation] = []
         self.video_meta: Dict[str, dict] = {}
 
     def sources(self, values: List[str]) -> List[Tuple[str, str]]:
         if values:
-            result = []
-            for value in values:
-                path = Path(value)
-                result.append((path.stem, str(path)))
-            return result
+            return [(Path(value).stem, value) for value in values]
+
         configured = self.cfg.get("input", {}).get("videos", [])
         result = []
         for entry in configured:
@@ -74,17 +74,22 @@ class BatchPipeline:
     def run(self, sources: List[str]) -> Dict[str, str]:
         camera_sources = self.sources(sources)
         if not camera_sources:
-            raise SystemExit("No videos supplied. Use: python rebuild/run.py batch --videos ...")
+            raise SystemExit(
+                "No videos supplied. Use: python rebuild/run.py batch --videos ..."
+            )
 
         print(f"[clean] ReID: {self.extractor.describe()}")
         print(f"[clean] cameras: {len(camera_sources)}")
+        print("[clean] pass 1: detect + track + embed")
 
         for camera, path in camera_sources:
             self.collect_camera(camera, path)
 
         self.save_cache()
+        print("[clean] pass 2: reconcile finished tracklets")
         mapping = self.reconcile()
         self.save_mapping(mapping)
+        print("[clean] pass 3: render from saved detections (NO detector rerun)")
         self.render(mapping)
         self.summary(mapping)
         return mapping
@@ -115,15 +120,16 @@ class BatchPipeline:
             iou=float(self.detector_cfg["iou"]),
         )
 
-        interval = max(1, int(self.cfg["reid"]["interval"]))
-        last_embed: Dict[int, int] = {}
         detections_path = self.cache / f"{camera}.detections.jsonl"
         embeddings_path = self.cache / f"{camera}.embeddings.npy"
         events = detections_path.open("w", encoding="utf-8")
-        local_vectors: List[np.ndarray] = []
 
+        last_embed: Dict[int, int] = {}
+        last_seen: Dict[int, int] = {}
+        segments: Dict[int, int] = {}
+        vectors: List[np.ndarray] = []
         frame_index = 0
-        pending: List[Tuple[int, int, Tuple[int, int, int, int], float, float, np.ndarray]] = []
+
         while True:
             ok, frame = cap.read()
             if not ok:
@@ -131,12 +137,21 @@ class BatchPipeline:
             frame_index += 1
 
             detections = detector.track(frame)
-            batch_crops = []
-            batch_meta = []
+            crops = []
+            meta = []
 
             for det in detections:
                 if det.track_id is None:
                     continue
+
+                track_id = int(det.track_id)
+                previous = last_seen.get(track_id)
+                if previous is None or frame_index - previous > int(self.max_track_gap_sec * fps):
+                    segments[track_id] = segments.get(track_id, 0) + 1
+                segment = segments[track_id]
+                tracklet_key = f"{camera}:{track_id}:{segment}"
+                last_seen[track_id] = frame_index
+
                 bbox = (det.x1, det.y1, det.x2, det.y2)
                 events.write(
                     json.dumps(
@@ -144,7 +159,8 @@ class BatchPipeline:
                             "camera": camera,
                             "frame": frame_index,
                             "timestamp": frame_index / fps,
-                            "track_id": int(det.track_id),
+                            "track_id": track_id,
+                            "tracklet_key": tracklet_key,
                             "bbox": list(bbox),
                             "detection_score": float(det.confidence),
                         }
@@ -152,7 +168,7 @@ class BatchPipeline:
                     + "\n"
                 )
 
-                if frame_index - last_embed.get(int(det.track_id), -10**9) < interval:
+                if frame_index - last_embed.get(tracklet_key, -10**9) < self.interval:
                     continue
 
                 person = crop(frame, bbox)
@@ -162,19 +178,19 @@ class BatchPipeline:
                 if q < 0.20:
                     continue
 
-                batch_crops.append(person)
-                batch_meta.append((int(det.track_id), bbox, q, float(det.confidence)))
-                last_embed[int(det.track_id)] = frame_index
+                crops.append(person)
+                meta.append((tracklet_key, track_id, bbox, q, float(det.confidence)))
+                last_embed[tracklet_key] = frame_index
 
-            if batch_crops:
-                vectors = self.extractor.extract_batch(batch_crops)
-                for vector, meta in zip(vectors, batch_meta):
-                    track_id, bbox, q, det_score = meta
-                    key = f"{camera}:{track_id}"
+            if crops:
+                features = self.extractor.extract_batch(crops)
+                for feature, item in zip(features, meta):
+                    key, track_id, bbox, q, det_score = item
                     tracklet = self.tracklets.get(key)
                     if tracklet is None:
                         tracklet = Tracklet(camera=camera, track_id=track_id, fps=fps)
                         self.tracklets[key] = tracklet
+
                     obs = Observation(
                         camera=camera,
                         frame=frame_index,
@@ -184,26 +200,29 @@ class BatchPipeline:
                         detection_score=det_score,
                         quality=q,
                     )
-                    index = tracklet.add_embedding(vector, q)
-                    obs.embedding_index = index
+                    obs.embedding_index = tracklet.add_embedding(feature, q)
                     tracklet.observations.append(obs)
-                    self.observations.append(obs)
-                    local_vectors.append(vector.astype(np.float16))
+                    vectors.append(feature.astype(np.float16))
 
         cap.release()
         events.close()
-        np.save(embeddings_path, np.stack(local_vectors) if local_vectors else np.empty((0, self.extractor.embedding_dim), dtype=np.float16))
+        np.save(
+            embeddings_path,
+            np.stack(vectors)
+            if vectors
+            else np.empty((0, self.extractor.embedding_dim), dtype=np.float16),
+        )
 
+        count = sum(1 for key in self.tracklets if key.startswith(camera + ":"))
         print(
-            f"[clean] {camera}: frames={frame_index} "
-            f"tracklets={sum(1 for key in self.tracklets if key.startswith(camera + ':'))} "
-            f"embeddings={len(local_vectors)}"
+            f"[clean] {camera}: frames={frame_index} tracklets={count} "
+            f"embeddings={len(vectors)}"
         )
 
     def save_cache(self) -> None:
-        data = []
+        rows = []
         for key, tracklet in sorted(self.tracklets.items()):
-            data.append(
+            rows.append(
                 {
                     "key": key,
                     "camera": tracklet.camera,
@@ -216,24 +235,24 @@ class BatchPipeline:
                 }
             )
         with (self.cache / "tracklets.json").open("w", encoding="utf-8") as handle:
-            json.dump(data, handle, indent=2)
+            json.dump(rows, handle, indent=2)
 
     def reconcile(self) -> Dict[str, str]:
         usable = {
             key: tracklet
             for key, tracklet in self.tracklets.items()
-            if tracklet.count >= int(self.cfg["identity"]["min_embeddings"])
+            if tracklet.count >= self.min_embeddings
         }
         mapping = self.reconciler.reconcile(usable)
 
-        for key in self.tracklets:
-            if key not in mapping:
-                # Very short tracklets are not allowed to contaminate global IDs.
-                # They receive their own identity only for visualization.
-                next_number = 1 + max(
-                    [int(value[1:]) for value in mapping.values()] or [0]
-                )
-                mapping[key] = f"G{next_number:06d}"
+        next_id = 1 + max(
+            [int(value[1:]) for value in mapping.values()] or [0]
+        )
+        for key in sorted(self.tracklets):
+            if key in mapping:
+                continue
+            mapping[key] = f"G{next_id:06d}"
+            next_id += 1
         return mapping
 
     def save_mapping(self, mapping: Dict[str, str]) -> None:
@@ -241,10 +260,8 @@ class BatchPipeline:
             json.dump(mapping, handle, indent=2, sort_keys=True)
 
     def render(self, mapping: Dict[str, str]) -> None:
-        interval_lookup = {}
         for camera, meta in self.video_meta.items():
-            src = meta["source"]
-            cap = cv2.VideoCapture(src)
+            cap = cv2.VideoCapture(meta["source"])
             output = self.out / f"{camera}.mp4"
             writer = cv2.VideoWriter(
                 str(output),
@@ -252,12 +269,14 @@ class BatchPipeline:
                 meta["fps"],
                 (meta["width"], meta["height"]),
             )
-            records: Dict[int, List[dict]] = {}
-            cache_path = self.cache / f"{camera}.detections.jsonl"
-            with cache_path.open("r", encoding="utf-8") as handle:
+
+            frame_rows: Dict[int, List[dict]] = {}
+            with (self.cache / f"{camera}.detections.jsonl").open(
+                "r", encoding="utf-8"
+            ) as handle:
                 for line in handle:
                     record = json.loads(line)
-                    records.setdefault(int(record["frame"]), []).append(record)
+                    frame_rows.setdefault(int(record["frame"]), []).append(record)
 
             frame_index = 0
             while True:
@@ -265,11 +284,10 @@ class BatchPipeline:
                 if not ok:
                     break
                 frame_index += 1
-                for record in records.get(frame_index, []):
-                    box = tuple(record["bbox"])
-                    key = f"{camera}:{int(record['track_id'])}"
+                for record in frame_rows.get(frame_index, []):
+                    key = record["tracklet_key"]
                     gid = mapping[key]
-                    x1, y1, x2, y2 = [int(v) for v in box]
+                    x1, y1, x2, y2 = [int(v) for v in record["bbox"]]
                     cv2.rectangle(frame, (x1, y1), (x2, y2), (0, 255, 0), 2)
                     cv2.putText(
                         frame,
@@ -281,6 +299,7 @@ class BatchPipeline:
                         2,
                         cv2.LINE_AA,
                     )
+
                 cv2.putText(
                     frame,
                     camera,

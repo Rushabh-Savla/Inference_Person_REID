@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import numpy as np
 
-from core import Observation, OfflineReconciler, Tracklet
+from core import GlobalIdentityEngine, Observation, Tracklet
 
 
 def vector(index: int, dim: int = 8) -> np.ndarray:
@@ -11,53 +11,39 @@ def vector(index: int, dim: int = 8) -> np.ndarray:
     return value
 
 
-def make_track(camera, track_id, start, end, vectors):
-    track = Tracklet(camera=camera, track_id=track_id, fps=20.0)
+def make_track(camera, track_id, segment, start, vectors):
+    track = Tracklet(camera=camera, track_id=track_id, segment=segment, fps=20.0)
     for offset, emb in enumerate(vectors):
-        frame = int((start + offset * 0.5) * 20)
-        track.observations.append(
-            Observation(
-                camera=camera,
-                frame=frame,
-                timestamp=start + offset * 0.5,
-                track_id=track_id,
-                bbox=(0, 0, 100, 300),
-                detection_score=0.9,
-                quality=1.0,
-            )
-        )
+        timestamp = start + offset * 0.5
+        frame = int(timestamp * 20)
+        track.observations.append(Observation(camera, frame, timestamp, track_id, (0, 0, 100, 300), 0.9, 1.0))
         track.add_embedding(emb, 1.0)
     return track
 
 
 def main():
-    same_a = make_track("cam_a", 1, 0.0, 1.5, [vector(0)] * 4)
-    same_b = make_track("cam_b", 5, 2.0, 3.5, [vector(0)] * 4)
-    different = make_track("cam_c", 8, 2.0, 3.5, [vector(1)] * 4)
-    overlap = make_track("cam_a", 9, 0.5, 2.0, [vector(0)] * 4)
+    same_camera_return_a = make_track("cam_a", 1, 1, 0.0, [vector(0)] * 4)
+    same_camera_return_b = make_track("cam_a", 7, 1, 50.0, [vector(0)] * 4)
+    cross_camera_same = make_track("cam_b", 5, 1, 10.0, [vector(0)] * 4)
+    different = make_track("cam_c", 8, 1, 10.0, [vector(1)] * 4)
+    overlap = make_track("cam_a", 9, 1, 1.0, [vector(0)] * 4)
 
-    engine = OfflineReconciler(
-        same_threshold=0.80,
-        cross_threshold=0.80,
-        min_margin=0.03,
-        bank_size=8,
-        max_same_camera_gap_sec=20.0,
-    )
+    engine = GlobalIdentityEngine(threshold=0.60, margin=0.03, strong=0.72, bank_size=8)
+    mapping, matches = engine.reconcile({
+        same_camera_return_a.key: same_camera_return_a,
+        same_camera_return_b.key: same_camera_return_b,
+        cross_camera_same.key: cross_camera_same,
+        different.key: different,
+        overlap.key: overlap,
+    })
 
-    mapping = engine.reconcile(
-        {
-            "cam_a:1:1": same_a,
-            "cam_b:5:1": same_b,
-            "cam_c:8:1": different,
-            "cam_a:9:1": overlap,
-        }
-    )
+    assert mapping[same_camera_return_a.key] == mapping[same_camera_return_b.key]
+    assert mapping[same_camera_return_a.key] == mapping[cross_camera_same.key]
+    assert mapping[same_camera_return_a.key] != mapping[different.key]
+    assert mapping[same_camera_return_a.key] != mapping[overlap.key]
+    assert any(m.left == same_camera_return_a.key or m.right == same_camera_return_a.key for m in matches)
 
-    assert mapping["cam_a:1:1"] == mapping["cam_b:5:1"]
-    assert mapping["cam_a:1:1"] != mapping["cam_c:8:1"]
-    assert mapping["cam_a:1:1"] != mapping["cam_a:9:1"]
-
-    print("CLEAN CORE TEST: OK")
+    print("GLOBAL IDENTITY CORE TEST: OK")
 
 
 if __name__ == "__main__":

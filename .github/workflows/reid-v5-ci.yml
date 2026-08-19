@@ -1,0 +1,25 @@
+name: reid-v5-ci
+
+on:
+  push:
+    branches:
+      - rebuild/clean-system
+      - feature/reid-v5
+  pull_request:
+    branches:
+      - rebuild/clean-system
+
+jobs:
+  unit:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Install test dependencies
+        run: python -m pip install --upgrade pip numpy opencv-python-headless pyyaml
+      - name: Compile V5
+        run: python -m py_compile rebuild/identity_v5.py rebuild/batch_v5.py rebuild/run.py rebuild/test_identity_v5.py
+      - name: Identity V5 unit test
+        run: python -m rebuild.test_identity_v5

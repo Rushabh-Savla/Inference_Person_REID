@@ -23,9 +23,7 @@ class BatchPipeline:
         with open(config_path, "r", encoding="utf-8") as handle:
             self.cfg = yaml.safe_load(handle) or {}
 
-        self.out = Path(
-            self.cfg.get("input", {}).get("output_dir", "rebuild_outputs")
-        )
+        self.out = Path(self.cfg.get("input", {}).get("output_dir", "rebuild_outputs"))
         self.out.mkdir(parents=True, exist_ok=True)
         self.cache = self.out / "cache"
         self.cache.mkdir(parents=True, exist_ok=True)
@@ -61,7 +59,6 @@ class BatchPipeline:
     def sources(self, values: List[str]) -> List[Tuple[str, str]]:
         if values:
             return [(Path(value).stem, value) for value in values]
-
         configured = self.cfg.get("input", {}).get("videos", [])
         result = []
         for entry in configured:
@@ -74,14 +71,11 @@ class BatchPipeline:
     def run(self, sources: List[str]) -> Dict[str, str]:
         camera_sources = self.sources(sources)
         if not camera_sources:
-            raise SystemExit(
-                "No videos supplied. Use: python rebuild/run.py batch --videos ..."
-            )
+            raise SystemExit("No videos supplied. Use: python rebuild/run.py batch --videos ...")
 
         print(f"[clean] ReID: {self.extractor.describe()}")
         print(f"[clean] cameras: {len(camera_sources)}")
         print("[clean] pass 1: detect + track + embed")
-
         for camera, path in camera_sources:
             self.collect_camera(camera, path)
 
@@ -124,7 +118,7 @@ class BatchPipeline:
         embeddings_path = self.cache / f"{camera}.embeddings.npy"
         events = detections_path.open("w", encoding="utf-8")
 
-        last_embed: Dict[int, int] = {}
+        last_embed: Dict[str, int] = {}
         last_seen: Dict[int, int] = {}
         segments: Dict[int, int] = {}
         vectors: List[np.ndarray] = []
@@ -153,20 +147,15 @@ class BatchPipeline:
                 last_seen[track_id] = frame_index
 
                 bbox = (det.x1, det.y1, det.x2, det.y2)
-                events.write(
-                    json.dumps(
-                        {
-                            "camera": camera,
-                            "frame": frame_index,
-                            "timestamp": frame_index / fps,
-                            "track_id": track_id,
-                            "tracklet_key": tracklet_key,
-                            "bbox": list(bbox),
-                            "detection_score": float(det.confidence),
-                        }
-                    )
-                    + "\n"
-                )
+                events.write(json.dumps({
+                    "camera": camera,
+                    "frame": frame_index,
+                    "timestamp": frame_index / fps,
+                    "track_id": track_id,
+                    "tracklet_key": tracklet_key,
+                    "bbox": list(bbox),
+                    "detection_score": float(det.confidence),
+                }) + "\n")
 
                 if frame_index - last_embed.get(tracklet_key, -10**9) < self.interval:
                     continue
@@ -208,51 +197,45 @@ class BatchPipeline:
         events.close()
         np.save(
             embeddings_path,
-            np.stack(vectors)
-            if vectors
-            else np.empty((0, self.extractor.embedding_dim), dtype=np.float16),
+            np.stack(vectors) if vectors else np.empty((0, self.extractor.embedding_dim), dtype=np.float16),
         )
 
         count = sum(1 for key in self.tracklets if key.startswith(camera + ":"))
-        print(
-            f"[clean] {camera}: frames={frame_index} tracklets={count} "
-            f"embeddings={len(vectors)}"
-        )
+        print(f"[clean] {camera}: frames={frame_index} tracklets={count} embeddings={len(vectors)}")
 
     def save_cache(self) -> None:
         rows = []
+        packed = {}
         for key, tracklet in sorted(self.tracklets.items()):
-            rows.append(
-                {
-                    "key": key,
-                    "camera": tracklet.camera,
-                    "track_id": tracklet.track_id,
-                    "fps": tracklet.fps,
-                    "start": tracklet.start,
-                    "end": tracklet.end,
-                    "embedding_count": tracklet.count,
-                    "quality": tracklet.embedding_quality,
-                }
-            )
+            rows.append({
+                "key": key,
+                "camera": tracklet.camera,
+                "track_id": tracklet.track_id,
+                "fps": tracklet.fps,
+                "start": tracklet.start,
+                "end": tracklet.end,
+                "embedding_count": tracklet.count,
+                "quality": tracklet.embedding_quality,
+            })
+            packed[key] = np.stack(tracklet.embeddings).astype(np.float32)
+
         with (self.cache / "tracklets.json").open("w", encoding="utf-8") as handle:
             json.dump(rows, handle, indent=2)
+        np.savez_compressed(self.cache / "tracklet_embeddings.npz", **packed)
+        with (self.cache / "video_meta.json").open("w", encoding="utf-8") as handle:
+            json.dump(self.video_meta, handle, indent=2)
 
     def reconcile(self) -> Dict[str, str]:
         usable = {
-            key: tracklet
-            for key, tracklet in self.tracklets.items()
+            key: tracklet for key, tracklet in self.tracklets.items()
             if tracklet.count >= self.min_embeddings
         }
         mapping = self.reconciler.reconcile(usable)
-
-        next_id = 1 + max(
-            [int(value[1:]) for value in mapping.values()] or [0]
-        )
+        next_id = 1 + max([int(value[1:]) for value in mapping.values()] or [0])
         for key in sorted(self.tracklets):
-            if key in mapping:
-                continue
-            mapping[key] = f"G{next_id:06d}"
-            next_id += 1
+            if key not in mapping:
+                mapping[key] = f"G{next_id:06d}"
+                next_id += 1
         return mapping
 
     def save_mapping(self, mapping: Dict[str, str]) -> None:
@@ -264,16 +247,11 @@ class BatchPipeline:
             cap = cv2.VideoCapture(meta["source"])
             output = self.out / f"{camera}.mp4"
             writer = cv2.VideoWriter(
-                str(output),
-                cv2.VideoWriter_fourcc(*"mp4v"),
-                meta["fps"],
-                (meta["width"], meta["height"]),
+                str(output), cv2.VideoWriter_fourcc(*"mp4v"), meta["fps"], (meta["width"], meta["height"])
             )
 
             frame_rows: Dict[int, List[dict]] = {}
-            with (self.cache / f"{camera}.detections.jsonl").open(
-                "r", encoding="utf-8"
-            ) as handle:
+            with (self.cache / f"{camera}.detections.jsonl").open("r", encoding="utf-8") as handle:
                 for line in handle:
                     record = json.loads(line)
                     frame_rows.setdefault(int(record["frame"]), []).append(record)
@@ -285,8 +263,7 @@ class BatchPipeline:
                     break
                 frame_index += 1
                 for record in frame_rows.get(frame_index, []):
-                    key = record["tracklet_key"]
-                    gid = mapping[key]
+                    gid = mapping[record["tracklet_key"]]
                     x1, y1, x2, y2 = [int(v) for v in record["bbox"]]
                     cv2.rectangle(frame, (x1, y1), (x2, y2), (0, 255, 0), 2)
                     cv2.putText(
@@ -299,17 +276,7 @@ class BatchPipeline:
                         2,
                         cv2.LINE_AA,
                     )
-
-                cv2.putText(
-                    frame,
-                    camera,
-                    (20, 35),
-                    cv2.FONT_HERSHEY_SIMPLEX,
-                    0.9,
-                    (255, 255, 255),
-                    2,
-                    cv2.LINE_AA,
-                )
+                cv2.putText(frame, camera, (20, 35), cv2.FONT_HERSHEY_SIMPLEX, 0.9, (255, 255, 255), 2, cv2.LINE_AA)
                 writer.write(frame)
 
             cap.release()
@@ -319,9 +286,7 @@ class BatchPipeline:
     def summary(self, mapping: Dict[str, str]) -> None:
         cameras: Dict[str, set] = {}
         for key, gid in mapping.items():
-            camera = key.split(":", 1)[0]
-            cameras.setdefault(gid, set()).add(camera)
-
+            cameras.setdefault(gid, set()).add(key.split(":", 1)[0])
         multi = {gid: values for gid, values in cameras.items() if len(values) > 1}
         print("\n===== CLEAN BATCH RESULT =====")
         print(f"tracklets: {len(mapping)}")
@@ -334,7 +299,6 @@ class BatchPipeline:
 
 def main() -> None:
     import argparse
-
     parser = argparse.ArgumentParser()
     parser.add_argument("--config", default="rebuild/config.yaml")
     parser.add_argument("--videos", nargs="*", default=[])

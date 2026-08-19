@@ -34,19 +34,33 @@ class Tracklet:
     def key(self) -> str:
         return f"{self.camera}:{self.track_id}:{self.segment}"
 
+    def trim(self, limit: int) -> None:
+        if len(self.features) <= limit:
+            return
+        kinds = sorted({x.kind for x in self.features})
+        quota = max(1, limit // max(1, len(kinds)))
+        keep: List[Feature] = []
+        rest: List[Feature] = []
+        for kind in kinds:
+            group = sorted([x for x in self.features if x.kind == kind], key=lambda x: x.quality, reverse=True)
+            keep.extend(group[:quota])
+            rest.extend(group[quota:])
+        if len(keep) < limit:
+            keep.extend(sorted(rest, key=lambda x: x.quality, reverse=True)[:limit - len(keep)])
+        self.features = keep[:limit]
+
     def add(self, vector: np.ndarray, kind: str, quality: float, meta: dict, novelty: float, limit: int) -> bool:
         vector = unit(vector)
-        if self.features:
-            same = [x.vector for x in self.features if x.kind == kind]
-            if same:
-                best = float(np.max(np.stack(same) @ vector))
-                old = max(x.quality for x in self.features if x.kind == kind)
-                if best >= novelty and quality <= old + 0.02:
-                    return False
+        same = [x.vector for x in self.features if x.kind == kind]
+        if same:
+            best = float(np.max(np.stack(same) @ vector))
+            old = max(x.quality for x in self.features if x.kind == kind)
+            if best >= novelty and quality <= old + 0.02:
+                return False
         stamp = float(meta.get("timestamp", 0.0))
         first = not self.observations
         self.features.append(Feature(vector, kind, float(quality), self.camera, stamp, dict(meta)))
-        self.features = sorted(self.features, key=lambda x: x.quality, reverse=True)[: max(1, int(limit))]
+        self.trim(max(1, int(limit)))
         self.observations.append(dict(meta))
         if first:
             self.start = stamp
@@ -76,6 +90,21 @@ class Identity:
     cameras: set[str] = field(default_factory=set)
     geometry: List[float] = field(default_factory=list)
 
+    def trim(self, values: List[Feature], bank: int) -> List[Feature]:
+        if len(values) <= bank:
+            return values
+        kinds = sorted({x.kind for x in values})
+        quota = max(1, bank // max(1, len(kinds)))
+        keep: List[Feature] = []
+        rest: List[Feature] = []
+        for kind in kinds:
+            group = sorted([x for x in values if x.kind == kind], key=lambda x: x.quality, reverse=True)
+            keep.extend(group[:quota])
+            rest.extend(group[quota:])
+        if len(keep) < bank:
+            keep.extend(sorted(rest, key=lambda x: x.quality, reverse=True)[:bank - len(keep)])
+        return keep[:bank]
+
     def add(self, track: Tracklet, trusted: bool, bank: int, quality: float) -> None:
         target = self.trusted if trusted else self.candidate
         for item in track.features:
@@ -85,14 +114,19 @@ class Identity:
             if same and float(np.max(np.stack(same) @ item.vector)) > 0.985:
                 continue
             target.append(item)
-        target.sort(key=lambda x: x.quality, reverse=True)
-        del target[bank:]
+        if trusted:
+            self.trusted = self.trim(target, bank)
+        else:
+            self.candidate = self.trim(target, max(6, bank // 2))
         if track.key not in self.tracks:
             self.tracks.append(track.key)
         self.cameras.add(track.camera)
         if track.shape > 0:
             self.geometry.append(track.shape)
             self.geometry = self.geometry[-bank:]
+
+    def values(self) -> List[Feature]:
+        return self.trusted + self.candidate
 
 
 @dataclass(frozen=True)
@@ -108,7 +142,7 @@ class Decision:
 
 
 class GlobalIdentityV3:
-    """Persistent global identity search with trusted multi-view galleries."""
+    """Persistent global identity gallery with multi-part evidence."""
 
     def __init__(self, threshold: float = 0.61, margin: float = 0.035,
                  strong: float = 0.74, support: int = 2, gallery: int = 24,
@@ -181,7 +215,7 @@ class GlobalIdentityV3:
         return float(0.85 * vals[0] + 0.15 * (vals[1] if len(vals) > 1 else vals[0])), int(sum(x[1] for x in parts))
 
     def score(self, track: Tracklet, identity: Identity) -> Tuple[float, int]:
-        return self.pair(track.features, identity.trusted or identity.candidate)
+        return self.pair(track.features, identity.values())
 
     def search(self, track: Tracklet, tracks: Dict[str, Tracklet]):
         found = []
@@ -206,7 +240,8 @@ class GlobalIdentityV3:
             accept = best >= self.threshold and ((support >= self.support and margin >= self.margin) or best >= self.strong)
             if accept:
                 self.mapping[track.key] = gid
-                self.identities[gid].add(track, True, self.gallery, self.promote)
+                trusted = bool(best >= self.strong and support >= self.support)
+                self.identities[gid].add(track, trusted, self.gallery, self.promote)
                 result = Decision(track.key, gid, "reidentified", best, margin, support, second, track.camera)
                 self.decisions.append(result)
                 return result
@@ -233,11 +268,9 @@ class GlobalIdentityV3:
         order = sorted(usable.values(), key=lambda x: (-x.evidence(), x.camera, x.start, x.key))
         for track in order:
             self.assign(track, usable)
-
         pending = [x for x in tracks.values() if x.key not in self.mapping and x.count() > 0]
         for track in sorted(pending, key=lambda x: (-x.evidence(), x.camera, x.key)):
             self.assign(track, tracks)
-
         for track in sorted(tracks.values(), key=lambda x: (x.start, x.camera, x.key)):
             if track.key in self.mapping:
                 self.identities[self.mapping[track.key]].add(track, False, self.gallery, self.promote)

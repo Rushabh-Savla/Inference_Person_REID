@@ -37,11 +37,13 @@ def test_face_rescue():
     first = track(1, [0.80, 0.79, 0.78])
     faces = [Feature(np.array([1.0, 0, 0, 0], dtype=np.float32), "face", 0.9, "cam_a", 0.0)]
     engine.assign(first, faces, {first.key: first})
+
     second = track(2, [0.51, 0.50, 0.49], start=2.0, end=3.0)
+    second.features = [feat(0.51, kind="upper", stamp=2.0)]
     second_faces = [Feature(np.array([1.0, 0, 0, 0], dtype=np.float32), "face", 0.9, "cam_b", 2.0)]
     result = engine.assign(second, second_faces, {first.key: first, second.key: second})
     assert result.gid == "G000001"
-    assert "face" in result.reason
+    assert result.reason == "face_rescue"
 
 
 def test_fragment_merge():

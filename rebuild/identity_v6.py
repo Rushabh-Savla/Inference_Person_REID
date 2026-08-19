@@ -5,7 +5,7 @@ from typing import Dict, List, Tuple
 
 import numpy as np
 
-from rebuild.identity_v3 import Feature, Identity, Tracklet, geometry_similarity, unit
+from rebuild.identity_v3 import Feature, Identity, Tracklet, unit
 
 
 @dataclass(frozen=True)
@@ -91,6 +91,7 @@ class GlobalIdentityV6:
         self.face_candidate: Dict[str, List[Feature]] = {}
         self.mapping: Dict[str, str] = {}
         self.provisional: Dict[str, str] = {}
+        self.provisional_count = 0
         self.decisions: List[DecisionV6] = []
         self.edges: List[EdgeV6] = []
         self.next_id = 1
@@ -115,7 +116,7 @@ class GlobalIdentityV6:
     def _bbox_center(row: dict) -> Tuple[float, float]:
         box = row.get("bbox") or [0, 0, 0, 0]
         x1, y1, x2, y2 = map(float, box)
-        return (0.5 * (x1 + x2), 0.5 * (y1 + y2))
+        return 0.5 * (x1 + x2), 0.5 * (y1 + y2)
 
     @staticmethod
     def _bbox_height(row: dict) -> float:
@@ -143,7 +144,7 @@ class GlobalIdentityV6:
             flat = np.sort(sims.reshape(-1))
             best = float(flat[-1])
             top = float(np.mean(flat[-min(3, len(flat)):]))
-            groups[kind] = (0.72 * best + 0.28 * top, int((flat >= 0.63).sum()))
+            groups[kind] = 0.72 * best + 0.28 * top, int((flat >= 0.63).sum())
         if not groups:
             return 0.0, 0
         full = groups.get("full") or groups.get("light")
@@ -175,16 +176,16 @@ class GlobalIdentityV6:
     def _continuity(cls, left: Tracklet, right: Tracklet) -> Tuple[float, float, float, str]:
         if left.camera != right.camera or cls.overlap(left, right):
             return 0.0, 0.0, 0.0, ""
-        a0, a1 = cls.endpoints(left)
-        b0, b1 = cls.endpoints(right)
-        if a0 is None or a1 is None or b0 is None or b1 is None:
+        _, a1 = cls.endpoints(left)
+        b0, _ = cls.endpoints(right)
+        if a1 is None or b0 is None:
             return 0.0, 0.0, 0.0, ""
         if left.end <= right.start:
             gap = float(right.start - left.end)
             prev, nxt = a1, b0
         else:
             gap = float(left.start - right.end)
-            prev, nxt = b1, a0
+            prev, nxt = a1 if right.end <= left.start else b0, b0 if right.end <= left.start else a1
         if gap > 3.0:
             return 0.0, 0.0, gap, ""
         px, py = cls._bbox_center(prev)
@@ -198,13 +199,11 @@ class GlobalIdentityV6:
         return float(temporal), float(spatial), gap, reason
 
     def pair_edge(self, left: Tracklet, right: Tracklet, faces: Dict[str, List[Feature]]) -> EdgeV6 | None:
-        if left.key == right.key:
-            return None
-        if left.camera == right.camera and self.overlap(left, right):
+        if left.key == right.key or (left.camera == right.camera and self.overlap(left, right)):
             return None
         body, support = self._safe_pair(left.features, right.features)
         face, face_support = self._face_pair(faces.get(left.key, []), faces.get(right.key, []))
-        temporal, spatial, gap, continuity_reason = self._continuity(left, right)
+        temporal, spatial, _, continuity_reason = self._continuity(left, right)
 
         score = body
         reason_parts = []
@@ -220,15 +219,12 @@ class GlobalIdentityV6:
             score = max(score, 0.72 * body + 0.18 * spatial + 0.10 * temporal)
             reason_parts.append("temporal")
 
-        accepted = False
-        if face >= self.face_strong and face_support >= 1:
-            accepted = True
-        elif body >= self.body_strong and support >= self.min_cluster_support:
-            accepted = True
-        elif temporal > 0.0 and spatial > 0.45 and body >= self.same_camera_score:
-            accepted = True
-        elif body >= self.body_medium and face >= self.face_confirm:
-            accepted = True
+        accepted = (
+            (face >= self.face_strong and face_support >= 1)
+            or (body >= self.body_strong and support >= self.min_cluster_support)
+            or (temporal > 0.0 and spatial > 0.45 and body >= self.same_camera_score)
+            or (body >= self.body_medium and face >= self.face_confirm)
+        )
         if not accepted:
             return None
 
@@ -241,17 +237,7 @@ class GlobalIdentityV6:
         else:
             reason = "appearance"
 
-        return EdgeV6(
-            left.key,
-            right.key,
-            float(body),
-            float(face),
-            float(temporal),
-            float(spatial),
-            float(score),
-            int(max(support, face_support)),
-            reason,
-        )
+        return EdgeV6(left.key, right.key, float(body), float(face), float(temporal), float(spatial), float(score), int(max(support, face_support)), reason)
 
     def build_edges(self, tracks: Dict[str, Tracklet], faces: Dict[str, List[Feature]]) -> None:
         values = sorted(tracks.values(), key=lambda x: (x.start, x.camera, x.key))
@@ -264,23 +250,20 @@ class GlobalIdentityV6:
         self.edges.sort(key=lambda x: x.score, reverse=True)
 
     def _component_overlap(self, members: List[str], candidate: Tracklet, tracks: Dict[str, Tracklet]) -> bool:
-        for key in members:
-            item = tracks[key]
-            if item.camera == candidate.camera and self.overlap(item, candidate):
-                return True
-        return False
+        return any(
+            tracks[key].camera == candidate.camera and self.overlap(tracks[key], candidate)
+            for key in members
+        )
 
     def _cluster(self, tracks: Dict[str, Tracklet]) -> Dict[str, List[str]]:
         keys = sorted(tracks)
         dsu = DSU(keys)
-        members: Dict[str, List[str]] = {key: [key] for key in keys}
+        members = {key: [key] for key in keys}
         for edge in self.edges:
-            left_root = dsu.find(edge.left)
-            right_root = dsu.find(edge.right)
+            left_root, right_root = dsu.find(edge.left), dsu.find(edge.right)
             if left_root == right_root:
                 continue
-            left_members = members[left_root]
-            right_members = members[right_root]
+            left_members, right_members = members[left_root], members[right_root]
             if any(self._component_overlap(left_members, tracks[r], tracks) for r in right_members):
                 continue
             strong_edge = edge.body >= self.body_strong or edge.face >= self.face_strong
@@ -298,17 +281,15 @@ class GlobalIdentityV6:
 
     @staticmethod
     def _canonical(members: List[str], tracks: Dict[str, Tracklet]) -> str:
-        first = min((tracks[key] for key in members), key=lambda x: (x.start, x.camera, x.key))
-        return first.key
+        return min((tracks[key] for key in members), key=lambda x: (x.start, x.camera, x.key)).key
 
     def _add_identity(self, gid: str, track: Tracklet, trusted: bool) -> None:
-        identity = self.identities.setdefault(gid, Identity(gid))
-        identity.add(track, trusted, self.gallery, self.promote)
+        self.identities.setdefault(gid, Identity(gid)).add(track, trusted, self.gallery, self.promote)
 
     def run(self, tracks: Dict[str, Tracklet], faces: Dict[str, List[Feature]]):
         self.build_edges(tracks, faces)
         components = self._cluster(tracks)
-        provisional_count = len(components)
+        self.provisional_count = len(components)
         for index, members in enumerate(sorted(components.values(), key=lambda xs: min((tracks[x].start, tracks[x].camera, x) for x in xs)), 1):
             provisional = f"P{index:04d}"
             gid = self.gid()
@@ -321,33 +302,33 @@ class GlobalIdentityV6:
                 self.mapping[key] = gid
                 self.provisional[key] = provisional
 
-            members = list(members)
             for key in members:
                 reason = "new_identity"
                 body = face = temporal = spatial = 0.0
                 support = 0
-                matched_edges = [e for e in self.edges if (e.left == key and e.right in members) or (e.right == key and e.left in members)]
-                if matched_edges:
-                    best = max(matched_edges, key=lambda e: e.score)
+                matched = [
+                    e for e in self.edges
+                    if (e.left == key and e.right in members) or (e.right == key and e.left in members)
+                ]
+                if matched:
+                    best = max(matched, key=lambda e: e.score)
                     reason = best.reason
                     body, face, temporal, spatial, support = best.body, best.face, best.temporal, best.spatial, best.support
                     if "face" in reason:
                         self.face_assisted += 1
-                    if "temporal" in reason or "recent_lost_track" in reason:
+                    if "temporal" in reason or reason == "recent_lost_track":
                         self.temporal_assisted += 1
                     if "appearance" in reason or best.body >= self.body_medium:
                         self.body_assisted += 1
-                    if "recent_lost_track" in reason:
+                    if reason == "recent_lost_track":
                         self.reassociated += 1
                         self.same_camera_reassociated += 1
-                    elif tracks[key].camera not in set(tracks[x].camera for x in members if x != key):
+                    elif tracks[key].camera not in {tracks[x].camera for x in members if x != key}:
                         self.cross_camera_reidentified += 1
                     state = "confirmed_existing"
                 else:
                     state = "new_person"
-                self.decisions.append(DecisionV6(key, gid, state, reason, max(body, face),
-                                                 0.0, body, face, temporal, spatial, support,
-                                                 tracks[key].camera, provisional, False))
+                self.decisions.append(DecisionV6(key, gid, state, reason, max(body, face), 0.0, body, face, temporal, spatial, support, tracks[key].camera, provisional, False))
 
         self.identity_merges = sum(max(0, len(members) - 1) for members in components.values())
         return dict(self.mapping), list(self.decisions)
@@ -375,7 +356,7 @@ class GlobalIdentityV6:
             "recent_lost_track_reassociations": self.reassociated,
             "cross_camera_reidentifications": self.cross_camera_reidentified,
             "identity_merges": self.identity_merges,
-            "provisional_identities": provisional_count,
+            "provisional_identities": self.provisional_count,
             "fragmented_identities": fragmentation,
             "fragmented_identity_count": len(fragmentation),
             "face_assisted": self.face_assisted,

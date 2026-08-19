@@ -69,6 +69,7 @@ class BatchPipelineV2:
         )
         self.tracklets: Dict[str, Tracklet] = {}
         self.video_meta: Dict[str, dict] = {}
+        self.matched_camera_by_tracklet: Dict[str, str] = {}
 
     def sources(self, values: List[str]) -> List[Tuple[str, str]]:
         if values:
@@ -96,6 +97,7 @@ class BatchPipelineV2:
         self.save_cache()
         print("[v2] pass 2: shared global multi-view reconciliation")
         mapping, matches = self.engine.reconcile(self.tracklets)
+        self.matched_camera_by_tracklet = self.build_matched_camera_map(matches)
         self.save_mapping(mapping, matches)
         self.save_gallery(mapping)
         self.print_diagnostics(mapping, matches)
@@ -240,6 +242,32 @@ class BatchPipelineV2:
         np.savez_compressed(self.cache / "tracklet_embeddings_v2.npz", **packed)
         (self.cache / "video_meta_v2.json").write_text(json.dumps(self.video_meta, indent=2), encoding="utf-8")
 
+    def build_matched_camera_map(self, matches) -> Dict[str, str]:
+        """Map only confirmed cross-camera matches to their supporting camera.
+
+        A tracklet gets a label only when the reconciler produced an explicit
+        cross-camera MERGE for it. This prevents newly created identities or
+        same-camera-only associations from being rendered as MATCHED CAM.
+        """
+        links: Dict[str, List[Tuple[float, float, str]]] = {}
+        for match in matches:
+            if match.relation != "cross":
+                continue
+            if match.left not in self.tracklets or match.right not in self.tracklets:
+                continue
+            left = self.tracklets[match.left]
+            right = self.tracklets[match.right]
+            links.setdefault(match.left, []).append((float(match.score), right.end, right.camera))
+            links.setdefault(match.right, []).append((float(match.score), left.end, left.camera))
+
+        result: Dict[str, str] = {}
+        for key, values in links.items():
+            # Prefer the strongest confirmed cross-camera association; break ties
+            # using the most recent supporting observation.
+            values.sort(key=lambda item: (item[0], item[1]), reverse=True)
+            result[key] = values[0][2]
+        return result
+
     def save_mapping(self, mapping: Dict[str, str], matches) -> None:
         (self.out / "track_to_global_v2.json").write_text(json.dumps(mapping, indent=2, sort_keys=True), encoding="utf-8")
         rows = []
@@ -249,6 +277,8 @@ class BatchPipelineV2:
                 "right": match.right,
                 "left_global": mapping[match.left],
                 "right_global": mapping[match.right],
+                "left_camera": self.tracklets[match.left].camera,
+                "right_camera": self.tracklets[match.right].camera,
                 "score": match.score,
                 "margin_left": match.margin_left,
                 "margin_right": match.margin_right,
@@ -259,6 +289,16 @@ class BatchPipelineV2:
         with (self.out / "identity_matches_v2.jsonl").open("w", encoding="utf-8") as handle:
             for row in rows:
                 handle.write(json.dumps(row) + "\n")
+
+        matched_meta = {
+            key: {
+                "global_id": mapping[key],
+                "matched_camera": camera,
+            }
+            for key, camera in self.matched_camera_by_tracklet.items()
+            if key in mapping
+        }
+        (self.out / "matched_cameras_v2.json").write_text(json.dumps(matched_meta, indent=2, sort_keys=True), encoding="utf-8")
 
     def save_gallery(self, mapping: Dict[str, str]) -> None:
         galleries = self.engine.gallery_for_mapping(self.tracklets, mapping, self.bank_size)
@@ -281,6 +321,7 @@ class BatchPipelineV2:
         print(f"[v2] accepted associations: {len(matches)}")
         print(f"[v2] same-camera merges: {same}")
         print(f"[v2] cross-camera merges: {cross}")
+        print(f"[v2] matched-camera labels: {len(self.matched_camera_by_tracklet)}")
         for match in matches[:30]:
             print(f"  {match.relation}: {match.left} <-> {match.right} score={match.score:.4f} margins={match.margin_left:.4f}/{match.margin_right:.4f}")
 
@@ -307,10 +348,36 @@ class BatchPipelineV2:
                         break
                     frame_index += 1
                     for record in frame_rows.get(frame_index, []):
-                        gid = mapping[record["tracklet_key"]]
+                        key = record["tracklet_key"]
+                        gid = mapping[key]
                         x1, y1, x2, y2 = [int(v) for v in record["bbox"]]
                         cv2.rectangle(frame, (x1, y1), (x2, y2), (0, 255, 0), 2)
-                        cv2.putText(frame, f"{gid} T{record['track_id']}", (x1, max(25, y1 - 8)), cv2.FONT_HERSHEY_SIMPLEX, 0.65, (0, 255, 0), 2, cv2.LINE_AA)
+
+                        label_y = max(25, y1 - 8)
+                        cv2.putText(
+                            frame,
+                            gid,
+                            (x1, label_y),
+                            cv2.FONT_HERSHEY_SIMPLEX,
+                            0.65,
+                            (0, 255, 0),
+                            2,
+                            cv2.LINE_AA,
+                        )
+
+                        matched_camera = self.matched_camera_by_tracklet.get(key)
+                        if matched_camera:
+                            display_camera = matched_camera[4:] if matched_camera.startswith("cam_") else matched_camera
+                            cv2.putText(
+                                frame,
+                                f"MATCHED CAM {display_camera}",
+                                (x1, label_y + 24),
+                                cv2.FONT_HERSHEY_SIMPLEX,
+                                0.58,
+                                (0, 255, 255),
+                                2,
+                                cv2.LINE_AA,
+                            )
                     cv2.putText(frame, camera, (20, 35), cv2.FONT_HERSHEY_SIMPLEX, 0.9, (255, 255, 255), 2, cv2.LINE_AA)
                     writer.write(frame)
             finally:

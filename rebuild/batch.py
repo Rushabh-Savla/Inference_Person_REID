@@ -14,7 +14,7 @@ sys.path.insert(0, str(ROOT / "src"))
 
 from detector import PersonDetector  # noqa: E402
 from reid.extractor import ReIDExtractor  # noqa: E402
-from core import GlobalIdentityEngine, Observation, Tracklet, crop, quality  # noqa: E402
+from core import GlobalIdentityEngine, Observation, Tracklet, crop, quality, unit  # noqa: E402
 
 
 class BatchPipeline:

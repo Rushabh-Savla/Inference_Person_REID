@@ -5,7 +5,9 @@ import sys
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
+SRC = ROOT / "src"
 sys.path.insert(0, str(ROOT))
+sys.path.insert(0, str(SRC))
 
 from rebuild.batch_v2 import BatchPipelineV2  # noqa: E402
 from rebuild.batch_v3 import BatchPipelineV3  # noqa: E402
@@ -29,7 +31,9 @@ def parse_source(values):
 
 
 def main():
-    parser = argparse.ArgumentParser(description="Same-camera + cross-camera person ReID with persistent track-state and global identity memory")
+    parser = argparse.ArgumentParser(
+        description="Same-camera + cross-camera person ReID with persistent track-state and global identity memory"
+    )
     sub = parser.add_subparsers(dest="mode", required=True)
 
     batch = sub.add_parser("batch", help="V6 recorded-video pipeline")

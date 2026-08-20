@@ -369,7 +369,6 @@ class GlobalIdentityV6:
         ordered = sorted(tracks.values(), key=lambda x: (x.start, x.camera, x.key))
         pending: List[Tracklet] = []
 
-        # Pass 1: assign only when an existing global identity has real evidence.
         for track in ordered:
             ranked = self._rank(track, tracks, faces)
             best = ranked[0] if ranked else None
@@ -407,7 +406,6 @@ class GlobalIdentityV6:
             if prior_cameras and track.camera not in prior_cameras:
                 self.cross_camera_reidentified += 1
 
-        # Pass 2: the gallery is enriched; reconsider ambiguous observations.
         changed = True
         while pending and changed:
             changed = False
@@ -442,9 +440,6 @@ class GlobalIdentityV6:
                 changed = True
             pending = remain
 
-        # Resolve remaining unknowns one at a time. One strong unresolved
-        # observation seeds a persistent GID; every other unresolved observation
-        # gets a new chance against that enriched gallery before seeding a new GID.
         pending = sorted(pending, key=lambda x: (-x.evidence(), x.start, x.camera, x.key))
         while pending:
             remain: List[Tracklet] = []
@@ -487,7 +482,6 @@ class GlobalIdentityV6:
         self.pending_count = 0
         self.provisional_count = len(self.identities)
 
-        # Conservative post-hoc repair of genuine fragmentation.
         self._merge_pass(tracks)
         for i, row in enumerate(self.decisions):
             final_gid = self.mapping.get(row.key, row.gid)

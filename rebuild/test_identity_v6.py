@@ -2,8 +2,8 @@ from __future__ import annotations
 
 import numpy as np
 
+from rebuild.identity_body_v6 import GlobalIdentityBodyV6
 from rebuild.identity_v3 import Feature, Tracklet
-from rebuild.identity_v6 import GlobalIdentityV6
 
 
 def vec(value: float, dim: int = 8) -> np.ndarray:
@@ -30,28 +30,31 @@ def track(camera: str, track_id: int, start: float, end: float, value: float, x:
     return item
 
 
-def run(items, faces=None):
-    engine = GlobalIdentityV6({
-        "body_strong": 0.70,
-        "body_medium": 0.61,
-        "same_camera_body": 0.48,
-        "partial_strong": 0.66,
+def run(items):
+    engine = GlobalIdentityBodyV6({
+        "match_threshold": 0.60,
+        "match_margin": 0.03,
+        "strong_threshold": 0.70,
+        "support_required": 2,
+        "accumulated_body": 0.56,
+        "accumulated_support": 3,
+        "partial_threshold": 0.58,
+        "partial_support": 2,
         "same_camera_gap_sec": 15.0,
+        "same_camera_distance": 5.0,
     })
-    mapping, decisions = engine.run({x.key: x for x in items}, faces or {})
-    return engine, mapping, decisions
+    return engine, *engine.run({x.key: x for x in items})
 
 
 def test_same_camera_fragment():
-    left = track("cam_213", 3, 0.0, 10.0, 0.995, 100, upper=0.997)
-    right = track("cam_213", 5, 10.5, 20.0, 0.82, 104, upper=0.997)
+    first = track("cam_213", 3, 0.0, 10.0, 0.995, 100, upper=0.997)
+    standing = track("cam_213", 5, 10.5, 20.0, 0.82, 104, upper=0.997)
     other = track("cam_213", 7, 11.0, 19.0, 0.20, 700, upper=0.21)
-    engine, mapping, decisions = run([left, right, other])
-    assert mapping[left.key] == mapping[right.key]
-    assert mapping[other.key] != mapping[left.key]
-    reasons = [x.reason for x in decisions if x.key == right.key]
-    assert any("lost_track" in x or "body" in x or "identity_merge" in x for x in reasons)
-    assert engine.summary({x.key: x for x in [left, right, other]})["fragmented_identity_count"] <= 1
+    engine, mapping, decisions = run([first, standing, other])
+    assert mapping[first.key] == mapping[standing.key]
+    assert mapping[other.key] != mapping[first.key]
+    assert any("lost_track" in x.reason or "body" in x.reason or "identity_merge" in x.reason for x in decisions if x.key == standing.key)
+    assert engine.summary({x.key: x for x in [first, standing, other]})["fragmented_identity_count"] <= 1
 
 
 def test_leave_return_same_camera():
@@ -80,16 +83,12 @@ def test_partial_to_full():
     assert engine.summary({x.key: x for x in [full, upper_only]})["global_ids"] == 1
 
 
-def test_face_rescue():
-    first = track("cam_213", 3, 0.0, 5.0, 0.60, 100, upper=0.60)
-    second = track("cam_213", 5, 6.0, 10.0, 0.58, 105, upper=0.58)
-    faces = {
-        first.key: [Feature(np.array([1.0, 0, 0, 0], dtype=np.float32), "face", 0.95, "cam_213", 0.0)],
-        second.key: [Feature(np.array([1.0, 0, 0, 0], dtype=np.float32), "face", 0.95, "cam_213", 6.0)],
-    }
-    engine, mapping, _ = run([first, second], faces)
+def test_no_face_path():
+    first = track("cam_213", 1, 0.0, 3.0, 0.995, 100, upper=0.995)
+    second = track("cam_224", 2, 8.0, 12.0, 0.995, 300, upper=0.995)
+    engine, mapping, _ = run([first, second])
     assert mapping[first.key] == mapping[second.key]
-    assert engine.face_matches >= 1 or len(set(mapping.values())) == 1
+    assert engine.summary({x.key: x for x in [first, second]})["cross_camera_reidentifications"] >= 1
 
 
 if __name__ == "__main__":
@@ -97,5 +96,5 @@ if __name__ == "__main__":
     test_leave_return_same_camera()
     test_cross_camera_search()
     test_partial_to_full()
-    test_face_rescue()
-    print("IDENTITY V6 TEST: OK")
+    test_no_face_path()
+    print("BODY-ONLY V6 IDENTITY TEST: OK")

@@ -5,52 +5,35 @@ detector:
   tracker: bytetrack.yaml
 
 reid:
-  model: fastreid_sbs_R101_ibn
-  weights: src/reid/weights/msmt_sbs_R101-ibn.pth
-  device: auto
+  model: nvidia_reidentificationnet
+  weights: weights/reid/resnet50_market1501_aicity156.onnx
+  device: cuda
   max_batch: 32
   interval: 5
   part_interval: 15
   illumination_variant: true
   min_quality: 0.20
 
-face:
-  model: buffalo_l
-  device: auto
-  det_size: [640, 640]
-  interval: 15
-  min_detection: 0.55
-  min_size: 32
-  min_quality: 0.42
-  strong_quality: 0.64
-  bank: 8
-
 identity_v6:
-  # Tracklets are observations. V6 resolves them into provisional components
-  # before creating persistent global identities.
-  body_strong: 0.68
-  body_medium: 0.60
-  same_camera_body: 0.46
-  face_strong: 0.84
-  face_medium: 0.76
-  face_support: 1
-
-  # Same-camera fragmentation window is deliberately longer than the old V5
-  # lost-track window so posture/occlusion fragments have room to reassociate.
-  same_camera_gap_sec: 12.0
-  same_camera_overlap_sec: 0.75
+  # Body-only persistent identity association. Face is intentionally disabled.
+  match_threshold: 0.60
+  match_margin: 0.035
+  strong_threshold: 0.72
+  support_required: 2
+  accumulated_body: 0.56
+  accumulated_support: 3
+  partial_threshold: 0.58
+  partial_support: 2
+  gallery: 32
+  candidate_gallery: 12
+  promote_quality: 0.68
+  novelty: 0.985
+  same_camera_gap_sec: 15.0
   same_camera_distance: 5.0
   same_camera_min_continuity: 0.35
-
-  # Diverse multi-view identity gallery.
-  gallery: 32
-  promote_quality: 0.68
-  face_gallery: 10
-  face_novelty: 0.985
-
-  # Cross-camera edges stay sparse and require mutual strong evidence.
-  cross_margin: 0.035
-  cluster_min_edge: 0.60
+  merge_body: 0.82
+  merge_support: 3
+  seed_count: 3
 
 tracking:
   fragment_gap_sec: 2.0

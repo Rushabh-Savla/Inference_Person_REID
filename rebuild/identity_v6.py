@@ -41,7 +41,7 @@ def _groups(items: List[Feature]) -> Dict[str, List[Feature]]:
 class GlobalIdentityV6:
     """Persistent GID-first association.
 
-    Tracklets are observations, not people.  The engine performs sequential search
+    Tracklets are observations, not people. The engine performs sequential search
     against a persistent global gallery, keeps ambiguous observations pending, uses
     same-camera temporal/spatial reassociation as supporting evidence, protects the
     trusted gallery, and only performs a conservative final identity-merge pass.
@@ -170,7 +170,6 @@ class GlobalIdentityV6:
                 pairs.append((qk, gk, 0.72 * best + 0.28 * top, int((flat >= 0.60).sum())))
         if not pairs:
             return 0.0, 0, False
-
         exact = [(s, n, q) for q, g, s, n in pairs if q == g]
         pool = exact if exact else [(s, n, q) for q, _, s, n in pairs]
         pool.sort(reverse=True)
@@ -228,7 +227,6 @@ class GlobalIdentityV6:
             if prior is not None:
                 temporal, spatial, gap = self.continuity(prior, track)
             face, face_support = self.face_score(qface, self.face_trusted.get(gid, []) + self.face_candidate.get(gid, []))
-
             score = 0.94 * body + 0.06 * shape
             reason = "body_gallery"
             if temporal > 0.0:
@@ -239,19 +237,10 @@ class GlobalIdentityV6:
                 score = max(score, 0.88 * face + 0.12 * max(body, 0.5))
                 reason = "face_assisted"
             rows.append({
-                "gid": gid,
-                "score": float(score),
-                "body": float(body),
-                "face": float(face),
-                "temporal": float(temporal),
-                "spatial": float(spatial),
-                "gap": float(gap),
-                "support": int(support),
-                "face_support": int(face_support),
-                "partial": bool(partial),
-                "shape": float(shape),
-                "reason": reason,
-                "face_quality": float(qface_quality),
+                "gid": gid, "score": float(score), "body": float(body), "face": float(face),
+                "temporal": float(temporal), "spatial": float(spatial), "gap": float(gap),
+                "support": int(support), "face_support": int(face_support), "partial": bool(partial),
+                "shape": float(shape), "reason": reason, "face_quality": float(qface_quality),
             })
         return sorted(rows, key=lambda x: x["score"], reverse=True)
 
@@ -380,6 +369,7 @@ class GlobalIdentityV6:
         ordered = sorted(tracks.values(), key=lambda x: (x.start, x.camera, x.key))
         pending: List[Tracklet] = []
 
+        # Pass 1: assign only when an existing global identity has real evidence.
         for track in ordered:
             ranked = self._rank(track, tracks, faces)
             best = ranked[0] if ranked else None
@@ -417,9 +407,10 @@ class GlobalIdentityV6:
             if prior_cameras and track.camera not in prior_cameras:
                 self.cross_camera_reidentified += 1
 
-        progressed = True
-        while pending and progressed:
-            progressed = False
+        # Pass 2: the gallery is enriched; reconsider ambiguous observations.
+        changed = True
+        while pending and changed:
+            changed = False
             remain: List[Tracklet] = []
             for track in pending:
                 ranked = self._rank(track, tracks, faces)
@@ -448,20 +439,55 @@ class GlobalIdentityV6:
                     self.temporal_assisted += 1
                 if prior_cameras and track.camera not in prior_cameras:
                     self.cross_camera_reidentified += 1
-                progressed = True
+                changed = True
             pending = remain
 
-        self.pending_count = len(pending)
-        # Unknown observations can seed identities, but they do so only after the
-        # entire persistent gallery has had two opportunities to claim them.
-        for track in pending:
-            provisional = f"PNEW{self.next_id:04d}"
-            self._new_gid(track, faces, provisional)
-            self._record(track, self.mapping[track.key], "promoted", "new_identity", None, provisional)
-        self.provisional_count = len(self.identities) + self.pending_count
+        # Resolve remaining unknowns one at a time. One strong unresolved
+        # observation seeds a persistent GID; every other unresolved observation
+        # gets a new chance against that enriched gallery before seeding a new GID.
+        pending = sorted(pending, key=lambda x: (-x.evidence(), x.start, x.camera, x.key))
+        while pending:
+            remain: List[Tracklet] = []
+            for track in pending:
+                ranked = self._rank(track, tracks, faces)
+                best = ranked[0] if ranked else None
+                second = ranked[1]["score"] if len(ranked) > 1 else 0.0
+                if best is None:
+                    remain.append(track)
+                    continue
+                accepted, reason = self._accept(best, second)
+                if not accepted:
+                    remain.append(track)
+                    continue
+                gid = best["gid"]
+                prior_cameras = set(self.identities[gid].cameras)
+                self.mapping[track.key] = gid
+                trusted = reason in {"body_strong", "face_assisted", "recent_lost_track"} and track.evidence() >= 0.60
+                self._add_track(gid, track, trusted=trusted)
+                self._add_face(gid, faces.get(track.key, []), trusted=trusted)
+                self._record(track, gid, "confirmed_existing", reason, {**best, "second": second}, next((p for p, g in self.provisional.items() if g == gid), gid))
+                if "face" in reason:
+                    self.face_assisted += 1
+                    self.face_matches += 1
+                if reason == "recent_lost_track":
+                    self.reassociated += 1
+                    self.same_camera_reassociated += 1
+                    self.temporal_assisted += 1
+                if prior_cameras and track.camera not in prior_cameras:
+                    self.cross_camera_reidentified += 1
+            if len(remain) == len(pending):
+                seed = remain.pop(0)
+                provisional = f"PNEW{self.next_id:04d}_{seed.key}"
+                gid = self._new_gid(seed, faces, provisional)
+                self._record(seed, gid, "promoted", "new_identity", None, provisional)
+                pending = remain
+            else:
+                pending = remain
 
-        # Strong post-hoc merge repairs legitimate identity fragmentation without
-        # turning the whole system into greedy batch clustering.
+        self.pending_count = 0
+        self.provisional_count = len(self.identities)
+
+        # Conservative post-hoc repair of genuine fragmentation.
         self._merge_pass(tracks)
         for i, row in enumerate(self.decisions):
             final_gid = self.mapping.get(row.key, row.gid)

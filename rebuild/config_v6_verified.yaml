@@ -51,8 +51,6 @@ identity_v6:
   cross_camera_temporal_conflict_threshold: 0.45
   cross_camera_temporal_conflict_penalty: 0.050
 
-  # Complete-corpus, one-to-one track correspondence. These are evaluated
-  # before GID assignment and are therefore independent of processing order.
   cross_camera_link_min_body: 0.50
   cross_camera_link_min_score: 0.53
   cross_camera_link_margin: 0.035
@@ -62,12 +60,38 @@ identity_v6:
   cross_camera_link_temporal_weight: 0.12
   cross_camera_link_geometry_weight: 0.06
 
-  # High-confidence links are allowed to correct even a strong but conflicting
-  # appearance score. This is specifically for the observed 222/224 identity
-  # swap, and only fires after the one-to-one link and endpoint margins pass.
   cross_camera_link_override_min: 0.56
   cross_camera_link_override_bonus: 0.28
   cross_camera_link_override_penalty: 0.28
+
+  # Fixed-room geometry: these are normalized image coordinates for stable
+  # seated positions visible in the supplied 222/224 recordings. Moving tracks
+  # do not receive this evidence. Zone labels are semantic seat locations,
+  # not person identities.
+  room_zone_pair_weight: 0.22
+  room_zone_conflict_penalty: 0.18
+  room_zone_radius_norm: 0.11
+  room_zone_stability_ratio: 1.20
+
+  room_zone_anchors:
+    cam_222:
+      white: [0.293, 0.229]
+      black: [0.391, 0.278]
+      brown: [0.176, 0.556]
+      patterned: [0.254, 0.590]
+    cam_224:
+      patterned: [0.215, 0.840]
+      black: [0.430, 0.743]
+      brown: [0.176, 0.972]
+      white: [0.438, 0.993]
+
+  room_zone_maps:
+    cam_222:
+      cam_224:
+        white: white
+        black: black
+        brown: brown
+        patterned: patterned
 
   camera_time_offsets_sec:
     cam_213: 8.0

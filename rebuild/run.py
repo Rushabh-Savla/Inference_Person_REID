@@ -14,17 +14,9 @@ from rebuild.batch_v3 import BatchPipelineV3  # noqa: E402
 from rebuild.batch_v4 import BatchPipelineV4  # noqa: E402
 from rebuild.batch_v5 import BatchPipelineV5  # noqa: E402
 from rebuild.batch_v6 import BatchPipelineV6  # noqa: E402
-from rebuild.identity_body_v6_room import GlobalIdentityBodyV6Room  # noqa: E402
+from rebuild.batch_v6_camera_graph import BatchPipelineV6CameraGraph  # noqa: E402
 from rebuild.live_v4 import run_live_v4  # noqa: E402
 from rebuild.live_v2 import run_live_v2  # noqa: E402
-
-
-class BatchPipelineV6Verified(BatchPipelineV6):
-    """V6 batch pipeline with one-to-one cross-camera + room-zone verification."""
-
-    def __init__(self, config_path: str):
-        super().__init__(config_path)
-        self.engine = GlobalIdentityBodyV6Room(self.cfg["identity_v6"])
 
 
 def parse_source(values):
@@ -49,7 +41,10 @@ def main():
     batch.add_argument("--config", default="rebuild/config_v6.yaml")
     batch.add_argument("--videos", nargs="*", default=[])
 
-    verified = sub.add_parser("batch_verified", help="V6 recorded-video pipeline with isolated room-aware cross-camera verification")
+    verified = sub.add_parser(
+        "batch_verified",
+        help="V6 recorded-video pipeline with symmetric camera-level identity graph",
+    )
     verified.add_argument("--config", default="rebuild/config_v6_verified.yaml")
     verified.add_argument("--videos", nargs="+", required=True)
 
@@ -85,7 +80,7 @@ def main():
     if args.mode == "batch":
         BatchPipelineV6(args.config).run(args.videos)
     elif args.mode == "batch_verified":
-        BatchPipelineV6Verified(args.config).run(args.videos)
+        BatchPipelineV6CameraGraph(args.config).run(args.videos)
     elif args.mode == "batch_v5":
         BatchPipelineV5(args.config).run(args.videos)
     elif args.mode == "batch_v4":

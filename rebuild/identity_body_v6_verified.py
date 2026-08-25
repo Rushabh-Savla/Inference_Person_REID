@@ -18,14 +18,8 @@ class GlobalIdentityBodyV6Verified(GlobalIdentityBodyV6):
     * person-shape consistency;
     * time-aligned track evidence from the other cameras.
 
-    The last item is important for the supplied 213/222/224 recordings:
-    cameras are timestamped within seconds of one another and 222/224 see the
-    same workspace from different viewpoints. A query in 224 can therefore be
-    checked against the already-observed 213/222 track evidence belonging to a
-    candidate GID instead of relying only on a single cross-view embedding.
-
-    Same-camera V6 matching is untouched. The additional evidence is never
-    allowed to manufacture a match from a weak appearance score.
+    Same-camera V6 matching is untouched. Extra evidence never creates an
+    identity from a weak appearance score.
     """
 
     def __init__(self, cfg: dict):
@@ -61,7 +55,6 @@ class GlobalIdentityBodyV6Verified(GlobalIdentityBodyV6):
         return {query, gallery} <= {"full", "light"}
 
     def consensus(self, query: List[Feature], gallery: List[Feature]) -> Tuple[int, int, float]:
-        """Return strong query evidence count, kind diversity and top mean."""
         if not query or not gallery:
             return 0, 0, 0.0
 
@@ -108,7 +101,6 @@ class GlobalIdentityBodyV6Verified(GlobalIdentityBodyV6):
             return False
         q0, q1 = self._span(query)
         p0, p1 = self._span(prior)
-        gap = max(0.0, max(p0 - p1, p0 if False else p0 - p1, 0.0))
         if q1 < p0:
             gap = p0 - q1
         elif p1 < q0:
@@ -117,35 +109,31 @@ class GlobalIdentityBodyV6Verified(GlobalIdentityBodyV6):
             gap = 0.0
         return gap <= self.cross_temporal_tolerance
 
-    def _temporal_evidence(self, query: Tracklet, identity: Identity, tracks: Dict[str, Tracklet]) -> Tuple[float, float, int, float]:
-        """Return best aligned track similarity, supporting camera count, conflict and confidence."""
+    def _temporal_evidence(
+        self,
+        query: Tracklet,
+        identity: Identity,
+        tracks: Dict[str, Tracklet],
+    ) -> Tuple[float, int, float]:
+        """Best aligned-track score, supporting camera count and conflict score."""
         if not self.cross_temporal_enabled:
-            return 0.0, 0.0, 0, 0.0
+            return 0.0, 0, 0.0
 
-        matches: List[Tuple[str, float, int]] = []
+        matches: Dict[str, float] = {}
         conflicts: List[float] = []
         for key in identity.tracks:
             prior = tracks.get(key)
             if prior is None or not self._aligned(query, prior):
                 continue
-            score, support, _ = self.body_score(query.features, prior.features)
+            score, _, _ = self.body_score(query.features, prior.features)
             if score >= self.cross_temporal_threshold:
-                matches.append((prior.camera, float(score), int(support)))
+                matches[prior.camera] = max(matches.get(prior.camera, 0.0), float(score))
             elif score < self.cross_temporal_conflict_threshold:
                 conflicts.append(float(score))
 
-        if not matches:
-            conflict = max(conflicts) if conflicts else 0.0
-            return 0.0, 0.0, 0, float(conflict)
-
-        per_camera: Dict[str, float] = {}
-        for camera, score, _ in matches:
-            per_camera[camera] = max(per_camera.get(camera, 0.0), score)
-        best = max(per_camera.values())
-        cameras = len(per_camera)
-        strong = max(score for score in per_camera.values())
+        best = max(matches.values()) if matches else 0.0
         conflict = max(conflicts) if conflicts else 0.0
-        return float(best), float(strong), int(cameras), float(conflict)
+        return float(best), len(matches), float(conflict)
 
     def rank(self, track: Tracklet, tracks: Dict[str, Tracklet]) -> List[dict]:
         rows = super().rank(track, tracks)
@@ -171,7 +159,7 @@ class GlobalIdentityBodyV6Verified(GlobalIdentityBodyV6):
 
             count, diversity, mean_top = self.consensus(track.features, identity.values())
             geom = self._shape_support(track, identity)
-            temporal, _, temporal_cameras, temporal_conflict = self._temporal_evidence(track, identity, tracks)
+            temporal, temporal_cameras, temporal_conflict = self._temporal_evidence(track, identity, tracks)
             row["cross_consensus"] = int(count)
             row["cross_kind_diversity"] = int(diversity)
             row["cross_consensus_mean"] = float(mean_top)
@@ -180,8 +168,9 @@ class GlobalIdentityBodyV6Verified(GlobalIdentityBodyV6):
             row["cross_temporal_cameras"] = int(temporal_cameras)
             row["cross_temporal_conflict"] = float(temporal_conflict)
 
-            # Do not touch the already-strong original V6 decision. All extra
-            # evidence is explicitly subordinate to the proven ReID score.
+            # The original V6 decision remains the authority. Secondary
+            # evidence is used only while the appearance score is not already
+            # strong and never eliminates the original V6 acceptance rules.
             if row["body"] < self.strong:
                 if count >= 3 and diversity >= 2 and mean_top >= self.cross_consensus_strong:
                     row["score"] += self.cross_bonus_strong
@@ -191,17 +180,18 @@ class GlobalIdentityBodyV6Verified(GlobalIdentityBodyV6):
                 if geom >= self.cross_geometry_min and row["body"] >= self.threshold - 0.02:
                     row["score"] += self.cross_geometry_bonus
 
-                # The decisive new signal for the 222/224 problem: when the
-                # same GID has an already-seen, time-aligned track in another
-                # camera, require the query to agree with that actual track.
-                # A competing GID whose aligned track looks like a different
-                # person is penalized, which prevents identity swapping across
-                # simultaneously observed cameras.
+                # For the supplied synchronized recordings, this is the key
+                # 222/224 protection: compare a query against the actual
+                # simultaneously observed track behind each candidate GID.
                 if temporal >= self.cross_temporal_strong and temporal_cameras >= 1:
                     row["score"] += self.cross_temporal_strong_bonus
                 elif temporal >= self.cross_temporal_threshold:
                     row["score"] += self.cross_temporal_bonus
 
+                # If a candidate GID has a time-aligned track that is strongly
+                # inconsistent with the query, suppress that candidate. This
+                # prevents one wrong camera assignment from propagating into
+                # another camera.
                 if temporal_conflict > 0.0 and temporal_conflict < self.cross_temporal_conflict_threshold:
                     row["score"] -= self.cross_temporal_conflict_penalty
 
@@ -209,5 +199,14 @@ class GlobalIdentityBodyV6Verified(GlobalIdentityBodyV6):
 
         return sorted(adjusted, key=lambda x: x["score"], reverse=True)
 
-    def record(self, track: Tracklet, gid: str, state: str, reason: str, row: dict | None, provisional: str, merged: bool = False) -> None:
+    def record(
+        self,
+        track: Tracklet,
+        gid: str,
+        state: str,
+        reason: str,
+        row: dict | None,
+        provisional: str,
+        merged: bool = False,
+    ) -> None:
         super().record(track, gid, state, reason, row, provisional, merged)

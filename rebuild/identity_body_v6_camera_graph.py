@@ -95,7 +95,9 @@ class GlobalIdentityBodyV6CameraGraph(GlobalIdentityBodyV6):
             for _, i, j in edges:
                 if i in used_r or j in used_c:
                     continue
-                used_r.add(i); used_c.add(j); out.append((i, j))
+                used_r.add(i)
+                used_c.add(j)
+                out.append((i, j))
             return out
 
     @staticmethod
@@ -107,12 +109,7 @@ class GlobalIdentityBodyV6CameraGraph(GlobalIdentityBodyV6):
         return groups
 
     def _track_matches(self, left: List[Tracklet], right: List[Tracklet]) -> List[dict]:
-        """Match individual tracklets before any GID grouping.
-
-        This is deliberately track-level. Grouping by the already assigned GID
-        before matching is unsafe when the very problem we are correcting is a
-        cross-camera permutation of those GIDs.
-        """
+        """Match individual tracklets before any GID grouping."""
         if not left or not right:
             return []
         left = sorted(left, key=lambda item: item.key)
@@ -150,15 +147,7 @@ class GlobalIdentityBodyV6CameraGraph(GlobalIdentityBodyV6):
         return out
 
     def _pair_camera_links(self, mapping: Dict[str, str], tracks: Dict[str, Tracklet], camera_a: str, camera_b: str) -> List[dict]:
-        """Create one-to-one cross-camera links from track-level evidence.
-
-        The previous implementation first grouped observations by their current
-        GID and then compared those groups. That is circular when a camera has a
-        GID permutation: each corrupted group contains two different people and
-        can therefore generate strong cross-links to the other corrupted group.
-        We now solve the correspondence at the track level first, aggregate those
-        verified matches to GID pairs, and only then solve a GID-level assignment.
-        """
+        """Build one-to-one cross-camera links from track-level evidence."""
         left_groups = self._camera_groups(mapping, tracks, camera_a)
         right_groups = self._camera_groups(mapping, tracks, camera_b)
         if not left_groups or not right_groups:
@@ -170,63 +159,68 @@ class GlobalIdentityBodyV6CameraGraph(GlobalIdentityBodyV6):
         if not track_matches:
             return []
 
-        gid_pairs: Dict[Tuple[str, str], List[dict]] = {}
-        by_key = {key: track for key, track in tracks.items()}
-        for match in track_matches:
-            a = by_key[match["left"]]
-            b = by_key[match["right"]]
-            gid_a = mapping[a.key]
-            gid_b = mapping[b.key]
-            gid_pairs.setdefault((gid_a, gid_b), []).append(match)
-
-        gids_a = sorted(left_groups)
-        gids_b = sorted(right_groups)
-        matrix = np.zeros((len(gids_a), len(gids_b)), dtype=np.float64)
-        details: Dict[Tuple[int, int], dict] = {}
-        for i, gid_a in enumerate(gids_a):
-            for j, gid_b in enumerate(gids_b):
-                rows = gid_pairs.get((gid_a, gid_b), [])
-                if not rows:
-                    continue
-                rows = sorted(rows, key=lambda item: item["score"], reverse=True)
-                top = rows[: min(3, len(rows))]
-                aggregate = float(0.72 * top[0]["score"] + 0.28 * np.mean([item["score"] for item in top]))
-                detail = {
-                    "score": aggregate,
-                    "reid": float(max(item["reid"] for item in top)),
-                    "colour": float(np.mean([item["colour"] for item in top])),
-                    "time": float(max(item["time"] for item in top)),
-                    "shape": float(np.mean([item["shape"] for item in top])),
-                    "pair": (top[0]["left"], top[0]["right"]),
-                }
-                details[(i, j)] = detail
-                matrix[i, j] = aggregate
-
         out: List[dict] = []
-        for i, j in self._hungarian(matrix):
-            item = details[(i, j)]
-            row_values = np.sort(matrix[i, :][matrix[i, :] > 0.0])[::-1]
-            col_values = np.sort(matrix[:, j][matrix[:, j] > 0.0])[::-1]
-            row_margin = float(row_values[0] - row_values[1]) if len(row_values) > 1 else float("inf")
-            col_margin = float(col_values[0] - col_values[1]) if len(col_values) > 1 else float("inf")
-            if item["reid"] < self.graph_min_reid or item["score"] < self.graph_min_score:
-                continue
-            if item["reid"] < self.graph_strong_reid and item["colour"] < self.graph_color_gate:
-                continue
-            if row_margin < self.graph_margin or col_margin < self.graph_margin:
-                continue
-            out.append({
-                "camera_a": camera_a, "camera_b": camera_b,
-                "gid_a": gids_a[i], "gid_b": gids_b[j],
-                "score": float(item["score"]), "reid": float(item["reid"]),
-                "colour": float(item["colour"]), "time": float(item["time"]),
-                "shape": float(item["shape"]), "row_margin": row_margin,
-                "col_margin": col_margin, "pair": item["pair"],
-            })
+        for match in track_matches:
+            out.append(
+                {
+                    "camera_a": camera_a,
+                    "camera_b": camera_b,
+                    "left": match["left"],
+                    "right": match["right"],
+                    "gid_a": mapping[match["left"]],
+                    "gid_b": mapping[match["right"]],
+                    "score": float(match["score"]),
+                    "reid": float(match["reid"]),
+                    "colour": float(match["colour"]),
+                    "time": float(match["time"]),
+                    "shape": float(match["shape"]),
+                    "row_margin": float(match["row_margin"]),
+                    "col_margin": float(match["col_margin"]),
+                    "pair": (match["left"], match["right"]),
+                }
+            )
         return out
 
     @staticmethod
+    def _track_components(edges: List[dict], tracks: Dict[str, Tracklet]) -> List[List[str]]:
+        """Build identity components directly from cross-camera track matches."""
+        keys = sorted(tracks)
+        parent = {key: key for key in keys}
+        members: Dict[str, set[str]] = {key: {key} for key in keys}
+
+        def find(x: str) -> str:
+            root = x
+            while parent[root] != root:
+                root = parent[root]
+            while parent[x] != x:
+                nxt = parent[x]
+                parent[x] = root
+                x = nxt
+            return root
+
+        def cameras(root: str) -> set[str]:
+            return {tracks[key].camera for key in members[root]}
+
+        for edge in sorted(edges, key=lambda item: item["score"], reverse=True):
+            left = edge["left"]
+            right = edge["right"]
+            rl, rr = find(left), find(right)
+            if rl == rr:
+                continue
+            if not cameras(rl).isdisjoint(cameras(rr)):
+                continue
+            parent[rr] = rl
+            members[rl].update(members[rr])
+            del members[rr]
+
+        groups: Dict[str, List[str]] = {}
+        for key in keys:
+            groups.setdefault(find(key), []).append(key)
+        return list(groups.values())
+
+    @staticmethod
     def _components(edges: List[dict], nodes: List[Tuple[str, str]]) -> List[List[Tuple[str, str]]]:
+        """Compatibility helper for existing tests/debugging."""
         parent = {node: node for node in nodes}
 
         def find(x):
@@ -236,11 +230,13 @@ class GlobalIdentityBodyV6CameraGraph(GlobalIdentityBodyV6):
             return x
 
         def camera_set(root):
-            return {cam for cam, gid in nodes if find((cam, gid)) == root}
+            return {cam for cam, _gid in nodes if find((cam, _gid)) == root}
 
         for edge in sorted(edges, key=lambda x: x["score"], reverse=True):
             a = (edge["camera_a"], edge["gid_a"])
             b = (edge["camera_b"], edge["gid_b"])
+            if a not in parent or b not in parent:
+                continue
             ra, rb = find(a), find(b)
             if ra == rb:
                 continue
@@ -253,40 +249,38 @@ class GlobalIdentityBodyV6CameraGraph(GlobalIdentityBodyV6):
         return list(groups.values())
 
     def _reconcile(self, mapping: Dict[str, str], tracks: Dict[str, Tracklet]):
-        cameras = sorted({track.camera for track in tracks.values()})
-        nodes = []
-        for camera in cameras:
-            gids = sorted({mapping[k] for k, t in tracks.items() if t.camera == camera and k in mapping})
-            nodes.extend((camera, gid) for gid in gids)
+        """Correct cross-camera GIDs from track correspondences, not GID groups.
 
+        Each connected track component represents one physical person. The GID
+        anchor is taken from the earliest camera in the component's configured
+        camera order, so a permutation in a later camera is corrected directly
+        instead of merging the two existing GID labels together.
+        """
+        cameras = sorted({track.camera for track in tracks.values()})
         edges: List[dict] = []
         for i, camera_a in enumerate(cameras):
             for camera_b in cameras[i + 1:]:
                 edges.extend(self._pair_camera_links(mapping, tracks, camera_a, camera_b))
 
-        components = self._components(edges, nodes)
-        used: set[str] = set()
+        components = self._track_components(edges, tracks)
         corrected = dict(mapping)
-        ordered = sorted(
-            components,
-            key=lambda comp: min([int(g[1:]) for _c, g in comp if g.startswith("G") and g[1:].isdigit()] or [10**9]),
-        )
-        max_id = max([int(g[1:]) for _c, g in nodes if g.startswith("G") and g[1:].isdigit()] or [0])
-        for component in ordered:
-            candidates = sorted(
-                {gid for _cam, gid in component},
-                key=lambda g: int(g[1:]) if g.startswith("G") and g[1:].isdigit() else 10**9,
+        camera_rank = {camera: index for index, camera in enumerate(cameras)}
+
+        for component in components:
+            linked = [key for key in component if any(edge["left"] == key or edge["right"] == key for edge in edges)]
+            if len(linked) < 2:
+                continue
+            anchor = min(
+                linked,
+                key=lambda key: (
+                    camera_rank.get(tracks[key].camera, 10**9),
+                    float(tracks[key].start),
+                    key,
+                ),
             )
-            canonical = next((gid for gid in candidates if gid not in used), None)
-            if canonical is None:
-                max_id += 1
-                canonical = f"G{max_id:06d}"
-            used.add(canonical)
-            nodeset = set(component)
-            for key, gid in list(corrected.items()):
-                track = tracks[key]
-                if (track.camera, gid) in nodeset:
-                    corrected[key] = canonical
+            canonical = mapping[anchor]
+            for key in linked:
+                corrected[key] = canonical
 
         refreshed = []
         for item in self.decisions:

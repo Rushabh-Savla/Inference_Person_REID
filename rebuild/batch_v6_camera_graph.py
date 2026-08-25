@@ -27,7 +27,7 @@ class BatchPipelineV6CameraGraph(BatchPipelineV6):
     def colour_signature(image: np.ndarray) -> np.ndarray | None:
         """Low-dimensional torso colour descriptor used only for cross-camera reranking.
 
-        The central torso region avoids most background and face pixels.  Hue is
+        The central torso region avoids most background and face pixels. Hue is
         saturation-weighted while low-saturation pixels contribute a value
         histogram, making white/neutral clothing distinguishable without using
         identity-specific face information.
@@ -83,6 +83,7 @@ class BatchPipelineV6CameraGraph(BatchPipelineV6):
             "frame": int(stamp * self.meta[camera]["fps"]),
             "timestamp": stamp,
             "track_id": track_id,
+            "bbox": list(bbox),
             "detection_score": float(score),
             "quality": float(score),
         }

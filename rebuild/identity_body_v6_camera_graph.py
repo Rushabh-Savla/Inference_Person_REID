@@ -9,21 +9,7 @@ from rebuild.identity_v3 import Identity, Tracklet
 
 
 class GlobalIdentityBodyV6CameraGraph(GlobalIdentityBodyV6):
-    """Known-good V6 matcher plus a symmetric camera-level identity graph.
-
-    The original V6 matcher decides same-camera track continuity and produces
-    an initial mapping.  Cross-camera identity is then solved independently as
-    a one-to-one assignment between camera-local identity groups.  This avoids
-    the failure mode where the same arbitrary GID label is attached to two
-    different people in different cameras and later gallery updates make the
-    swap self-reinforcing.
-
-    Cross-camera evidence is symmetric and appearance-first.  A compact
-    clothing/torso colour descriptor is used only as an auxiliary signal to
-    break genuine appearance swaps such as brown-vs-white under large camera
-    viewpoint changes.  Geometry and recording-time alignment are weak support
-    signals only.
-    """
+    """Known-good V6 matcher plus symmetric camera-level identity graph."""
 
     def __init__(self, cfg: dict):
         super().__init__(cfg)
@@ -37,10 +23,7 @@ class GlobalIdentityBodyV6CameraGraph(GlobalIdentityBodyV6):
         self.graph_color_gate = float(cfg.get("cross_graph_color_gate", 0.62))
         self.graph_strong_reid = float(cfg.get("cross_graph_strong_reid", 0.68))
         self.graph_time_tolerance = float(cfg.get("cross_graph_time_tolerance_sec", 8.0))
-        self.camera_offsets = {
-            str(k): float(v)
-            for k, v in (cfg.get("camera_time_offsets_sec", {}) or {}).items()
-        }
+        self.camera_offsets = {str(k): float(v) for k, v in (cfg.get("camera_time_offsets_sec", {}) or {}).items()}
         self.graph_links: List[dict] = []
 
     def _span(self, track: Tracklet) -> Tuple[float, float]:
@@ -73,9 +56,7 @@ class GlobalIdentityBodyV6CameraGraph(GlobalIdentityBodyV6):
         b = getattr(right, "colour_signature", None)
         if a is None or b is None:
             return 0.5
-        a = cls._normalise(a)
-        b = cls._normalise(b)
-        return float(np.clip(np.dot(a, b), 0.0, 1.0))
+        return float(np.clip(np.dot(cls._normalise(a), cls._normalise(b)), 0.0, 1.0))
 
     def _pair_score(self, left: Tracklet, right: Tracklet) -> Tuple[float, float, float, float, float]:
         reid, _, _ = self.body_score(left.features, right.features)
@@ -94,22 +75,18 @@ class GlobalIdentityBodyV6CameraGraph(GlobalIdentityBodyV6):
         rows = []
         for a in left:
             for b in right:
-                total, reid, colour, time, shape = self._pair_score(a, b)
-                rows.append((total, reid, colour, time, shape, a.key, b.key))
+                rows.append((*self._pair_score(a, b), a.key, b.key))
         if not rows:
-            return {"score": 0.0, "reid": 0.0, "colour": 0.5, "time": 0.0, "shape": 0.5, "pair": None, "support": 0}
-
+            return {"score": 0.0, "reid": 0.0, "colour": 0.5, "time": 0.0, "shape": 0.5, "pair": None}
         rows.sort(key=lambda x: x[0], reverse=True)
         top = rows[: min(3, len(rows))]
-        score = float(0.72 * top[0][0] + 0.28 * np.mean([x[0] for x in top]))
         return {
-            "score": score,
+            "score": float(0.72 * top[0][0] + 0.28 * np.mean([x[0] for x in top])),
             "reid": float(top[0][1]),
             "colour": float(np.mean([x[2] for x in top])),
             "time": float(max(x[3] for x in top)),
             "shape": float(np.mean([x[4] for x in top])),
             "pair": (top[0][5], top[0][6]),
-            "support": int(sum(1 for x in rows if x[1] >= self.graph_min_reid)),
         }
 
     @staticmethod
@@ -142,9 +119,8 @@ class GlobalIdentityBodyV6CameraGraph(GlobalIdentityBodyV6):
     def _camera_groups(self, mapping: Dict[str, str], tracks: Dict[str, Tracklet], camera: str) -> Dict[str, List[Tracklet]]:
         groups: Dict[str, List[Tracklet]] = {}
         for key, gid in mapping.items():
-            track = tracks[key]
-            if track.camera == camera:
-                groups.setdefault(gid, []).append(track)
+            if tracks[key].camera == camera:
+                groups.setdefault(gid, []).append(tracks[key])
         return groups
 
     def _pair_camera_links(self, mapping: Dict[str, str], tracks: Dict[str, Tracklet], camera_a: str, camera_b: str) -> List[dict]:
@@ -152,25 +128,21 @@ class GlobalIdentityBodyV6CameraGraph(GlobalIdentityBodyV6):
         right = self._camera_groups(mapping, tracks, camera_b)
         if not left or not right:
             return []
-        gids_a = sorted(left)
-        gids_b = sorted(right)
+        gids_a, gids_b = sorted(left), sorted(right)
         matrix = np.zeros((len(gids_a), len(gids_b)), dtype=np.float64)
         details: Dict[Tuple[int, int], dict] = {}
         for i, gid_a in enumerate(gids_a):
             for j, gid_b in enumerate(gids_b):
                 item = self._group_score(left[gid_a], right[gid_b])
                 details[(i, j)] = item
-                # Pairing must have real ReID evidence. Colour alone is never
-                # sufficient to create an identity link.
-                if item["reid"] >= self.graph_min_reid and item["score"] >= self.graph_min_score:
-                    # If appearance is only moderate, require supporting colour.
-                    if item["reid"] < self.graph_strong_reid and item["colour"] < self.graph_color_gate:
-                        continue
-                    matrix[i, j] = item["score"]
+                if item["reid"] < self.graph_min_reid or item["score"] < self.graph_min_score:
+                    continue
+                if item["reid"] < self.graph_strong_reid and item["colour"] < self.graph_color_gate:
+                    continue
+                matrix[i, j] = item["score"]
 
-        assignments = self._hungarian(matrix)
         out: List[dict] = []
-        for i, j in assignments:
+        for i, j in self._hungarian(matrix):
             item = details[(i, j)]
             row_values = np.sort(matrix[i, :][matrix[i, :] > 0.0])[::-1]
             col_values = np.sort(matrix[:, j][matrix[:, j] > 0.0])[::-1]
@@ -179,25 +151,18 @@ class GlobalIdentityBodyV6CameraGraph(GlobalIdentityBodyV6):
             if row_margin < self.graph_margin or col_margin < self.graph_margin:
                 continue
             out.append({
-                "camera_a": camera_a,
-                "camera_b": camera_b,
-                "gid_a": gids_a[i],
-                "gid_b": gids_b[j],
-                "score": float(item["score"]),
-                "reid": float(item["reid"]),
-                "colour": float(item["colour"]),
-                "time": float(item["time"]),
-                "shape": float(item["shape"]),
-                "row_margin": row_margin,
-                "col_margin": col_margin,
-                "pair": item["pair"],
+                "camera_a": camera_a, "camera_b": camera_b,
+                "gid_a": gids_a[i], "gid_b": gids_b[j],
+                "score": float(item["score"]), "reid": float(item["reid"]),
+                "colour": float(item["colour"]), "time": float(item["time"]),
+                "shape": float(item["shape"]), "row_margin": row_margin,
+                "col_margin": col_margin, "pair": item["pair"],
             })
         return out
 
     @staticmethod
     def _components(edges: List[dict], nodes: List[Tuple[str, str]]) -> List[List[Tuple[str, str]]]:
         parent = {node: node for node in nodes}
-        cams = {node: node[0] for node in nodes}
 
         def find(x):
             while parent[x] != x:
@@ -205,19 +170,16 @@ class GlobalIdentityBodyV6CameraGraph(GlobalIdentityBodyV6):
                 x = parent[x]
             return x
 
-        def can_join(a, b):
-            ra, rb = find(a), find(b)
-            if ra == rb:
-                return True
-            ca = {cams[n] for n in nodes if find(n) == ra}
-            cb = {cams[n] for n in nodes if find(n) == rb}
-            return ca.isdisjoint(cb)
+        def camera_set(root):
+            return {cam for cam, gid in nodes if find((cam, gid)) == root}
 
         for edge in sorted(edges, key=lambda x: x["score"], reverse=True):
             a = (edge["camera_a"], edge["gid_a"])
             b = (edge["camera_b"], edge["gid_b"])
-            if can_join(a, b):
-                ra, rb = find(a), find(b)
+            ra, rb = find(a), find(b)
+            if ra == rb:
+                continue
+            if camera_set(ra).isdisjoint(camera_set(rb)):
                 parent[rb] = ra
 
         groups: Dict[Tuple[str, str], List[Tuple[str, str]]] = {}
@@ -225,12 +187,12 @@ class GlobalIdentityBodyV6CameraGraph(GlobalIdentityBodyV6):
             groups.setdefault(find(node), []).append(node)
         return list(groups.values())
 
-    def _reconcile(self, mapping: Dict[str, str], tracks: Dict[str, Tracklet]) -> Tuple[Dict[str, str], List[dict]]:
+    def _reconcile(self, mapping: Dict[str, str], tracks: Dict[str, Tracklet]):
         cameras = sorted({track.camera for track in tracks.values()})
         nodes = []
         for camera in cameras:
-            for gid in sorted({mapping[k] for k, t in tracks.items() if t.camera == camera and k in mapping}):
-                nodes.append((camera, gid))
+            gids = sorted({mapping[k] for k, t in tracks.items() if t.camera == camera and k in mapping})
+            nodes.extend((camera, gid) for gid in gids)
 
         edges: List[dict] = []
         for i, camera_a in enumerate(cameras):
@@ -238,38 +200,41 @@ class GlobalIdentityBodyV6CameraGraph(GlobalIdentityBodyV6):
                 edges.extend(self._pair_camera_links(mapping, tracks, camera_a, camera_b))
 
         components = self._components(edges, nodes)
+        used: set[str] = set()
         corrected = dict(mapping)
-        component_records = []
-        next_candidates = []
-
-        for component in components:
-            if len(component) <= 1:
-                continue
-            numeric = []
-            for _, gid in component:
-                try:
-                    numeric.append(int(gid.lstrip("G")))
-                except ValueError:
-                    pass
-            canonical = f"G{min(numeric):06d}" if numeric else sorted(g for _, g in component)[0]
-            node_set = set(component)
+        ordered = sorted(
+            components,
+            key=lambda comp: min([int(g[1:]) for _c, g in comp if g.startswith("G") and g[1:].isdigit()] or [10**9]),
+        )
+        max_id = max([int(g[1:]) for _c, g in nodes if g.startswith("G") and g[1:].isdigit()] or [0])
+        for component in ordered:
+            candidates = sorted(
+                {gid for _cam, gid in component},
+                key=lambda g: int(g[1:]) if g.startswith("G") and g[1:].isdigit() else 10**9,
+            )
+            canonical = next((gid for gid in candidates if gid not in used), None)
+            if canonical is None:
+                max_id += 1
+                canonical = f"G{max_id:06d}"
+            used.add(canonical)
+            nodeset = set(component)
             for key, gid in list(corrected.items()):
                 track = tracks[key]
-                if (track.camera, gid) in node_set:
+                if (track.camera, gid) in nodeset:
                     corrected[key] = canonical
-            component_records.append({"nodes": sorted(component), "canonical": canonical})
 
-        # Refresh every decision's GID to the reconciled assignment.
         refreshed = []
         for item in self.decisions:
             gid = corrected.get(item.key, item.gid)
-            if gid != item.gid:
-                refreshed.append(type(item)(item.key, gid, item.state, "cross_camera_graph", item.score, item.margin, item.body, item.temporal, item.spatial, item.support, item.camera, item.provisional, item.merged))
-            else:
-                refreshed.append(item)
+            reason = "cross_camera_graph" if gid != item.gid else item.reason
+            refreshed.append(
+                type(item)(item.key, gid, item.state, reason, item.score, item.margin, item.body,
+                           item.temporal, item.spatial, item.support, item.camera,
+                           item.provisional, item.merged)
+            )
         self.decisions = refreshed
         self.graph_links = edges
-        return corrected, component_records
+        return corrected
 
     def _rebuild_state(self, mapping: Dict[str, str], tracks: Dict[str, Tracklet]) -> None:
         rebuilt: Dict[str, Identity] = {}
@@ -282,7 +247,7 @@ class GlobalIdentityBodyV6CameraGraph(GlobalIdentityBodyV6):
 
     def run(self, tracks: Dict[str, Tracklet]):
         base_mapping, _ = super().run(tracks)
-        corrected, _ = self._reconcile(base_mapping, tracks)
+        corrected = self._reconcile(base_mapping, tracks)
         self._rebuild_state(corrected, tracks)
         return corrected, list(self.decisions)
 

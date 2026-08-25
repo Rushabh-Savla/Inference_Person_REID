@@ -45,11 +45,9 @@ class BatchPipelineV6CameraGraph(BatchPipelineV6):
         val = hsv[..., 2].astype(np.float32) / 255.0
         hue = hsv[..., 0].astype(np.float32) / 180.0
 
-        # Saturation-weighted hue distribution: robust to small exposure shifts.
         hue_hist, _ = np.histogram(hue, bins=8, range=(0.0, 1.0), weights=sat + 0.05)
         hue_hist = hue_hist.astype(np.float32)
 
-        # Neutral-clothing brightness distribution (e.g. white vs dark/brown).
         neutral = sat < 0.28
         value_hist, _ = np.histogram(val[neutral], bins=4, range=(0.0, 1.0))
         value_hist = value_hist.astype(np.float32)
@@ -71,8 +69,6 @@ class BatchPipelineV6CameraGraph(BatchPipelineV6):
             if old is None:
                 track.colour_signature = signature
             else:
-                # Smooth observations so a single lighting change cannot swing
-                # the cross-camera descriptor.
                 mixed = 0.75 * np.asarray(old, dtype=np.float32) + 0.25 * signature
                 mixed /= np.linalg.norm(mixed) + 1e-12
                 track.colour_signature = mixed.astype(np.float32)
@@ -90,13 +86,27 @@ class BatchPipelineV6CameraGraph(BatchPipelineV6):
         for kind, vector in feats.items():
             value = base.copy()
             value["kind"] = kind
-            if track.add(vector, kind, float(score), value, self.novelty, self.bank):
+            added = track.add(vector, kind, float(score), value, self.novelty, self.bank)
+            if added:
+                # Keep the observation contract explicit even if a future
+                # Tracklet implementation normalizes or reconstructs metadata.
+                if track.observations:
+                    track.observations[-1].setdefault("bbox", list(bbox))
                 self.store_crop(key, kind, image)
 
-        if track.observations:
-            boxes = np.asarray([x["bbox"] for x in track.observations], dtype=np.float32)
+        # Be defensive about legacy/malformed observations. The cross-camera
+        # graph only needs geometry when a bbox is actually available; it should
+        # never crash the entire inference run because one observation lacks it.
+        boxes = [
+            obs["bbox"]
+            for obs in track.observations
+            if isinstance(obs, dict) and "bbox" in obs and len(obs["bbox"]) == 4
+        ]
+        if boxes:
+            boxes = np.asarray(boxes, dtype=np.float32)
             hh = np.maximum(1.0, boxes[:, 3] - boxes[:, 1])
             ww = np.maximum(1.0, boxes[:, 2] - boxes[:, 0])
             track.shape = float(np.median(hh / ww))
-            track.start = min(x["timestamp"] for x in track.observations)
-            track.end = max(x["timestamp"] for x in track.observations)
+        if track.observations:
+            track.start = min(x.get("timestamp", stamp) for x in track.observations)
+            track.end = max(x.get("timestamp", stamp) for x in track.observations)

@@ -34,7 +34,6 @@ identity_v6:
   merge_support: 3
   seed_count: 3
 
-  # Conservative cross-camera verifier.
   cross_camera_tie_margin: 0.025
   cross_camera_consensus_bonus: 0.015
   cross_camera_consensus_bonus_strong: 0.028
@@ -43,7 +42,6 @@ identity_v6:
   cross_camera_geometry_bonus: 0.004
   cross_camera_geometry_min: 0.70
 
-  # Shared recording clock. 222 is the zero reference.
   cross_camera_temporal_enabled: true
   cross_camera_temporal_tolerance_sec: 6.0
   cross_camera_temporal_bonus: 0.045
@@ -53,9 +51,8 @@ identity_v6:
   cross_camera_temporal_conflict_threshold: 0.45
   cross_camera_temporal_conflict_penalty: 0.050
 
-  # Order-independent one-to-one cross-camera track links. These are computed
-  # from the complete track set before identity assignment, so processing order
-  # cannot hide the corroborating observation.
+  # Complete-corpus, one-to-one track correspondence. These are evaluated
+  # before GID assignment and are therefore independent of processing order.
   cross_camera_link_min_body: 0.50
   cross_camera_link_min_score: 0.53
   cross_camera_link_margin: 0.035
@@ -65,14 +62,18 @@ identity_v6:
   cross_camera_link_temporal_weight: 0.12
   cross_camera_link_geometry_weight: 0.06
 
-  # Absolute recording offsets measured from the supplied overlays.
+  # High-confidence links are allowed to correct even a strong but conflicting
+  # appearance score. This is specifically for the observed 222/224 identity
+  # swap, and only fires after the one-to-one link and endpoint margins pass.
+  cross_camera_link_override_min: 0.56
+  cross_camera_link_override_bonus: 0.28
+  cross_camera_link_override_penalty: 0.28
+
   camera_time_offsets_sec:
     cam_213: 8.0
     cam_222: 0.0
     cam_224: 3.0
 
-  # At equal global timestamps, seed identities from the common reference
-  # camera first, then 213, then 224. This is only an ordering tie-break.
   camera_processing_priority:
     cam_222: 0
     cam_213: 1

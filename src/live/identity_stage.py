@@ -1,10 +1,10 @@
 from __future__ import annotations
 
+import os
 import threading
 import time
 from collections import defaultdict
 
-from live.identity_engine import IdentityEngine
 from live.persistent_identity import PersistentIdentityEngine
 from live.priority import CameraFairQueue
 from live.topology import FailOpenTopology
@@ -35,15 +35,10 @@ class IdentityStage(threading.Thread):
         self._store_failed = False
         self.geometry = geometry
 
-        # Persistent identity state is deliberately separate from the bounded
-        # active-track cache. REID_IDENTITY_DB can point at a deployment-specific
-        # durable path; REID_MODEL_ID prevents incompatible embedding spaces from
-        # being mixed into one identity gallery.
-        import os
         state_path = identity_state_path or os.environ.get(
-            "REID_IDENTITY_DB", "identity_state/reid_live.sqlite3"
+            "REID_IDENTITY_DB", "identity_state/reid_live_v6.sqlite3"
         )
-        model_id = identity_model_id or os.environ.get("REID_MODEL_ID", "live")
+        model_id = identity_model_id or os.environ.get("REID_MODEL_ID", "v6-live")
         self.engine = PersistentIdentityEngine(
             min_evidence_obs=min_evidence_obs,
             same_camera_threshold=same_camera_threshold,
@@ -90,11 +85,14 @@ class IdentityStage(threading.Thread):
         except BaseException as e:
             import traceback
             self.failed = e
-            print(
-                f"[IdentityStage] FATAL: this stage has DIED ({type(e).__name__}: {e})."
-            )
+            print(f"[IdentityStage] FATAL: this stage has DIED ({type(e).__name__}: {e}).")
             traceback.print_exc()
             raise
+        finally:
+            try:
+                self.engine.close()
+            except Exception as e:
+                print(f"[IdentityStage] persistent identity close failed: {e}")
 
     def _resolve_frame(self, frame):
         fresh = frame.meta.get("fresh_track_ids", set())

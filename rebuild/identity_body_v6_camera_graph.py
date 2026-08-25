@@ -71,24 +71,6 @@ class GlobalIdentityBodyV6CameraGraph(GlobalIdentityBodyV6):
         )
         return float(total), float(reid), float(colour), float(time), float(shape)
 
-    def _group_score(self, left: List[Tracklet], right: List[Tracklet]) -> dict:
-        rows = []
-        for a in left:
-            for b in right:
-                rows.append((*self._pair_score(a, b), a.key, b.key))
-        if not rows:
-            return {"score": 0.0, "reid": 0.0, "colour": 0.5, "time": 0.0, "shape": 0.5, "pair": None}
-        rows.sort(key=lambda x: x[0], reverse=True)
-        top = rows[: min(3, len(rows))]
-        return {
-            "score": float(0.72 * top[0][0] + 0.28 * np.mean([x[0] for x in top])),
-            "reid": float(top[0][1]),
-            "colour": float(np.mean([x[2] for x in top])),
-            "time": float(max(x[3] for x in top)),
-            "shape": float(np.mean([x[4] for x in top])),
-            "pair": (top[0][5], top[0][6]),
-        }
-
     @staticmethod
     def _hungarian(matrix: np.ndarray) -> List[Tuple[int, int]]:
         if matrix.size == 0:
@@ -116,30 +98,44 @@ class GlobalIdentityBodyV6CameraGraph(GlobalIdentityBodyV6):
                 used_r.add(i); used_c.add(j); out.append((i, j))
             return out
 
-    def _camera_groups(self, mapping: Dict[str, str], tracks: Dict[str, Tracklet], camera: str) -> Dict[str, List[Tracklet]]:
+    @staticmethod
+    def _camera_groups(mapping: Dict[str, str], tracks: Dict[str, Tracklet], camera: str) -> Dict[str, List[Tracklet]]:
         groups: Dict[str, List[Tracklet]] = {}
         for key, gid in mapping.items():
             if tracks[key].camera == camera:
                 groups.setdefault(gid, []).append(tracks[key])
         return groups
 
-    def _pair_camera_links(self, mapping: Dict[str, str], tracks: Dict[str, Tracklet], camera_a: str, camera_b: str) -> List[dict]:
-        left = self._camera_groups(mapping, tracks, camera_a)
-        right = self._camera_groups(mapping, tracks, camera_b)
+    def _track_matches(self, left: List[Tracklet], right: List[Tracklet]) -> List[dict]:
+        """Match individual tracklets before any GID grouping.
+
+        This is deliberately track-level. Grouping by the already assigned GID
+        before matching is unsafe when the very problem we are correcting is a
+        cross-camera permutation of those GIDs.
+        """
         if not left or not right:
             return []
-        gids_a, gids_b = sorted(left), sorted(right)
-        matrix = np.zeros((len(gids_a), len(gids_b)), dtype=np.float64)
+        left = sorted(left, key=lambda item: item.key)
+        right = sorted(right, key=lambda item: item.key)
+        matrix = np.zeros((len(left), len(right)), dtype=np.float64)
         details: Dict[Tuple[int, int], dict] = {}
-        for i, gid_a in enumerate(gids_a):
-            for j, gid_b in enumerate(gids_b):
-                item = self._group_score(left[gid_a], right[gid_b])
-                details[(i, j)] = item
-                if item["reid"] < self.graph_min_reid or item["score"] < self.graph_min_score:
+        for i, a in enumerate(left):
+            for j, b in enumerate(right):
+                total, reid, colour, time, shape = self._pair_score(a, b)
+                details[(i, j)] = {
+                    "score": total,
+                    "reid": reid,
+                    "colour": colour,
+                    "time": time,
+                    "shape": shape,
+                    "left": a.key,
+                    "right": b.key,
+                }
+                if reid < self.graph_min_reid or total < self.graph_min_score:
                     continue
-                if item["reid"] < self.graph_strong_reid and item["colour"] < self.graph_color_gate:
+                if reid < self.graph_strong_reid and colour < self.graph_color_gate:
                     continue
-                matrix[i, j] = item["score"]
+                matrix[i, j] = total
 
         out: List[dict] = []
         for i, j in self._hungarian(matrix):
@@ -148,6 +144,75 @@ class GlobalIdentityBodyV6CameraGraph(GlobalIdentityBodyV6):
             col_values = np.sort(matrix[:, j][matrix[:, j] > 0.0])[::-1]
             row_margin = float(row_values[0] - row_values[1]) if len(row_values) > 1 else float("inf")
             col_margin = float(col_values[0] - col_values[1]) if len(col_values) > 1 else float("inf")
+            if row_margin < self.graph_margin or col_margin < self.graph_margin:
+                continue
+            out.append({**item, "row_margin": row_margin, "col_margin": col_margin})
+        return out
+
+    def _pair_camera_links(self, mapping: Dict[str, str], tracks: Dict[str, Tracklet], camera_a: str, camera_b: str) -> List[dict]:
+        """Create one-to-one cross-camera links from track-level evidence.
+
+        The previous implementation first grouped observations by their current
+        GID and then compared those groups. That is circular when a camera has a
+        GID permutation: each corrupted group contains two different people and
+        can therefore generate strong cross-links to the other corrupted group.
+        We now solve the correspondence at the track level first, aggregate those
+        verified matches to GID pairs, and only then solve a GID-level assignment.
+        """
+        left_groups = self._camera_groups(mapping, tracks, camera_a)
+        right_groups = self._camera_groups(mapping, tracks, camera_b)
+        if not left_groups or not right_groups:
+            return []
+
+        left_tracks = [track for group in left_groups.values() for track in group]
+        right_tracks = [track for group in right_groups.values() for track in group]
+        track_matches = self._track_matches(left_tracks, right_tracks)
+        if not track_matches:
+            return []
+
+        gid_pairs: Dict[Tuple[str, str], List[dict]] = {}
+        by_key = {key: track for key, track in tracks.items()}
+        for match in track_matches:
+            a = by_key[match["left"]]
+            b = by_key[match["right"]]
+            gid_a = mapping[a.key]
+            gid_b = mapping[b.key]
+            gid_pairs.setdefault((gid_a, gid_b), []).append(match)
+
+        gids_a = sorted(left_groups)
+        gids_b = sorted(right_groups)
+        matrix = np.zeros((len(gids_a), len(gids_b)), dtype=np.float64)
+        details: Dict[Tuple[int, int], dict] = {}
+        for i, gid_a in enumerate(gids_a):
+            for j, gid_b in enumerate(gids_b):
+                rows = gid_pairs.get((gid_a, gid_b), [])
+                if not rows:
+                    continue
+                rows = sorted(rows, key=lambda item: item["score"], reverse=True)
+                top = rows[: min(3, len(rows))]
+                aggregate = float(0.72 * top[0]["score"] + 0.28 * np.mean([item["score"] for item in top]))
+                detail = {
+                    "score": aggregate,
+                    "reid": float(max(item["reid"] for item in top)),
+                    "colour": float(np.mean([item["colour"] for item in top])),
+                    "time": float(max(item["time"] for item in top)),
+                    "shape": float(np.mean([item["shape"] for item in top])),
+                    "pair": (top[0]["left"], top[0]["right"]),
+                }
+                details[(i, j)] = detail
+                matrix[i, j] = aggregate
+
+        out: List[dict] = []
+        for i, j in self._hungarian(matrix):
+            item = details[(i, j)]
+            row_values = np.sort(matrix[i, :][matrix[i, :] > 0.0])[::-1]
+            col_values = np.sort(matrix[:, j][matrix[:, j] > 0.0])[::-1]
+            row_margin = float(row_values[0] - row_values[1]) if len(row_values) > 1 else float("inf")
+            col_margin = float(col_values[0] - col_values[1]) if len(col_values) > 1 else float("inf")
+            if item["reid"] < self.graph_min_reid or item["score"] < self.graph_min_score:
+                continue
+            if item["reid"] < self.graph_strong_reid and item["colour"] < self.graph_color_gate:
+                continue
             if row_margin < self.graph_margin or col_margin < self.graph_margin:
                 continue
             out.append({

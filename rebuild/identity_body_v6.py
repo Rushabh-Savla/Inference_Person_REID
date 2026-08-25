@@ -82,6 +82,10 @@ class GlobalIdentityBodyV6:
         self.next_id += 1
         return value
 
+    def order_key(self, track: Tracklet) -> Tuple[float, str, str]:
+        """Ordering hook; subclasses may use a calibrated global clock."""
+        return float(track.start), track.camera, track.key
+
     @staticmethod
     def overlap(a: Tracklet, b: Tracklet) -> bool:
         return not (a.end < b.start or b.end < a.start)
@@ -289,7 +293,7 @@ class GlobalIdentityBodyV6:
         self.next_id = 1; self.merge_count = 0; self.same_camera_reassociated = 0; self.cross_camera_reidentified = 0
         self.temporal_assisted = 0; self.body_assisted = 0
 
-        ordered = sorted([x for x in tracks.values() if x.count() > 0], key=lambda x: (x.start, x.camera, x.key))
+        ordered = sorted([x for x in tracks.values() if x.count() > 0], key=self.order_key)
         pending: List[Tracklet] = []
         for track in ordered:
             ranked = self.rank(track, tracks)
@@ -317,25 +321,26 @@ class GlobalIdentityBodyV6:
                 self.cross_camera_reidentified += 1
 
         changed = True
-        while pending and changed:
-            changed = False; remain = []
+        while changed and pending:
+            changed = False
+            remain: List[Tracklet] = []
             for track in pending:
                 ranked = self.rank(track, tracks)
                 best = ranked[0] if ranked else None
                 second = ranked[1]["score"] if len(ranked) > 1 else 0.0
-                if best is None:
-                    remain.append(track); continue
-                accepted, reason = self.accept(best, second)
-                if not accepted:
-                    remain.append(track); continue
-                gid = best["gid"]; prior_cameras = set(self.identities[gid].cameras)
-                self.mapping[track.key] = gid
-                trusted = reason in {"body_strong", "recent_lost_track"} and track.evidence() >= 0.60
-                self.add_track(gid, track, trusted)
-                self.record(track, gid, "confirmed_existing", reason, {**best, "second": second}, gid)
-                self.body_assisted += 1; changed = True
-                if reason == "recent_lost_track": self.same_camera_reassociated += 1; self.temporal_assisted += 1
-                if prior_cameras and track.camera not in prior_cameras: self.cross_camera_reidentified += 1
+                if best is not None:
+                    accepted, reason = self.accept(best, second)
+                    if accepted:
+                        gid = best["gid"]; prior_cameras = set(self.identities[gid].cameras)
+                        self.mapping[track.key] = gid
+                        trusted = reason in {"body_strong", "recent_lost_track"} and track.evidence() >= 0.60
+                        self.add_track(gid, track, trusted)
+                        self.record(track, gid, "confirmed_existing", reason, {**best, "second": second}, gid)
+                        self.body_assisted += 1; changed = True
+                        if reason == "recent_lost_track": self.same_camera_reassociated += 1; self.temporal_assisted += 1
+                        if prior_cameras and track.camera not in prior_cameras: self.cross_camera_reidentified += 1
+                        continue
+                remain.append(track)
             pending = remain
 
         pending = sorted(pending, key=lambda x: (-x.evidence(), x.start, x.camera, x.key))

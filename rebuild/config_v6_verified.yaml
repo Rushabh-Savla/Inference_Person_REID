@@ -33,13 +33,32 @@ identity_v6:
   merge_body: 0.82
   merge_support: 3
   seed_count: 3
+
   cross_camera_tie_margin: 0.025
-  cross_camera_consensus_bonus: 0.012
-  cross_camera_consensus_bonus_strong: 0.020
+  cross_camera_consensus_bonus: 0.015
+  cross_camera_consensus_bonus_strong: 0.028
   cross_camera_consensus_threshold: 0.64
   cross_camera_consensus_strong: 0.70
-  cross_camera_geometry_bonus: 0.008
-  cross_camera_geometry_min: 0.68
+
+  cross_camera_geometry_bonus: 0.004
+  cross_camera_geometry_min: 0.70
+
+  cross_camera_temporal_enabled: true
+  cross_camera_temporal_tolerance_sec: 6.0
+  cross_camera_temporal_bonus: 0.045
+  cross_camera_temporal_strong_bonus: 0.065
+  cross_camera_temporal_threshold: 0.56
+  cross_camera_temporal_strong: 0.66
+  cross_camera_temporal_conflict_threshold: 0.45
+  cross_camera_temporal_conflict_penalty: 0.050
+
+  # Absolute start-time offsets measured from the timestamp overlays of the
+  # supplied recordings: cam_222=13:36:41, cam_224=13:36:44, cam_213=13:36:49.
+  # 222 is the zero reference for this recorded-camera validation set.
+  camera_time_offsets_sec:
+    cam_213: 8.0
+    cam_222: 0.0
+    cam_224: 3.0
 
 tracking:
   fragment_gap_sec: 2.0

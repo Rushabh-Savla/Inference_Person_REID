@@ -9,23 +9,46 @@ from rebuild.identity_v3 import Feature, Identity, Tracklet
 
 
 class GlobalIdentityBodyV6Verified(GlobalIdentityBodyV6):
-    """V6 matcher with a conservative cross-camera verification tie-breaker.
+    """Known-good V6 matcher with conservative cross-camera verification.
 
-    The proven V6 appearance matcher remains authoritative. This subclass only
-    adds evidence when a cross-camera candidate is already close in the V6
-    ranking. It never lowers the V6 acceptance thresholds and never lets
-    geometry or secondary evidence create an otherwise weak identity match.
+    The original V6 body-ReID matcher remains the primary signal. This layer
+    adds three secondary signals only for cross-camera candidates:
+
+    * multi-observation appearance consensus;
+    * person-shape consistency;
+    * time-aligned track evidence from the other cameras.
+
+    The last item is important for the supplied 213/222/224 recordings:
+    cameras are timestamped within seconds of one another and 222/224 see the
+    same workspace from different viewpoints. A query in 224 can therefore be
+    checked against the already-observed 213/222 track evidence belonging to a
+    candidate GID instead of relying only on a single cross-view embedding.
+
+    Same-camera V6 matching is untouched. The additional evidence is never
+    allowed to manufacture a match from a weak appearance score.
     """
 
     def __init__(self, cfg: dict):
         super().__init__(cfg)
         self.cross_margin = float(cfg.get("cross_camera_tie_margin", 0.025))
-        self.cross_bonus = float(cfg.get("cross_camera_consensus_bonus", 0.012))
-        self.cross_bonus_strong = float(cfg.get("cross_camera_consensus_bonus_strong", 0.020))
+        self.cross_bonus = float(cfg.get("cross_camera_consensus_bonus", 0.015))
+        self.cross_bonus_strong = float(cfg.get("cross_camera_consensus_bonus_strong", 0.028))
         self.cross_consensus_threshold = float(cfg.get("cross_camera_consensus_threshold", 0.64))
         self.cross_consensus_strong = float(cfg.get("cross_camera_consensus_strong", 0.70))
-        self.cross_geometry_bonus = float(cfg.get("cross_camera_geometry_bonus", 0.008))
-        self.cross_geometry_min = float(cfg.get("cross_camera_geometry_min", 0.68))
+        self.cross_geometry_bonus = float(cfg.get("cross_camera_geometry_bonus", 0.004))
+        self.cross_geometry_min = float(cfg.get("cross_camera_geometry_min", 0.70))
+        self.cross_temporal_enabled = bool(cfg.get("cross_camera_temporal_enabled", True))
+        self.cross_temporal_tolerance = float(cfg.get("cross_camera_temporal_tolerance_sec", 6.0))
+        self.cross_temporal_bonus = float(cfg.get("cross_camera_temporal_bonus", 0.045))
+        self.cross_temporal_strong_bonus = float(cfg.get("cross_camera_temporal_strong_bonus", 0.065))
+        self.cross_temporal_threshold = float(cfg.get("cross_camera_temporal_threshold", 0.56))
+        self.cross_temporal_strong = float(cfg.get("cross_camera_temporal_strong", 0.66))
+        self.cross_temporal_conflict_threshold = float(cfg.get("cross_camera_temporal_conflict_threshold", 0.45))
+        self.cross_temporal_conflict_penalty = float(cfg.get("cross_camera_temporal_conflict_penalty", 0.050))
+        self.camera_offsets = {
+            str(k): float(v)
+            for k, v in (cfg.get("camera_time_offsets_sec", {}) or {}).items()
+        }
 
     @staticmethod
     def _compatible(query: str, gallery: str) -> bool:
@@ -38,7 +61,7 @@ class GlobalIdentityBodyV6Verified(GlobalIdentityBodyV6):
         return {query, gallery} <= {"full", "light"}
 
     def consensus(self, query: List[Feature], gallery: List[Feature]) -> Tuple[int, int, float]:
-        """Return distinct strong query observations, kind diversity and mean top evidence."""
+        """Return strong query evidence count, kind diversity and top mean."""
         if not query or not gallery:
             return 0, 0, 0.0
 
@@ -76,13 +99,59 @@ class GlobalIdentityBodyV6Verified(GlobalIdentityBodyV6):
         ratio = min(left, right) / max(left, right)
         return float(max(0.0, min(1.0, ratio)))
 
+    def _span(self, track: Tracklet) -> Tuple[float, float]:
+        offset = self.camera_offsets.get(track.camera, 0.0)
+        return float(track.start + offset), float(track.end + offset)
+
+    def _aligned(self, query: Tracklet, prior: Tracklet) -> bool:
+        if query.camera == prior.camera:
+            return False
+        q0, q1 = self._span(query)
+        p0, p1 = self._span(prior)
+        gap = max(0.0, max(p0 - p1, p0 if False else p0 - p1, 0.0))
+        if q1 < p0:
+            gap = p0 - q1
+        elif p1 < q0:
+            gap = q0 - p1
+        else:
+            gap = 0.0
+        return gap <= self.cross_temporal_tolerance
+
+    def _temporal_evidence(self, query: Tracklet, identity: Identity, tracks: Dict[str, Tracklet]) -> Tuple[float, float, int, float]:
+        """Return best aligned track similarity, supporting camera count, conflict and confidence."""
+        if not self.cross_temporal_enabled:
+            return 0.0, 0.0, 0, 0.0
+
+        matches: List[Tuple[str, float, int]] = []
+        conflicts: List[float] = []
+        for key in identity.tracks:
+            prior = tracks.get(key)
+            if prior is None or not self._aligned(query, prior):
+                continue
+            score, support, _ = self.body_score(query.features, prior.features)
+            if score >= self.cross_temporal_threshold:
+                matches.append((prior.camera, float(score), int(support)))
+            elif score < self.cross_temporal_conflict_threshold:
+                conflicts.append(float(score))
+
+        if not matches:
+            conflict = max(conflicts) if conflicts else 0.0
+            return 0.0, 0.0, 0, float(conflict)
+
+        per_camera: Dict[str, float] = {}
+        for camera, score, _ in matches:
+            per_camera[camera] = max(per_camera.get(camera, 0.0), score)
+        best = max(per_camera.values())
+        cameras = len(per_camera)
+        strong = max(score for score in per_camera.values())
+        conflict = max(conflicts) if conflicts else 0.0
+        return float(best), float(strong), int(cameras), float(conflict)
+
     def rank(self, track: Tracklet, tracks: Dict[str, Tracklet]) -> List[dict]:
         rows = super().rank(track, tracks)
         if not rows:
             return rows
 
-        # Only use the extra verifier when this is genuinely a cross-camera
-        # candidate. Same-camera V6 behavior remains untouched.
         adjusted: List[dict] = []
         for row in rows:
             identity = self.identities[row["gid"]]
@@ -93,32 +162,52 @@ class GlobalIdentityBodyV6Verified(GlobalIdentityBodyV6):
             row["cross_kind_diversity"] = 0
             row["cross_consensus_mean"] = 0.0
             row["cross_geometry"] = 0.5
+            row["cross_temporal_score"] = 0.0
+            row["cross_temporal_cameras"] = 0
+            row["cross_temporal_conflict"] = 0.0
             if not cross:
                 adjusted.append(row)
                 continue
 
             count, diversity, mean_top = self.consensus(track.features, identity.values())
             geom = self._shape_support(track, identity)
+            temporal, _, temporal_cameras, temporal_conflict = self._temporal_evidence(track, identity, tracks)
             row["cross_consensus"] = int(count)
             row["cross_kind_diversity"] = int(diversity)
             row["cross_consensus_mean"] = float(mean_top)
             row["cross_geometry"] = float(geom)
+            row["cross_temporal_score"] = float(temporal)
+            row["cross_temporal_cameras"] = int(temporal_cameras)
+            row["cross_temporal_conflict"] = float(temporal_conflict)
 
-            # Never change a strong V6 match. The additional evidence only
-            # separates close candidates in the ambiguous region.
-            close = row["body"] < self.strong
-            if close:
+            # Do not touch the already-strong original V6 decision. All extra
+            # evidence is explicitly subordinate to the proven ReID score.
+            if row["body"] < self.strong:
                 if count >= 3 and diversity >= 2 and mean_top >= self.cross_consensus_strong:
                     row["score"] += self.cross_bonus_strong
                 elif count >= 2 and mean_top >= self.cross_consensus_threshold:
                     row["score"] += self.cross_bonus
+
                 if geom >= self.cross_geometry_min and row["body"] >= self.threshold - 0.02:
                     row["score"] += self.cross_geometry_bonus
+
+                # The decisive new signal for the 222/224 problem: when the
+                # same GID has an already-seen, time-aligned track in another
+                # camera, require the query to agree with that actual track.
+                # A competing GID whose aligned track looks like a different
+                # person is penalized, which prevents identity swapping across
+                # simultaneously observed cameras.
+                if temporal >= self.cross_temporal_strong and temporal_cameras >= 1:
+                    row["score"] += self.cross_temporal_strong_bonus
+                elif temporal >= self.cross_temporal_threshold:
+                    row["score"] += self.cross_temporal_bonus
+
+                if temporal_conflict > 0.0 and temporal_conflict < self.cross_temporal_conflict_threshold:
+                    row["score"] -= self.cross_temporal_conflict_penalty
+
             adjusted.append(row)
 
         return sorted(adjusted, key=lambda x: x["score"], reverse=True)
 
     def record(self, track: Tracklet, gid: str, state: str, reason: str, row: dict | None, provisional: str, merged: bool = False) -> None:
-        # Keep the original V6 decision schema. Diagnostics are emitted through
-        # the standard debug JSON and do not affect compatibility with renderers.
         super().record(track, gid, state, reason, row, provisional, merged)

@@ -24,7 +24,7 @@ def make_track(camera: str, track_id: int, value: np.ndarray, colour: np.ndarray
     return track
 
 
-def engine() -> GlobalIdentityBodyV6CameraGraph:
+def build_engine() -> GlobalIdentityBodyV6CameraGraph:
     return GlobalIdentityBodyV6CameraGraph(
         {
             "match_threshold": 0.60,
@@ -70,7 +70,7 @@ def test_camera_graph_fixes_cross_camera_label_swap() -> None:
         "cam_224:2:1": make_track("cam_224", 2, brown, brown_colour, 20.0),
     }
 
-    engine = engine()
+    resolver = build_engine()
     mapping = {
         "cam_222:1:1": "G000001",
         "cam_222:2:1": "G000002",
@@ -78,7 +78,7 @@ def test_camera_graph_fixes_cross_camera_label_swap() -> None:
         "cam_224:2:1": "G000002",  # WRONG: should become G000001.
     }
 
-    corrected = engine._reconcile(mapping, tracks)
+    corrected = resolver._reconcile(mapping, tracks)
 
     assert corrected["cam_222:1:1"] == "G000001"
     assert corrected["cam_222:2:1"] == "G000002"
@@ -87,7 +87,7 @@ def test_camera_graph_fixes_cross_camera_label_swap() -> None:
 
 
 def test_components_never_merge_two_people_from_one_camera() -> None:
-    engine = engine()
+    resolver = build_engine()
     edges = [
         {"camera_a": "cam_222", "camera_b": "cam_224", "gid_a": "G000001", "gid_b": "G000001", "score": 0.90},
         {"camera_a": "cam_224", "camera_b": "cam_213", "gid_a": "G000001", "gid_b": "G000001", "score": 0.89},
@@ -99,7 +99,7 @@ def test_components_never_merge_two_people_from_one_camera() -> None:
         ("cam_224", "G000001"),
         ("cam_213", "G000001"),
     ]
-    components = engine._components(edges, nodes)
+    components = resolver._components(edges, nodes)
     for component in components:
         cameras = [camera for camera, _ in component]
         assert len(cameras) == len(set(cameras))

@@ -37,10 +37,7 @@ def make(camera, key, start, end, state_bank, colour, aspect=1.6, observations=N
 
 
 def obs(t, x, y=100.0, h=180.0, w=70.0):
-    return {
-        "timestamp": float(t),
-        "bbox": [float(x), float(y), float(x + w), float(y + h)],
-    }
+    return {"timestamp": float(t), "bbox": [float(x), float(y), float(x + w), float(y + h)]}
 
 
 def test_standing_to_sitting_uses_upper_torso_consensus():
@@ -66,6 +63,7 @@ def test_different_people_are_not_merged_by_shared_posture():
     right = make("cam_224", "b", 0, 10, bank(basis(1)), [0, 1, 0, 0], aspect=0.9)
     pair = resolver.pair(left, right, [left], [right])
     assert pair.model_support == 0
+    assert pair.fused < 0.54
 
 
 def test_same_camera_overlapping_local_tracks_are_split_into_separate_groups():
@@ -85,9 +83,7 @@ def test_fragmented_same_camera_person_is_repaired_before_cross_camera():
         "cam_213:2:1": make("cam_213", "b", 6, 10, bank(person), [1, 0, 0, 0], observations=[obs(6, 108, h=188)]),
         "cam_224:9:1": make("cam_224", "c", 12, 20, bank(person), [1, 0, 0, 0], observations=[obs(12, 100, h=188)]),
     }
-    mapping, _components, _edges = StateInvariantFinalResolver({}).resolve(
-        {"cam_213:1:1": "G1", "cam_213:2:1": "G2", "cam_224:9:1": "G1"}, tracks, ["cam_213", "cam_224"]
-    )
+    mapping, _components, _edges = StateInvariantFinalResolver({}).resolve({"cam_213:1:1": "G1", "cam_213:2:1": "G2", "cam_224:9:1": "G1"}, tracks, ["cam_213", "cam_224"])
     assert mapping["cam_213:1:1"] == mapping["cam_213:2:1"]
     assert mapping["cam_213:1:1"] == mapping["cam_224:9:1"]
 
@@ -116,14 +112,9 @@ def test_cross_camera_timestamp_offset_is_not_required_for_strong_match():
 
 def test_one_model_agreement_is_never_enough():
     resolver = StateInvariantFinalResolver({})
-    a = basis(0)
-    b = basis(1)
-    left = make("cam_222", "a", 0, 10, {
-        "resnet": {"full": [a]}, "swin": {"full": [a]}, "solider": {"full": [a]},
-    }, [1, 0, 0, 0])
-    right = make("cam_224", "b", 0, 10, {
-        "resnet": {"full": [b]}, "swin": {"full": [a]}, "solider": {"full": [b]},
-    }, [1, 0, 0, 0])
+    a, b = basis(0), basis(1)
+    left = make("cam_222", "a", 0, 10, {"resnet": {"full": [a]}, "swin": {"full": [a]}, "solider": {"full": [a]}}, [1, 0, 0, 0])
+    right = make("cam_224", "b", 0, 10, {"resnet": {"full": [b]}, "swin": {"full": [a]}, "solider": {"full": [b]}}, [1, 0, 0, 0])
     pair = resolver.pair(left, right, [left], [right])
     assert pair.model_support == 1
     assert pair.mutual_models <= 1

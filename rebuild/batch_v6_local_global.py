@@ -14,7 +14,8 @@ if str(SRC) not in sys.path:
 
 from rebuild.batch_v6 import BatchPipelineV6
 from rebuild.identity_body_v6 import GlobalIdentityBodyV6
-from rebuild.v6_local_global import LocalGlobalResolver, colour_signature
+from rebuild.v6_local_global_safe import SafeLocalGlobalResolver
+from rebuild.v6_local_global import colour_signature
 
 
 class BatchPipelineV6LocalGlobal(BatchPipelineV6):
@@ -80,7 +81,7 @@ class BatchPipelineV6LocalGlobal(BatchPipelineV6):
         local_mapping, _ = self.local_assign(self.tracks, cameras)
 
         print("[v6-local-global] pass 3: camera-local cross-camera reconciliation")
-        resolver = LocalGlobalResolver(self.cfg["identity_v6"])
+        resolver = SafeLocalGlobalResolver(self.cfg["identity_v6"])
         global_mapping, components, edges = resolver.resolve(local_mapping, self.tracks, cameras)
         self.save_local_debug(local_mapping, global_mapping, components, edges)
         print(f"[v6-local-global] cross-camera links accepted: {len(edges)}")

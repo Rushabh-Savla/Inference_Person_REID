@@ -15,6 +15,7 @@ from rebuild.batch_v4 import BatchPipelineV4  # noqa: E402
 from rebuild.batch_v5 import BatchPipelineV5  # noqa: E402
 from rebuild.batch_v6 import BatchPipelineV6  # noqa: E402
 from rebuild.batch_v6_local_global import BatchPipelineV6LocalGlobal  # noqa: E402
+from rebuild.batch_multimodel import BatchPipelineMultiModel  # noqa: E402
 from rebuild.live_v4 import run_live_v4  # noqa: E402
 from rebuild.live_v2 import run_live_v2  # noqa: E402
 
@@ -40,6 +41,13 @@ def main():
     batch = sub.add_parser("batch", help="V6 recorded-video pipeline")
     batch.add_argument("--config", default="rebuild/config_v6.yaml")
     batch.add_argument("--videos", nargs="*", default=[])
+
+    final_batch = sub.add_parser(
+        "batch_final",
+        help="Final multimodel cross-camera pipeline: NVIDIA ResNet50 + NVIDIA Swin Base + SOLIDER",
+    )
+    final_batch.add_argument("--config", default="rebuild/config_final_multimodel.yaml")
+    final_batch.add_argument("--videos", nargs="*", default=[])
 
     local_global = sub.add_parser(
         "batch_local_global",
@@ -79,6 +87,8 @@ def main():
     args = parser.parse_args()
     if args.mode == "batch":
         BatchPipelineV6(args.config).run(args.videos)
+    elif args.mode == "batch_final":
+        BatchPipelineMultiModel(args.config).run(args.videos)
     elif args.mode == "batch_local_global":
         BatchPipelineV6LocalGlobal(args.config).run(args.videos)
     elif args.mode == "batch_v5":

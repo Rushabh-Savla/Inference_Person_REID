@@ -119,9 +119,9 @@ class StateInvariantFinalResolver:
         return float(np.clip(np.dot(left.colour_signature, right.colour_signature), 0.0, 1.0))
 
     def _temporal(self, left: LocalGroup, right: LocalGroup) -> float:
-        a0 = left.start + self.offsets.get(left.camera, 0.0)
         a1 = left.end + self.offsets.get(left.camera, 0.0)
         b0 = right.start + self.offsets.get(right.camera, 0.0)
+        a0 = left.start + self.offsets.get(left.camera, 0.0)
         b1 = right.end + self.offsets.get(right.camera, 0.0)
         if not (a1 < b0 or b1 < a0):
             return 0.5
@@ -169,12 +169,7 @@ class StateInvariantFinalResolver:
             row_score = float(scores_row[row_best])
             col_score = float(scores_col[col_best])
             minimum = self.model_min[model]
-            if (
-                row_score >= minimum
-                and col_score >= minimum
-                and right_pool[row_best].key == right.key
-                and left_pool[col_best].key == left.key
-            ):
+            if row_score >= minimum and col_score >= minimum and right_pool[row_best].key == right.key and left_pool[col_best].key == left.key:
                 count += 1
         return count
 
@@ -201,18 +196,9 @@ class StateInvariantFinalResolver:
             + weights["colour"] * colour
             + weights["temporal"] * temporal
         )
-        actual_state_change = (
-            left.state_type != "unknown"
-            and right.state_type != "unknown"
-            and left.state_type != right.state_type
-        )
+        actual_state_change = left.state_type != "unknown" and right.state_type != "unknown" and left.state_type != right.state_type
         transition = actual_state_change or transition_votes >= 2
-        return PairEvidence(
-            fused=float(fused), resnet=float(scores["resnet"]), swin=float(scores["swin"]), solider=float(scores["solider"]),
-            colour=float(colour), temporal=float(temporal), agreement=agreement,
-            model_support=int(model_support), mutual_models=int(mutual), view_support=int(view_support),
-            state_transition=bool(transition),
-        )
+        return PairEvidence(float(fused), float(scores["resnet"]), float(scores["swin"]), float(scores["solider"]), float(colour), float(temporal), agreement, int(model_support), int(mutual), int(view_support), bool(transition))
 
     @classmethod
     def _state_type(cls, aspect: float) -> str:
@@ -303,18 +289,133 @@ class StateInvariantFinalResolver:
                 continue
             row = np.sort(matrix[i][matrix[i] > 0])[::-1]
             col = np.sort(matrix[:, j][matrix[:, j] > 0])[::-1]
-            rm = float(row[0] - row[1]) if len(row) > 1 else 1.0
-            cm = float(col[0] - col[1]) if len(col) > 1 else 1.0
-            item = details[(i, j)]
-            if self._acceptable(item, rm, cm):
-                used_left.add(i); used_right.add(j)
-                result.append({
-                    "left": left[i].key, "right": right[j].key,
-                    "left_members": left[i].members, "right_members": right[j].members,
-                    "fused": item.fused, "resnet": item.resnet, "swin": item.swin, "solider": item.solider,
-                    "colour": item.colour, "temporal": item.temporal, "agreement": item.agreement,
-                    "model_support": item.model_support, "mutual_models": item.mutual_models,
-                    "view_support": item.view_support, "state_transition": item.state_transition,
-                    "row_margin": rm, "col_margin": cm,
-                })
+            row_margin = float(row[0] - row[1]) if row.size > 1 else 1.0
+            col_margin = float(col[0] - col[1]) if col.size > 1 else 1.0
+            evidence = details[(i, j)]
+            if not self._acceptable(evidence, row_margin, col_margin):
+                continue
+            used_left.add(i)
+            used_right.add(j)
+            result.append({
+                "left": left[i].key, "right": right[j].key,
+                "left_members": left[i].members, "right_members": right[j].members,
+                "fused": evidence.fused, "resnet": evidence.resnet, "swin": evidence.swin, "solider": evidence.solider,
+                "colour": evidence.colour, "temporal": evidence.temporal, "agreement": evidence.agreement,
+                "model_support": evidence.model_support, "mutual_models": evidence.mutual_models,
+                "view_support": evidence.view_support, "state_transition": evidence.state_transition,
+                "row_margin": row_margin, "col_margin": col_margin,
+            })
         return result
+
+    @staticmethod
+    def _components(groups: List[LocalGroup], edges: List[dict]) -> List[List[LocalGroup]]:
+        parent = {g.key: g.key for g in groups}
+        members = {g.key: {g.key} for g in groups}
+        lookup = {g.key: g for g in groups}
+
+        def find(key: str) -> str:
+            while parent[key] != key:
+                parent[key] = parent[parent[key]]
+                key = parent[key]
+            return key
+
+        for edge in sorted(edges, key=lambda item: item["fused"], reverse=True):
+            a_key = edge["left"]
+            b_key = edge["right"]
+            if a_key not in parent or b_key not in parent:
+                continue
+            a, b = find(a_key), find(b_key)
+            if a == b:
+                continue
+            cameras_a = {lookup[node].camera for node in members[a]}
+            cameras_b = {lookup[node].camera for node in members[b]}
+            if cameras_a & cameras_b:
+                continue
+            parent[b] = a
+            members[a].update(members[b])
+            del members[b]
+
+        result: Dict[str, List[LocalGroup]] = defaultdict(list)
+        for group in groups:
+            result[find(group.key)].append(group)
+        return sorted(result.values(), key=lambda component: min((g.start, g.key) for g in component))
+
+    @staticmethod
+    def _flat_gallery(component: List[LocalGroup]) -> Dict[str, List[np.ndarray]]:
+        result: Dict[str, List[np.ndarray]] = defaultdict(list)
+        for group in component:
+            for model, views in group.state_bank.items():
+                for values in views.values():
+                    result[model].extend(values)
+        return result
+
+    def _gallery_score(self, component: List[LocalGroup], gallery: Mapping[int, Mapping[str, List[np.ndarray]]]) -> Dict[int, float]:
+        current = self._flat_gallery(component)
+        weights = {"resnet": 0.31, "swin": 0.35, "solider": 0.31}
+        result: Dict[int, float] = {}
+        for gid, stored in gallery.items():
+            values = []
+            for model in self.MODELS:
+                if not current.get(model) or not stored.get(model):
+                    continue
+                matrix = self._matrix(current[model], stored[model])
+                if matrix.size:
+                    values.append((weights[model], self._topmean_matrix(matrix)))
+            if len(values) >= 2:
+                total = sum(weight for weight, _ in values)
+                result[int(gid)] = sum(weight * score for weight, score in values) / total
+        return result
+
+    def _assign(self, components: List[List[LocalGroup]]) -> Dict[str, str]:
+        if self.registry is None:
+            output: Dict[str, str] = {}
+            for index, component in enumerate(components, 1):
+                gid = f"G{index:06d}"
+                for group in component:
+                    for key in group.members:
+                        output[key] = gid
+            return output
+        gallery = self.registry.load_gallery()
+        result: Dict[str, str] = {}
+        used: set[int] = set()
+        for component in components:
+            ranked = sorted(self._gallery_score(component, gallery).items(), key=lambda item: item[1], reverse=True)
+            gid: int | None = None
+            if ranked:
+                best, best_score = ranked[0]
+                second = ranked[1][1] if len(ranked) > 1 else 0.0
+                if best_score >= self.gallery_min and best_score - second >= self.gallery_margin and best not in used:
+                    gid = int(best)
+            if gid is None:
+                gid = self.registry.allocate_gid()
+            used.add(gid)
+            banks = self._flat_gallery(component)
+            self.registry.save_component(
+                gid,
+                model_banks=banks,
+                cameras={group.camera for group in component},
+                last_ts=max(group.end for group in component),
+                obs=sum(len(group.members) for group in component),
+            )
+            gallery = self.registry.load_gallery()
+            text = f"G{gid:06d}"
+            for group in component:
+                for key in group.members:
+                    result[key] = text
+        return result
+
+    def resolve(self, local_mapping: Mapping[str, str], tracks: Mapping[str, object], cameras: List[str]):
+        groups = self.build_groups(local_mapping, tracks)
+        by_camera = {camera: [group for group in groups if group.camera == camera] for camera in cameras}
+        edges: List[dict] = []
+        ordered = sorted(cameras)
+        for index, camera_a in enumerate(ordered):
+            for camera_b in ordered[index + 1:]:
+                edges.extend(self.cross_edges(by_camera.get(camera_a, []), by_camera.get(camera_b, [])))
+        components = self._components(groups, edges)
+        mapping = self._assign(components)
+        component_output: Dict[str, List[str]] = {}
+        for component in components:
+            gid = mapping[component[0].members[0]]
+            component_output[gid] = sorted(key for group in component for key in group.members)
+        return mapping, component_output, edges

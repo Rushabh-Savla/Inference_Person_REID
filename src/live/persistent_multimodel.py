@@ -5,17 +5,17 @@ import os
 import sqlite3
 import threading
 from pathlib import Path
-from typing import Dict, Iterable, Mapping, Optional
+from typing import Dict, Iterable, Mapping
 
 import numpy as np
 
 
 class PersistentMultimodelRegistry:
-    """Durable GID namespace and multimodel exemplar gallery.
+    """Durable global identity namespace and multimodel exemplar gallery.
 
-    SQLite is the identity authority. It stores the permanent GID namespace and
-    compact exemplar banks for each embedding space. No active-track state is
-    persisted here, so tracker resets and scene-empty periods cannot recycle IDs.
+    SQLite is authoritative for permanent GID allocation and metadata. Each model
+    space is stored independently, and exemplars are accumulated rather than
+    replaced so different cameras, poses and lighting conditions remain available.
     """
 
     def __init__(self, path: str | os.PathLike[str], model_id: str = "multimodel-v1", bank_size: int = 32) -> None:
@@ -115,25 +115,41 @@ class PersistentMultimodelRegistry:
         obs: int,
     ) -> None:
         gid = int(gid)
-        cams = sorted(set(str(x) for x in cameras))
+        incoming_cams = set(str(x) for x in cameras)
         with self._lock:
             with self._db:
+                row = self._db.execute(
+                    "SELECT obs, last_ts, last_cam, spans_json FROM identities WHERE gid=?", (gid,)
+                ).fetchone()
+                existing_obs = int(row[0]) if row else 0
+                existing_ts = float(row[1]) if row else 0.0
+                existing_cams = set(json.loads(row[3]) if row and row[3] else [])
+                merged_cams = sorted(existing_cams | incoming_cams)
                 self._db.execute(
                     "INSERT INTO identities(gid, obs, last_ts, last_cam, spans_json) VALUES(?,?,?,?,?) "
                     "ON CONFLICT(gid) DO UPDATE SET obs=excluded.obs, last_ts=excluded.last_ts, "
                     "last_cam=excluded.last_cam, spans_json=excluded.spans_json",
-                    (gid, int(obs), float(last_ts), cams[-1] if cams else "", json.dumps(cams)),
+                    (
+                        gid,
+                        max(existing_obs, int(obs)),
+                        max(existing_ts, float(last_ts)),
+                        merged_cams[-1] if merged_cams else "",
+                        json.dumps(merged_cams, separators=(",", ":")),
+                    ),
                 )
                 for model, values in model_banks.items():
-                    vectors = []
-                    seen = set()
+                    current = self._db.execute(
+                        "SELECT dim, vector FROM embeddings WHERE gid=? AND model=? ORDER BY idx",
+                        (gid, str(model)),
+                    ).fetchall()
+                    vectors = [self._decode(int(dim), blob) for dim, blob in current]
+                    seen = {vector.tobytes() for vector in vectors}
                     for value in values:
-                        arr = self._unit(value)
-                        key = arr.tobytes()
-                        if key in seen:
-                            continue
-                        seen.add(key)
-                        vectors.append(arr)
+                        vector = self._unit(value)
+                        key = vector.tobytes()
+                        if key not in seen:
+                            vectors.append(vector)
+                            seen.add(key)
                     vectors = vectors[-self.bank_size :]
                     self._db.execute("DELETE FROM embeddings WHERE gid=? AND model=?", (gid, str(model)))
                     for idx, vector in enumerate(vectors):

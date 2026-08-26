@@ -20,7 +20,13 @@ cross_camera_models:
   swin_batch: 16
   solider_batch: 16
 
+identity_state:
+  path: identity_state/reid_multimodel.sqlite3
+  model_id: final-multimodel-v1
+  bank_size: 32
+
 identity_v6:
+  # Same-camera V6 behavior remains unchanged.
   match_threshold: 0.60
   match_margin: 0.035
   strong_threshold: 0.72
@@ -40,31 +46,36 @@ identity_v6:
   merge_support: 3
   seed_count: 3
 
-  # Cross-camera model agreement. These are deliberately conservative.
+  # Conservative cross-camera requirements.
   final_cross_resnet_min: 0.55
   final_cross_swin_min: 0.55
   final_cross_solider_min: 0.50
-  final_cross_fused_min: 0.69
+  final_cross_fused_min: 0.70
   final_cross_strong: 0.72
-  final_cross_margin: 0.045
-  final_cross_conflict: 0.32
-  final_cross_time_tolerance_sec: 12.0
+  final_cross_margin: 0.050
+  final_cross_time_tolerance_sec: 10.0
+  final_cross_max_gap_without_overlap_sec: 3.0
+  final_gallery_match_min: 0.73
+  final_gallery_margin: 0.050
   camera_time_offsets_sec: {}
 
-  # Overall weighting. The 222<->224 pair is explicitly SOLIDER-heavy.
-  final_w_resnet: 0.28
+  # Fusion: three appearance models dominate. Colour/shape/time are corroboration,
+  # never identity authorities. SOLIDER is slightly emphasized for 222<->224.
+  final_w_resnet: 0.27
   final_w_swin: 0.34
   final_w_solider: 0.30
-  final_w_colour: 0.05
-  final_w_shape: 0.03
+  final_w_colour: 0.04
+  final_w_shape: 0.02
+  final_w_temporal: 0.03
 
   final_pair_weights:
     cam_222-cam_224:
-      resnet: 0.25
+      resnet: 0.24
       swin: 0.32
       solider: 0.38
       colour: 0.03
-      shape: 0.02
+      shape: 0.01
+      temporal: 0.02
 
 tracking:
   fragment_gap_sec: 2.0

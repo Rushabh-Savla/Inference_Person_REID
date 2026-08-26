@@ -213,7 +213,7 @@ class MultiModelLocalGlobalResolver:
                         break
                 if not placed:
                     lanes.append((end, [key]))
-            for lane_index, members in enumerate(lanes):
+            for lane_index, (_lane_end, members) in enumerate(lanes):
                 feature_list: List[object] = []
                 model_bank: Dict[str, List[np.ndarray]] = defaultdict(list)
                 colours: List[np.ndarray] = []
@@ -290,7 +290,7 @@ class MultiModelLocalGlobalResolver:
         banks: Dict[str, List[np.ndarray]] = defaultdict(list)
         for group in component:
             for feat in group.features:
-                banks["resnet"].append(np.asarray(feat.value, np.float32))
+                banks["resnet"].append(np.asarray(feat.vector, np.float32))
             for model_name, values in group.model_bank.items():
                 banks[model_name].extend(np.asarray(v, np.float32) for v in values)
         return banks

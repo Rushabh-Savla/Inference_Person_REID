@@ -15,21 +15,38 @@ if str(SRC) not in sys.path:
 
 from detector import PersonDetector  # noqa: E402
 from rebuild.batch_v6 import BatchPipelineV6  # noqa: E402
-from rebuild.identity_body_v6 import GlobalIdentityBodyV6  # noqa: E402
 from rebuild.identity_v2 import crop, illumination_variant, quality  # noqa: E402
 from rebuild.multimodel_reid import MultiModelLocalGlobalResolver  # noqa: E402
 from reid.nvidia_swin import NVIDIASwinReIDExtractor  # noqa: E402
 from reid.solider_reid import SOLIDERReIDExtractor  # noqa: E402
+from live.persistent_multimodel import PersistentMultimodelRegistry  # noqa: E402
 
 
 class BatchPipelineMultiModel(BatchPipelineV6):
-    """Final cross-camera pipeline: V6 ResNet + NVIDIA Swin + SOLIDER."""
+    """Final multimodel MTMC pipeline.
+
+    Same-camera behavior remains the proven V6 ResNet body matcher. Cross-camera
+    association is solved from individual tracks using ResNet + NVIDIA Swin +
+    SOLIDER evidence, restrained appearance metadata, temporal compatibility and
+    a hard one-to-one camera constraint. Final GIDs are backed by a durable
+    multimodel SQLite registry and therefore survive reruns/restarts.
+    """
 
     def __init__(self, config_path: str):
         super().__init__(config_path)
         models = self.cfg["cross_camera_models"]
-        self.swin = NVIDIASwinReIDExtractor(models["swin_weights"], device="cuda", max_batch=int(models.get("swin_batch", 16)))
-        self.solider = SOLIDERReIDExtractor(models["solider_weights"], device="cuda", max_batch=int(models.get("solider_batch", 16)))
+        self.swin = NVIDIASwinReIDExtractor(
+            models["swin_weights"], device="cuda", max_batch=int(models.get("swin_batch", 16))
+        )
+        self.solider = SOLIDERReIDExtractor(
+            models["solider_weights"], device="cuda", max_batch=int(models.get("solider_batch", 16))
+        )
+        state = self.cfg.get("identity_state", {})
+        self.registry = PersistentMultimodelRegistry(
+            state.get("path", "identity_state/reid_multimodel.sqlite3"),
+            model_id=str(state.get("model_id", "final-multimodel-v1")),
+            bank_size=int(state.get("bank_size", 32)),
+        )
 
     @staticmethod
     def colour_signature(image: np.ndarray) -> np.ndarray | None:
@@ -55,7 +72,7 @@ class BatchPipelineMultiModel(BatchPipelineV6):
         mapping: Dict[str, str] = {}
         for camera in cameras:
             subset = {key: track for key, track in tracks.items() if track.camera == camera}
-            engine = GlobalIdentityBodyV6(self.cfg["identity_v6"])
+            engine = __import__("rebuild.identity_body_v6", fromlist=["GlobalIdentityBodyV6"]).GlobalIdentityBodyV6(self.cfg["identity_v6"])
             local, _ = engine.run(subset)
             mapping.update(local)
             print(f"[local-v6] {camera}: tracklets={len(subset)} local_ids={len(set(local.values()))}")
@@ -129,7 +146,10 @@ class BatchPipelineMultiModel(BatchPipelineV6):
                         "swin": self.swin.extract_batch(extra_crops),
                         "solider": self.solider.extract_batch(extra_crops),
                     }
-                    self.add_body(key, camera, tid, seg, box, frame / fps, float(item.confidence), person, {n: v for n, v in zip(names, resnet_values)}, extras)
+                    self.add_body(
+                        key, camera, tid, seg, box, frame / fps, float(item.confidence), person,
+                        {n: v for n, v in zip(names, resnet_values)}, extras,
+                    )
                     samples += 1
         finally:
             cap.release(); rows.close()
@@ -140,29 +160,33 @@ class BatchPipelineMultiModel(BatchPipelineV6):
         if not sources:
             raise SystemExit("No videos supplied")
         cameras = [x[0] for x in sources]
-        print(f"[final] ResNet: {self.extractor.describe()}")
-        print(f"[final] Swin:   {self.swin.describe()}")
-        print(f"[final] SOLIDER:{self.solider.describe()}")
-        print("[final] FACE: OFF")
-        print(f"[final] cameras: {', '.join(cameras)}")
-        print("[final] pass 1: detect + track + three independent body embeddings")
-        for camera, path in sources:
-            self.collect(camera, path)
-        self.save_cache()
-        print("[final] pass 2: independent per-camera protected V6 identity solving")
-        local_mapping, _ = self.local_assign(self.tracks, cameras)
-        print("[final] pass 3: track-level three-model cross-camera reconciliation")
-        resolver = MultiModelLocalGlobalResolver(self.cfg["identity_v6"])
-        global_mapping, components, edges = resolver.resolve(local_mapping, self.tracks, cameras)
-        payload = {"local_mapping": local_mapping, "global_mapping": global_mapping, "components": components, "edges": edges}
-        (self.out / "final_multimodel_debug.json").write_text(json.dumps(payload, indent=2), encoding="utf-8")
-        print(f"[final] accepted cross-camera links: {len(edges)}")
-        print(f"[final] final global IDs: {len(set(global_mapping.values()))}")
-        print("[final] pass 4: render")
-        self.render(global_mapping)
-        multi = {gid: sorted({k.split(":", 1)[0] for k in members}) for gid, members in components.items() if len({k.split(":", 1)[0] for k in members}) > 1}
-        print("MULTI-CAMERA IDS:")
-        for gid, cams in sorted(multi.items()):
-            print(f"  {gid}: {', '.join(cams)}")
-        print(f"outputs: {self.out}")
-        return global_mapping
+        try:
+            print(f"[final] ResNet: {self.extractor.describe()}")
+            print(f"[final] Swin:   {self.swin.describe()}")
+            print(f"[final] SOLIDER:{self.solider.describe()}")
+            print("[final] FACE: OFF")
+            print(f"[final] cameras: {', '.join(cameras)}")
+            print("[final] pass 1: detect + track + three independent body embeddings")
+            for camera, path in sources:
+                self.collect(camera, path)
+            self.save_cache()
+            print("[final] pass 2: independent per-camera protected V6 identity solving")
+            local_mapping, _ = self.local_assign(self.tracks, cameras)
+            print("[final] pass 3: conservative three-model cross-camera reconciliation + persistent GIDs")
+            resolver = MultiModelLocalGlobalResolver(self.cfg["identity_v6"], registry=self.registry)
+            global_mapping, components, edges = resolver.resolve(local_mapping, self.tracks, cameras)
+            payload = {"local_mapping": local_mapping, "global_mapping": global_mapping, "components": components, "edges": edges}
+            (self.out / "final_multimodel_debug.json").write_text(json.dumps(payload, indent=2), encoding="utf-8")
+            print(f"[final] accepted cross-camera links: {len(edges)}")
+            print(f"[final] final global IDs: {len(set(global_mapping.values()))}")
+            print(f"[final] persistent global IDs: {self.registry.gids()}")
+            print("[final] pass 4: render")
+            self.render(global_mapping)
+            multi = {gid: sorted({k.split(":", 1)[0] for k in members}) for gid, members in components.items() if len({k.split(":", 1)[0] for k in members}) > 1}
+            print("MULTI-CAMERA IDS:")
+            for gid, cams in sorted(multi.items()):
+                print(f"  {gid}: {', '.join(cams)}")
+            print(f"outputs: {self.out}")
+            return global_mapping
+        finally:
+            self.registry.close()

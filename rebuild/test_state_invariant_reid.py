@@ -4,7 +4,7 @@ from types import SimpleNamespace
 
 import numpy as np
 
-from rebuild.multimodel_state_invariant_final import StateInvariantFinalResolver
+from rebuild.multimodel_state_invariant_final import LocalGroup, StateInvariantFinalResolver
 
 
 def basis(index: int, dim: int = 8) -> np.ndarray:
@@ -22,17 +22,21 @@ def bank(person: np.ndarray):
 
 
 def make(camera, key, start, end, state_bank, colour, aspect=1.6, observations=None):
-    return SimpleNamespace(
-        key=key,
-        camera=camera,
-        start=float(start),
-        end=float(end),
-        state_bank=state_bank,
-        colour_signature=np.asarray(colour, np.float32),
-        shape=float(aspect),
-        aspect=float(aspect),
-        state_type="upright" if aspect >= 1.35 else "compact",
-        observations=observations or [],
+    observations = observations or []
+    first = last = None
+    height = 1.0
+    if observations:
+        ordered = sorted(observations, key=lambda row: float(row["timestamp"]))
+        def centre(row):
+            x1, y1, x2, y2 = row["bbox"]
+            return (0.5 * (x1 + x2), 0.5 * (y1 + y2))
+        first = centre(ordered[0])
+        last = centre(ordered[-1])
+        height = max(1.0, float(ordered[-1]["bbox"][3]) - float(ordered[-1]["bbox"][1]))
+    return LocalGroup(
+        key=key, camera=camera, local_gid="GTEST", members=[key], start=float(start), end=float(end),
+        aspect=float(aspect), state_type="upright" if aspect >= 1.35 else "compact", state_bank=state_bank,
+        colour_signature=np.asarray(colour, np.float32), start_center=first, end_center=last, end_height=height,
     )
 
 
@@ -44,11 +48,7 @@ def test_standing_to_sitting_uses_upper_torso_consensus():
     resolver = StateInvariantFinalResolver({})
     person = basis(0)
     left = make("cam_222", "a", 10, 20, bank(person), [1, 0, 0, 0], aspect=1.8)
-    right_bank = {
-        "resnet": {"upper": [person], "torso": [person]},
-        "swin": {"upper": [person], "torso": [person]},
-        "solider": {"upper": [person], "torso": [person]},
-    }
+    right_bank = {"resnet": {"upper": [person], "torso": [person]}, "swin": {"upper": [person], "torso": [person]}, "solider": {"upper": [person], "torso": [person]}}
     right = make("cam_224", "b", 10, 20, right_bank, [1, 0, 0, 0], aspect=0.9)
     pair = resolver.pair(left, right, [left], [right])
     assert pair.state_transition is True
@@ -66,17 +66,25 @@ def test_different_people_are_not_merged_by_shared_posture():
     assert pair.fused < 0.54
 
 
-def test_same_camera_overlapping_local_tracks_are_split_into_separate_groups():
-    tracks = {
-        "cam_224:1:1": make("cam_224", "a", 0, 10, bank(basis(0)), [1, 0, 0, 0], observations=[obs(0, 100)]),
-        "cam_224:2:1": make("cam_224", "b", 5, 15, bank(basis(0)), [1, 0, 0, 0], observations=[obs(5, 110)]),
-    }
-    groups = StateInvariantFinalResolver.build_groups({"cam_224:1:1": "G1", "cam_224:2:1": "G1"}, tracks)
-    assert len(groups) == 2
-    assert all(len(group.members) == 1 for group in groups)
+def test_same_camera_overlapping_tracks_never_stitch():
+    resolver = StateInvariantFinalResolver({})
+    a = make("cam_213", "a", 0, 10, bank(basis(0)), [1, 0, 0, 0], observations=[obs(1, 100)])
+    b = make("cam_213", "b", 5, 15, bank(basis(0)), [1, 0, 0, 0], observations=[obs(6, 120)])
+    assert resolver.same_camera_edges([a, b]) == []
 
 
-def test_fragmented_same_camera_person_is_repaired_before_cross_camera():
+def test_same_camera_reset_fragments_stitch():
+    resolver = StateInvariantFinalResolver({})
+    a = make("cam_213", "a", 0, 4, bank(basis(0)), [1, 0, 0, 0], observations=[obs(3.5, 100), obs(4.0, 105)])
+    b = make("cam_213", "b", 5, 9, bank(basis(0)), [1, 0, 0, 0], observations=[obs(5.0, 108), obs(8.5, 112)])
+    edges = resolver.same_camera_edges([a, b])
+    assert len(edges) == 1
+    stitched = resolver._stitch([a, b], edges)
+    assert len(stitched) == 1
+    assert sorted(stitched[0].members) == ["a", "b"]
+
+
+def test_same_camera_reset_is_repaired_before_cross_camera():
     person = basis(0)
     tracks = {
         "cam_213:1:1": make("cam_213", "a", 0, 5, bank(person), [1, 0, 0, 0], observations=[obs(0, 100, h=190)]),
@@ -88,26 +96,26 @@ def test_fragmented_same_camera_person_is_repaired_before_cross_camera():
     assert mapping["cam_213:1:1"] == mapping["cam_224:9:1"]
 
 
-def test_same_camera_people_with_overlap_are_never_stitched():
-    person = basis(0)
-    tracks = {
-        "a": make("cam_213", "a", 0, 8, bank(person), [1, 0, 0, 0], observations=[obs(0, 100)]),
-        "b": make("cam_213", "b", 4, 12, bank(person), [1, 0, 0, 0], observations=[obs(4, 105)]),
-    }
-    resolver = StateInvariantFinalResolver({})
-    groups = resolver.build_groups({"a": "G1", "b": "G2"}, tracks)
-    assert resolver.same_camera_edges(groups) == []
-
-
 def test_cross_camera_timestamp_offset_is_not_required_for_strong_match():
     resolver = StateInvariantFinalResolver({})
-    person = basis(0)
-    left = make("cam_213", "a", 0, 5, bank(person), [1, 0, 0, 0])
-    right = make("cam_224", "b", 40, 45, bank(person), [1, 0, 0, 0])
+    person = bank(basis(0))
+    left = make("cam_213", "a", 0, 5, person, [1, 0, 0, 0])
+    right = make("cam_224", "b", 40, 45, person, [1, 0, 0, 0])
     pair = resolver.pair(left, right, [left], [right])
     edges = resolver.cross_edges([left], [right])
     assert pair.model_support == 3
     assert edges
+
+
+def test_cross_camera_reciprocal_consensus():
+    resolver = StateInvariantFinalResolver({})
+    person = bank(basis(0))
+    left = [make("cam_222", "a", 0, 5, person, [1, 0, 0, 0])]
+    right = [make("cam_224", "b", 0, 5, person, [1, 0, 0, 0]), make("cam_224", "c", 0, 5, bank(basis(1)), [0, 1, 0, 0])]
+    edges = resolver.cross_edges(left, right)
+    assert len(edges) == 1
+    assert edges[0]["left"] == "a"
+    assert edges[0]["right"] == "b"
 
 
 def test_one_model_agreement_is_never_enough():
@@ -127,3 +135,12 @@ def test_same_camera_is_hard_component_boundary():
     ]
     components = StateInvariantFinalResolver._components(groups, [{"left": "a", "right": "b", "fused": 0.99}])
     assert len(components) == 2
+
+
+def test_full_upper_torso_lower_are_retained():
+    resolver = StateInvariantFinalResolver({})
+    item = make("cam_224", "a", 0, 1, bank(basis(0)), [1, 0, 0, 0])
+    groups = resolver.build_groups({"a": "G1"}, {"a": item})
+    assert len(groups) == 1
+    for model in resolver.MODELS:
+        assert all(view in groups[0].state_bank[model] for view in resolver.VIEWS)

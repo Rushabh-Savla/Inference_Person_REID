@@ -25,11 +25,10 @@ class PairEvidence:
 class MultiModelLocalGlobalResolver:
     """Track-level multi-model cross-camera reconciliation.
 
-    The proven V6 ResNet association remains the same-camera authority. Cross-camera
-    matching is performed on individual tracklets, never on already-global IDs, so
-    a bad local merge cannot contaminate another camera. NVIDIA Swin and SOLIDER are
-    independent evidence spaces; all three must be healthy and at least two must
-    support a link. Colour, body shape and soft time compatibility only break ties.
+    ResNet is the proven V6 same-camera authority. NVIDIA Swin-Base and SOLIDER
+    provide independent cross-camera evidence. Models are not concatenated and a
+    single model can never force an identity. Accepted cross-camera edges require
+    two-model agreement plus reciprocal one-to-one matching and a margin.
     """
 
     def __init__(self, cfg: dict):
@@ -100,7 +99,7 @@ class MultiModelLocalGlobalResolver:
     def _pair(self, left, right) -> PairEvidence:
         lbank = getattr(left, "model_bank", {})
         rbank = getattr(right, "model_bank", {})
-        resnet, rsupport = self.resnet.body_score(left.features, right.features) if left.features and right.features else (0.0, 0, False)
+        resnet, rsupport, _ = self.resnet.body_score(left.features, right.features) if left.features and right.features else (0.0, 0, False)
         swin, ssupport = self._top_score(lbank.get("swin", []), rbank.get("swin", []))
         solider, psupport = self._top_score(lbank.get("solider", []), rbank.get("solider", []))
         colour = self._colour(left, right)
@@ -168,27 +167,10 @@ class MultiModelLocalGlobalResolver:
             cm = float(col[0] - col[1]) if len(col) > 1 else 1.0
             item = detail[(i, j)]
             if self._accepted(item, rm, cm):
-                accepted.append({
-                    "left": left[i].key,
-                    "right": right[j].key,
-                    "row_margin": rm,
-                    "col_margin": cm,
-                    "fused": item.fused,
-                    "resnet": item.resnet,
-                    "swin": item.swin,
-                    "solider": item.solider,
-                    "colour": item.colour,
-                    "shape": item.shape,
-                    "temporal": item.temporal,
-                    "agreement": item.agreement,
-                    "support": item.support,
-                })
+                accepted.append({"left": left[i].key, "right": right[j].key, "row_margin": rm, "col_margin": cm, "fused": item.fused, "resnet": item.resnet, "swin": item.swin, "solider": item.solider, "colour": item.colour, "shape": item.shape, "temporal": item.temporal, "agreement": item.agreement, "support": item.support})
         return accepted
 
     def resolve(self, local_mapping: Dict[str, str], tracks: Dict[str, object], cameras: List[str]):
-        # Local V6 labels are evidence only. Cross-camera matching is track-level.
-        # This prevents a contaminated local identity from combining different
-        # people before the multi-model matcher sees them.
         nodes = sorted(tracks.values(), key=lambda x: (x.start, x.camera, x.key))
         by_camera = {camera: [x for x in nodes if x.camera == camera] for camera in cameras}
         edges: List[dict] = []
@@ -206,14 +188,9 @@ class MultiModelLocalGlobalResolver:
                 x = parent[x]
             return x
 
-        # First lock high-confidence cross-camera edges. Then connect same-camera
-        # fragments only when they already share the protected local V6 identity
-        # and do not overlap in time.
         for edge in sorted(edges, key=lambda x: x["fused"], reverse=True):
             a, b = find(edge["left"]), find(edge["right"])
-            if a == b:
-                continue
-            if {camera[n] for n in members[a]} & {camera[n] for n in members[b]}:
+            if a == b or ({camera[n] for n in members[a]} & {camera[n] for n in members[b]}):
                 continue
             parent[b] = a
             members[a].update(members[b]); del members[b]
@@ -221,7 +198,7 @@ class MultiModelLocalGlobalResolver:
         by_local = defaultdict(list)
         for key, gid in local_mapping.items():
             if key in parent:
-                by_local[(key.split(":", 1)[0], gid)].append(key)
+                by_local[(tracks[key].camera, gid)].append(key)
         for (_, _gid), keys_local in by_local.items():
             for i, akey in enumerate(keys_local):
                 for bkey in keys_local[i + 1:]:
@@ -230,8 +207,11 @@ class MultiModelLocalGlobalResolver:
                         continue
                     if {camera[n] for n in members[a]} & {camera[n] for n in members[b]}:
                         continue
-                    # Same-camera local V6 continuity is allowed to reconnect a
-                    # fragmented person, but never simultaneously visible tracks.
+                    evidence = self._pair(tracks[akey], tracks[bkey])
+                    # Same-camera V6 continuity is trusted only when appearance
+                    # also supports it; this protects against a bad local merge.
+                    if evidence.resnet < 0.50 and evidence.agreement < 0.48:
+                        continue
                     parent[b] = a
                     members[a].update(members[b]); del members[b]
 

@@ -30,6 +30,7 @@ def make(camera, key, start, end, state_bank, colour, aspect=1.6, observations=N
         state_bank=state_bank,
         colour_signature=np.asarray(colour, np.float32),
         shape=float(aspect),
+        aspect=float(aspect),
         state_type="upright" if aspect >= 1.35 else "compact",
         observations=observations or [],
     )
@@ -85,10 +86,10 @@ def test_fragmented_same_camera_person_is_repaired_before_cross_camera():
         "cam_224:9:1": make("cam_224", "c", 12, 20, bank(person), [1, 0, 0, 0], observations=[obs(12, 100, h=188)]),
     }
     mapping, _components, _edges = StateInvariantFinalResolver({}).resolve(
-        {"a": "G1", "b": "G2", "c": "G1"}, tracks, ["cam_213", "cam_224"]
+        {"cam_213:1:1": "G1", "cam_213:2:1": "G2", "cam_224:9:1": "G1"}, tracks, ["cam_213", "cam_224"]
     )
-    assert mapping["a"] == mapping["b"]
-    assert mapping["a"] == mapping["c"]
+    assert mapping["cam_213:1:1"] == mapping["cam_213:2:1"]
+    assert mapping["cam_213:1:1"] == mapping["cam_224:9:1"]
 
 
 def test_same_camera_people_with_overlap_are_never_stitched():
@@ -99,8 +100,7 @@ def test_same_camera_people_with_overlap_are_never_stitched():
     }
     resolver = StateInvariantFinalResolver({})
     groups = resolver.build_groups({"a": "G1", "b": "G2"}, tracks)
-    edges = resolver.same_camera_edges(groups)
-    assert edges == []
+    assert resolver.same_camera_edges(groups) == []
 
 
 def test_cross_camera_timestamp_offset_is_not_required_for_strong_match():

@@ -15,6 +15,7 @@ if str(SRC) not in sys.path:
 
 from detector import PersonDetector  # noqa: E402
 from rebuild.batch_v6 import BatchPipelineV6  # noqa: E402
+from rebuild.identity_body_v6 import GlobalIdentityBodyV6  # noqa: E402
 from rebuild.identity_v2 import crop, illumination_variant, quality  # noqa: E402
 from rebuild.multimodel_reid import MultiModelLocalGlobalResolver  # noqa: E402
 from reid.nvidia_swin import NVIDIASwinReIDExtractor  # noqa: E402
@@ -26,10 +27,10 @@ class BatchPipelineMultiModel(BatchPipelineV6):
     """Final multimodel MTMC pipeline.
 
     Same-camera behavior remains the proven V6 ResNet body matcher. Cross-camera
-    association is solved from individual tracks using ResNet + NVIDIA Swin +
-    SOLIDER evidence, restrained appearance metadata, temporal compatibility and
-    a hard one-to-one camera constraint. Final GIDs are backed by a durable
-    multimodel SQLite registry and therefore survive reruns/restarts.
+    association is solved from camera-local groups using ResNet + NVIDIA Swin +
+    SOLIDER evidence, restrained clothing/shape/time evidence and a hard
+    one-to-one camera constraint. Final GIDs are backed by a durable multimodel
+    SQLite registry and therefore survive reruns/restarts.
     """
 
     def __init__(self, config_path: str):
@@ -72,7 +73,7 @@ class BatchPipelineMultiModel(BatchPipelineV6):
         mapping: Dict[str, str] = {}
         for camera in cameras:
             subset = {key: track for key, track in tracks.items() if track.camera == camera}
-            engine = __import__("rebuild.identity_body_v6", fromlist=["GlobalIdentityBodyV6"]).GlobalIdentityBodyV6(self.cfg["identity_v6"])
+            engine = GlobalIdentityBodyV6(self.cfg["identity_v6"])
             local, _ = engine.run(subset)
             mapping.update(local)
             print(f"[local-v6] {camera}: tracklets={len(subset)} local_ids={len(set(local.values()))}")
@@ -182,7 +183,7 @@ class BatchPipelineMultiModel(BatchPipelineV6):
             print(f"[final] persistent global IDs: {self.registry.gids()}")
             print("[final] pass 4: render")
             self.render(global_mapping)
-            multi = {gid: sorted({k.split(":", 1)[0] for k in members}) for gid, members in components.items() if len({k.split(":", 1)[0] for k in members}) > 1}
+            multi = {gid: sorted({key.split(":", 1)[0] for key in members}) for gid, members in components.items() if len({key.split(":", 1)[0] for key in members}) > 1}
             print("MULTI-CAMERA IDS:")
             for gid, cams in sorted(multi.items()):
                 print(f"  {gid}: {', '.join(cams)}")

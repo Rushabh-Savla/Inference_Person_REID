@@ -1,0 +1,70 @@
+detector:
+  model: weights/yolo11m.pt
+  conf: 0.35
+  iou: 0.60
+  tracker: bytetrack.yaml
+
+reid:
+  model: nvidia_reidentificationnet
+  weights: weights/reid/resnet50_market1501_aicity156.onnx
+  device: cuda
+  max_batch: 32
+  interval: 5
+  part_interval: 10
+  illumination_variant: true
+  min_quality: 0.20
+
+cross_camera_models:
+  swin_weights: weights/reid/nvidia_swin_base_1024/export_55/swin_base_market1501_aicity156_featuredim1024.onnx
+  solider_weights: weights/solider_swin_base_msmt17.onnx
+  swin_batch: 16
+  solider_batch: 16
+
+identity_state:
+  path: identity_state/reid_multimodel.sqlite3
+  model_id: final-state-invariant-v2
+  bank_size: 48
+
+identity_v6:
+  # Protected V6 same-camera authority.
+  match_threshold: 0.60
+  match_margin: 0.035
+  strong_threshold: 0.72
+  support_required: 2
+  accumulated_body: 0.56
+  accumulated_support: 3
+  partial_threshold: 0.58
+  partial_support: 2
+  gallery: 32
+  candidate_gallery: 12
+  promote_quality: 0.68
+  novelty: 0.985
+  same_camera_gap_sec: 15.0
+  same_camera_distance: 5.0
+  same_camera_min_continuity: 0.35
+  merge_body: 0.82
+  merge_support: 3
+  seed_count: 3
+
+  # State-invariant cross-camera matcher.
+  state_cross_fused_min: 0.66
+  state_cross_partial_fused_min: 0.62
+  state_cross_strong: 0.70
+  state_cross_margin: 0.045
+  state_cross_partial_margin: 0.035
+  state_cross_resnet_min: 0.52
+  state_cross_swin_min: 0.52
+  state_cross_solider_min: 0.50
+  state_transition_model_support: 2
+  state_transition_view_support: 2
+  state_cross_max_gap_sec: 8.0
+  state_gallery_match_min: 0.70
+  state_gallery_margin: 0.045
+  camera_time_offsets_sec: {}
+
+tracking:
+  fragment_gap_sec: 2.0
+
+input:
+  videos: []
+  output_dir: rebuild_outputs_state_invariant

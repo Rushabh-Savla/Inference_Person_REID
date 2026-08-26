@@ -22,11 +22,12 @@ cross_camera_models:
 
 identity_state:
   path: identity_state/reid_state_invariant.sqlite3
-  model_id: final-state-invariant-v2
-  bank_size: 48
+  model_id: final-state-invariant-v3
+  bank_size: 64
 
 identity_v6:
-  # Protected V6 same-camera authority.
+  # V6 remains the local appearance evidence source; final identity decisions
+  # are repaired by the state-invariant layer below.
   match_threshold: 0.60
   match_margin: 0.035
   strong_threshold: 0.72
@@ -46,20 +47,30 @@ identity_v6:
   merge_support: 3
   seed_count: 3
 
-  # State-invariant cross-camera matcher.
-  state_cross_fused_min: 0.66
-  state_cross_partial_fused_min: 0.62
-  state_cross_strong: 0.70
-  state_cross_margin: 0.045
-  state_cross_partial_margin: 0.035
-  state_cross_resnet_min: 0.52
-  state_cross_swin_min: 0.52
-  state_cross_solider_min: 0.50
-  state_transition_model_support: 2
-  state_transition_view_support: 2
+  # Final cross-camera state-invariant matcher.
+  state_cross_fused_min: 0.58
+  state_cross_partial_fused_min: 0.54
+  state_cross_strong: 0.82
+  state_cross_margin: 0.025
+  state_cross_partial_margin: 0.020
+  state_cross_resnet_min: 0.50
+  state_cross_swin_min: 0.48
+  state_cross_solider_min: 0.48
+  state_cross_required_models: 2
+  state_cross_required_mutual_models: 2
+  state_cross_required_views: 2
   state_cross_max_gap_sec: 8.0
-  state_gallery_match_min: 0.70
-  state_gallery_margin: 0.045
+
+  # Same-camera fragmented-track repair. This happens before MTMC so a
+  # fragmented person cannot remain permanently split just because the
+  # protected V6 local solver minted separate local IDs.
+  state_same_camera_gap_sec: 20.0
+  state_same_camera_fused_min: 0.58
+  state_same_camera_continuity_min: 0.32
+  state_same_camera_strong: 0.72
+
+  state_gallery_match_min: 0.66
+  state_gallery_margin: 0.03
   camera_time_offsets_sec: {}
 
 tracking:

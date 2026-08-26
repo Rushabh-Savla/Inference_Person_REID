@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from collections import defaultdict
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Dict, Iterable, List, Mapping, Tuple
 
 import numpy as np
@@ -23,14 +23,28 @@ class PairEvidence:
     support: int
 
 
-class MultiModelLocalGlobalResolver:
-    """Production MTMC reconciliation over independent camera-local tracks.
+@dataclass
+class LocalGroup:
+    key: str
+    camera: str
+    local_gid: str
+    members: List[str] = field(default_factory=list)
+    start: float = 0.0
+    end: float = 0.0
+    shape: float = 0.0
+    features: List[object] = field(default_factory=list)
+    model_bank: Dict[str, List[np.ndarray]] = field(default_factory=dict)
+    colour_signature: np.ndarray | None = None
 
-    Cross-camera matching is built directly from track observations, never from
-    already-corrupted global IDs. A valid edge requires temporal compatibility,
-    two-model appearance support, reciprocal one-to-one preference and a margin.
-    Persistent multimodel identity memory is optional for tests and mandatory in
-    the final deployment pipeline.
+
+class MultiModelLocalGlobalResolver:
+    """Production MTMC reconciliation over camera-local V6 identities.
+
+    V6 remains the same-camera authority. Its local mapping is converted into
+    non-overlapping camera-local groups so sitting/standing/walking fragments keep
+    one identity while accidentally overlapping local IDs are forcibly separated.
+    Cross-camera matching is then performed on these groups, not on already-global
+    IDs. Final GIDs come from a durable multimodel registry.
     """
 
     MODELS = ("resnet", "swin", "solider")
@@ -39,18 +53,18 @@ class MultiModelLocalGlobalResolver:
         self.cfg = cfg
         self.resnet = GlobalIdentityBodyV6(cfg)
         self.registry = registry
-        self.fused_min = float(cfg.get("final_cross_fused_min", 0.69))
+        self.fused_min = float(cfg.get("final_cross_fused_min", 0.70))
         self.strong = float(cfg.get("final_cross_strong", 0.72))
-        self.margin = float(cfg.get("final_cross_margin", 0.045))
-        self.time_tolerance = float(cfg.get("final_cross_time_tolerance_sec", 12.0))
+        self.margin = float(cfg.get("final_cross_margin", 0.050))
+        self.time_tolerance = float(cfg.get("final_cross_time_tolerance_sec", 10.0))
         self.offsets = {str(k): float(v) for k, v in (cfg.get("camera_time_offsets_sec", {}) or {}).items()}
         self.default_weights = {
-            "resnet": float(cfg.get("final_w_resnet", 0.28)),
+            "resnet": float(cfg.get("final_w_resnet", 0.27)),
             "swin": float(cfg.get("final_w_swin", 0.34)),
             "solider": float(cfg.get("final_w_solider", 0.30)),
-            "colour": float(cfg.get("final_w_colour", 0.05)),
-            "shape": float(cfg.get("final_w_shape", 0.03)),
-            "temporal": float(cfg.get("final_w_temporal", 0.04)),
+            "colour": float(cfg.get("final_w_colour", 0.04)),
+            "shape": float(cfg.get("final_w_shape", 0.02)),
+            "temporal": float(cfg.get("final_w_temporal", 0.03)),
         }
         self.pair_weights = cfg.get("final_pair_weights", {}) or {}
         self.model_min = {
@@ -58,9 +72,9 @@ class MultiModelLocalGlobalResolver:
             "swin": float(cfg.get("final_cross_swin_min", 0.55)),
             "solider": float(cfg.get("final_cross_solider_min", 0.50)),
         }
-        self.gallery_min = float(cfg.get("final_gallery_match_min", 0.72))
-        self.gallery_margin = float(cfg.get("final_gallery_margin", 0.045))
-        self.max_gap_without_overlap = float(cfg.get("final_cross_max_gap_without_overlap_sec", 4.0))
+        self.gallery_min = float(cfg.get("final_gallery_match_min", 0.73))
+        self.gallery_margin = float(cfg.get("final_gallery_margin", 0.050))
+        self.max_gap_without_overlap = float(cfg.get("final_cross_max_gap_without_overlap_sec", 3.0))
 
     @staticmethod
     def _unit(value: np.ndarray) -> np.ndarray:
@@ -103,16 +117,16 @@ class MultiModelLocalGlobalResolver:
         return float(max(0.0, 1.0 - gap / max(self.time_tolerance, 1e-6)))
 
     def _pair_allowed(self, left, right, evidence: PairEvidence) -> bool:
-        temporal = evidence.temporal
-        if temporal <= 0.0:
-            a0 = float(left.end) + self.offsets.get(left.camera, 0.0)
-            b0 = float(right.start) + self.offsets.get(right.camera, 0.0)
-            b1 = float(right.end) + self.offsets.get(right.camera, 0.0)
-            a1 = float(left.start) + self.offsets.get(left.camera, 0.0)
-            gap = min(abs(a0 - b1), abs(b0 - a1))
-            if gap > self.max_gap_without_overlap and max(evidence.resnet, evidence.swin, evidence.solider) < 0.90:
-                return False
-        return True
+        if evidence.temporal > 0.0:
+            return True
+        a0 = float(left.end) + self.offsets.get(left.camera, 0.0)
+        b0 = float(right.start) + self.offsets.get(right.camera, 0.0)
+        b1 = float(right.end) + self.offsets.get(right.camera, 0.0)
+        a1 = float(left.start) + self.offsets.get(left.camera, 0.0)
+        gap = min(abs(a0 - b1), abs(b0 - a1))
+        # Non-overlapping tracks are allowed only with extremely strong
+        # three-model appearance. Ordinary matches must be time-compatible.
+        return gap <= self.max_gap_without_overlap or max(evidence.resnet, evidence.swin, evidence.solider) >= 0.90
 
     def _weights(self, a: str, b: str) -> Dict[str, float]:
         key = "-".join(sorted((a, b)))
@@ -173,7 +187,62 @@ class MultiModelLocalGlobalResolver:
             out.append((i, j))
         return out
 
-    def _cross_track_edges(self, left: List[object], right: List[object]) -> List[dict]:
+    @staticmethod
+    def _build_local_groups(local_mapping: Mapping[str, str], tracks: Mapping[str, object], cameras: List[str]) -> List[LocalGroup]:
+        grouped: Dict[Tuple[str, str], List[str]] = defaultdict(list)
+        for key, gid in local_mapping.items():
+            if key in tracks:
+                grouped[(tracks[key].camera, str(gid))].append(key)
+
+        groups: List[LocalGroup] = []
+        for (camera, gid), keys in grouped.items():
+            lanes: List[Tuple[float, List[str]]] = []
+            for key in sorted(keys, key=lambda k: (tracks[k].start, tracks[k].end, k)):
+                start, end = float(tracks[key].start), float(tracks[key].end)
+                placed = False
+                for lane_index, (lane_end, members) in enumerate(lanes):
+                    if start >= lane_end:
+                        members.append(key)
+                        lanes[lane_index] = (max(lane_end, end), members)
+                        placed = True
+                        break
+                if not placed:
+                    lanes.append((end, [key]))
+            for lane_index, members in enumerate(lanes):
+                feature_list: List[object] = []
+                model_bank: Dict[str, List[np.ndarray]] = defaultdict(list)
+                colours: List[np.ndarray] = []
+                shapes: List[float] = []
+                for key in members:
+                    track = tracks[key]
+                    feature_list.extend(track.features)
+                    for model_name, values in getattr(track, "model_bank", {}).items():
+                        model_bank[model_name].extend(np.asarray(v, np.float32) for v in values)
+                    if getattr(track, "colour_signature", None) is not None:
+                        colours.append(np.asarray(track.colour_signature, np.float32))
+                    if float(getattr(track, "shape", 0.0)) > 0:
+                        shapes.append(float(track.shape))
+                colour = None
+                if colours:
+                    colour = np.mean(np.stack(colours), axis=0)
+                    colour /= np.linalg.norm(colour) + 1e-12
+                groups.append(
+                    LocalGroup(
+                        key=f"{camera}:{gid}:lane{lane_index}",
+                        camera=camera,
+                        local_gid=str(gid),
+                        members=sorted(members),
+                        start=min(float(tracks[k].start) for k in members),
+                        end=max(float(tracks[k].end) for k in members),
+                        shape=float(np.median(shapes)) if shapes else 0.0,
+                        features=feature_list,
+                        model_bank=dict(model_bank),
+                        colour_signature=colour,
+                    )
+                )
+        return sorted(groups, key=lambda g: (g.camera, g.start, g.key))
+
+    def _cross_group_edges(self, left: List[LocalGroup], right: List[LocalGroup]) -> List[dict]:
         if not left or not right:
             return []
         matrix = np.zeros((len(left), len(right)), np.float32)
@@ -184,7 +253,7 @@ class MultiModelLocalGlobalResolver:
                 detail[(i, j)] = item
                 if self._pair_allowed(a, b, item) and item.fused >= self.fused_min:
                     matrix[i, j] = item.fused
-        accepted: List[dict] = []
+        accepted = []
         for i, j in self._greedy_one_to_one(matrix):
             row = np.sort(matrix[i][matrix[i] > 0])[::-1]
             col = np.sort(matrix[:, j][matrix[:, j] > 0])[::-1]
@@ -195,6 +264,8 @@ class MultiModelLocalGlobalResolver:
                 accepted.append({
                     "left": left[i].key,
                     "right": right[j].key,
+                    "left_members": left[i].members,
+                    "right_members": right[j].members,
                     "row_margin": rm,
                     "col_margin": cm,
                     "fused": item.fused,
@@ -210,22 +281,17 @@ class MultiModelLocalGlobalResolver:
         return accepted
 
     @staticmethod
-    def _component_cameras(component: Iterable[str], tracks: Mapping[str, object]) -> set[str]:
-        return {tracks[key].camera for key in component}
-
-    @staticmethod
-    def _component_models(component: Iterable[str], tracks: Mapping[str, object]) -> Dict[str, List[np.ndarray]]:
+    def _component_models(component: Iterable[LocalGroup]) -> Dict[str, List[np.ndarray]]:
         banks: Dict[str, List[np.ndarray]] = defaultdict(list)
-        for key in component:
-            track = tracks[key]
-            for feat in track.features:
+        for group in component:
+            for feat in group.features:
                 banks["resnet"].append(np.asarray(feat.value, np.float32))
-            for model_name, values in getattr(track, "model_bank", {}).items():
+            for model_name, values in group.model_bank.items():
                 banks[model_name].extend(np.asarray(v, np.float32) for v in values)
         return banks
 
-    def _gallery_score(self, component: Iterable[str], tracks: Mapping[str, object], gallery: Mapping[int, Mapping[str, List[np.ndarray]]]) -> Dict[int, float]:
-        current = self._component_models(component, tracks)
+    def _gallery_score(self, component: List[LocalGroup], gallery: Mapping[int, Mapping[str, List[np.ndarray]]]) -> Dict[int, float]:
+        current = self._component_models(component)
         scores: Dict[int, float] = {}
         weights = {"resnet": 0.28, "swin": 0.34, "solider": 0.30}
         for gid, model_bank in gallery.items():
@@ -242,14 +308,14 @@ class MultiModelLocalGlobalResolver:
                 scores[int(gid)] = sum(w * s for w, s in vals) / total
         return scores
 
-    def _assign_persistent_gids(self, components: List[List[str]], tracks: Mapping[str, object]) -> Dict[str, str]:
+    def _assign_persistent_gids(self, components: List[List[LocalGroup]]) -> Dict[str, str]:
         if self.registry is None:
             return {}
         gallery = self.registry.load_gallery()
         used: set[int] = set()
         result: Dict[str, str] = {}
         for component in components:
-            ranked = sorted(self._gallery_score(component, tracks, gallery).items(), key=lambda x: x[1], reverse=True)
+            ranked = sorted(self._gallery_score(component, gallery).items(), key=lambda x: x[1], reverse=True)
             gid: int | None = None
             if ranked:
                 best_gid, best_score = ranked[0]
@@ -259,59 +325,68 @@ class MultiModelLocalGlobalResolver:
             if gid is None:
                 gid = self.registry.allocate_gid()
             used.add(gid)
-            banks = self._component_models(component, tracks)
-            cams = self._component_cameras(component, tracks)
-            last_ts = max(float(tracks[key].end) for key in component)
-            obs = sum(len(tracks[key].features) for key in component)
+            banks = self._component_models(component)
+            cams = {group.camera for group in component}
+            last_ts = max(group.end for group in component)
+            obs = sum(len(group.features) for group in component)
             self.registry.save_component(gid, model_banks=banks, cameras=cams, last_ts=last_ts, obs=obs)
             gallery = self.registry.load_gallery()
-            for key in component:
-                result[key] = f"G{gid:06d}"
+            gid_text = f"G{gid:06d}"
+            for group in component:
+                for key in group.members:
+                    result[key] = gid_text
         return result
 
     def resolve(self, local_mapping: Dict[str, str], tracks: Dict[str, object], cameras: List[str]):
-        nodes = sorted(tracks.values(), key=lambda x: (x.start, x.camera, x.key))
-        by_camera = {camera: [x for x in nodes if x.camera == camera] for camera in cameras}
+        groups = self._build_local_groups(local_mapping, tracks, cameras)
+        by_camera = {camera: [x for x in groups if x.camera == camera] for camera in cameras}
         edges: List[dict] = []
         ordered_cameras = sorted(cameras)
-        for idx, ca in enumerate(ordered_cameras):
-            for cb in ordered_cameras[idx + 1:]:
-                edges.extend(self._cross_track_edges(by_camera.get(ca, []), by_camera.get(cb, [])))
+        for index, camera_a in enumerate(ordered_cameras):
+            for camera_b in ordered_cameras[index + 1:]:
+                edges.extend(self._cross_group_edges(by_camera.get(camera_a, []), by_camera.get(camera_b, [])))
 
-        parent = {x.key: x.key for x in nodes}
-        members = {x.key: {x.key} for x in nodes}
-        camera = {x.key: x.camera for x in nodes}
+        parent = {group.key: group.key for group in groups}
+        members = {group.key: {group.key} for group in groups}
+        group_by_key = {group.key: group for group in groups}
 
-        def find(x):
-            while parent[x] != x:
-                parent[x] = parent[parent[x]]
-                x = parent[x]
-            return x
+        def find(key: str) -> str:
+            while parent[key] != key:
+                parent[key] = parent[parent[key]]
+                key = parent[key]
+            return key
 
         for edge in sorted(edges, key=lambda x: x["fused"], reverse=True):
             a, b = find(edge["left"]), find(edge["right"])
             if a == b:
                 continue
-            if {camera[n] for n in members[a]} & {camera[n] for n in members[b]}:
+            cams_a = {group_by_key[node].camera for node in members[a]}
+            cams_b = {group_by_key[node].camera for node in members[b]}
+            if cams_a & cams_b:
                 continue
             parent[b] = a
             members[a].update(members[b])
             del members[b]
 
-        components = {}
-        for node in nodes:
-            components.setdefault(find(node.key), []).append(node.key)
-        ordered = sorted(components.values(), key=lambda c: min((tracks[x].start, x) for x in c))
+        component_groups: Dict[str, List[LocalGroup]] = defaultdict(list)
+        for group in groups:
+            component_groups[find(group.key)].append(group)
+        ordered_components = sorted(component_groups.values(), key=lambda comp: min((g.start, g.key) for g in comp))
 
-        persistent = self._assign_persistent_gids(ordered, tracks) if self.registry is not None else None
+        persistent = self._assign_persistent_gids(ordered_components)
         if persistent:
             global_mapping = persistent
         else:
             global_mapping = {}
-            for index, component in enumerate(ordered, 1):
+            for index, component in enumerate(ordered_components, 1):
                 gid = f"G{index:06d}"
-                for key in component:
-                    global_mapping[key] = gid
+                for group in component:
+                    for key in group.members:
+                        global_mapping[key] = gid
 
-        output_components = {global_mapping[component[0]]: sorted(component) for component in ordered}
+        output_components: Dict[str, List[str]] = {}
+        for component in ordered_components:
+            sample_key = component[0].members[0]
+            gid = global_mapping[sample_key]
+            output_components[gid] = sorted(key for group in component for key in group.members)
         return global_mapping, output_components, edges

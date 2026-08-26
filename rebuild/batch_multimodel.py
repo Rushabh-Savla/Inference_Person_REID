@@ -15,31 +15,21 @@ if str(SRC) not in sys.path:
 
 from detector import PersonDetector  # noqa: E402
 from rebuild.batch_v6 import BatchPipelineV6  # noqa: E402
+from rebuild.identity_body_v6 import GlobalIdentityBodyV6  # noqa: E402
 from rebuild.identity_v2 import crop, illumination_variant, quality  # noqa: E402
 from rebuild.multimodel_reid import MultiModelLocalGlobalResolver  # noqa: E402
-from rebuild.v6_local_global import LocalNode  # noqa: E402
 from reid.nvidia_swin import NVIDIASwinReIDExtractor  # noqa: E402
 from reid.solider_reid import SOLIDERReIDExtractor  # noqa: E402
 
 
 class BatchPipelineMultiModel(BatchPipelineV6):
-    """Final cross-camera experiment: proven V6 + NVIDIA Swin + SOLIDER.
-
-    Same-camera identity remains the protected V6 ResNet solution. Cross-camera
-    identity is solved independently using three embedding spaces plus restrained
-    clothing/shape/time evidence and a one-to-one camera matching constraint.
-    """
+    """Final cross-camera pipeline: V6 ResNet + NVIDIA Swin + SOLIDER."""
 
     def __init__(self, config_path: str):
         super().__init__(config_path)
         models = self.cfg["cross_camera_models"]
-        self.swin = NVIDIASwinReIDExtractor(
-            models["swin_weights"], device="cuda", max_batch=int(models.get("swin_batch", 16))
-        )
-        self.solider = SOLIDERReIDExtractor(
-            models["solider_weights"], device="cuda", max_batch=int(models.get("solider_batch", 16))
-        )
-        self.extra = {"swin": {}, "solider": {}}
+        self.swin = NVIDIASwinReIDExtractor(models["swin_weights"], device="cuda", max_batch=int(models.get("swin_batch", 16)))
+        self.solider = SOLIDERReIDExtractor(models["solider_weights"], device="cuda", max_batch=int(models.get("solider_batch", 16)))
 
     @staticmethod
     def colour_signature(image: np.ndarray) -> np.ndarray | None:
@@ -60,6 +50,16 @@ class BatchPipelineMultiModel(BatchPipelineV6):
         value_hist, _ = np.histogram(val[neutral], bins=4, range=(0.0, 1.0))
         desc = np.concatenate([hue_hist, value_hist]).astype(np.float32)
         return desc / (np.linalg.norm(desc) + 1e-12)
+
+    def local_assign(self, tracks: Dict[str, object], cameras: List[str]):
+        mapping: Dict[str, str] = {}
+        for camera in cameras:
+            subset = {key: track for key, track in tracks.items() if track.camera == camera}
+            engine = GlobalIdentityBodyV6(self.cfg["identity_v6"])
+            local, _ = engine.run(subset)
+            mapping.update(local)
+            print(f"[local-v6] {camera}: tracklets={len(subset)} local_ids={len(set(local.values()))}")
+        return mapping, None
 
     def add_body(self, key, camera, track_id, segment, bbox, stamp, score, image, feats, extra):
         super().add_body(key, camera, track_id, segment, bbox, stamp, score, image, feats)
@@ -87,10 +87,9 @@ class BatchPipelineMultiModel(BatchPipelineV6):
         fps = float(cap.get(cv2.CAP_PROP_FPS)) or 20.0
         width = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH)); height = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT)); total = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
         self.meta[camera] = {"source": path, "fps": fps, "width": width, "height": height, "frames": total}
-        detector_cfg = self.detector
         detector = PersonDetector(
-            model_path=detector_cfg["model"], confidence_threshold=float(detector_cfg["conf"]),
-            person_class_id=0, tracker_config=detector_cfg["tracker"], pose_ensemble=None, iou=float(detector_cfg["iou"]),
+            model_path=self.detector["model"], confidence_threshold=float(self.detector["conf"]),
+            person_class_id=0, tracker_config=self.detector["tracker"], pose_ensemble=None, iou=float(self.detector["iou"]),
         )
         rows = (self.cache / f"{camera}.detections.jsonl").open("w", encoding="utf-8")
         last_body: Dict[str, int] = {}; segments: Dict[int, int] = {}; seen: Dict[int, int] = {}
@@ -125,12 +124,12 @@ class BatchPipelineMultiModel(BatchPipelineV6):
                     last_body[key] = frame
 
                     resnet_values = self.extractor.extract_batch(crops)
-                    extra_crops = [crops[i] for i, n in enumerate(names) if n in {"full", "light"}]
-                    swin_values = self.swin.extract_batch(extra_crops)
-                    solider_values = self.solider.extract_batch(extra_crops)
-                    extras = {"swin": swin_values, "solider": solider_values}
-                    feat_map = {n: v for n, v in zip(names, resnet_values)}
-                    self.add_body(key, camera, tid, seg, box, frame / fps, float(item.confidence), person, feat_map, extras)
+                    extra_crops = [crops[i] for i, name in enumerate(names) if name in {"full", "light"}]
+                    extras = {
+                        "swin": self.swin.extract_batch(extra_crops),
+                        "solider": self.solider.extract_batch(extra_crops),
+                    }
+                    self.add_body(key, camera, tid, seg, box, frame / fps, float(item.confidence), person, {n: v for n, v in zip(names, resnet_values)}, extras)
                     samples += 1
         finally:
             cap.release(); rows.close()
@@ -141,7 +140,6 @@ class BatchPipelineMultiModel(BatchPipelineV6):
         if not sources:
             raise SystemExit("No videos supplied")
         cameras = [x[0] for x in sources]
-        self.out.mkdir(parents=True, exist_ok=True)
         print(f"[final] ResNet: {self.extractor.describe()}")
         print(f"[final] Swin:   {self.swin.describe()}")
         print(f"[final] SOLIDER:{self.solider.describe()}")
@@ -153,7 +151,7 @@ class BatchPipelineMultiModel(BatchPipelineV6):
         self.save_cache()
         print("[final] pass 2: independent per-camera protected V6 identity solving")
         local_mapping, _ = self.local_assign(self.tracks, cameras)
-        print("[final] pass 3: three-model cross-camera one-to-one reconciliation")
+        print("[final] pass 3: track-level three-model cross-camera reconciliation")
         resolver = MultiModelLocalGlobalResolver(self.cfg["identity_v6"])
         global_mapping, components, edges = resolver.resolve(local_mapping, self.tracks, cameras)
         payload = {"local_mapping": local_mapping, "global_mapping": global_mapping, "components": components, "edges": edges}
@@ -162,7 +160,7 @@ class BatchPipelineMultiModel(BatchPipelineV6):
         print(f"[final] final global IDs: {len(set(global_mapping.values()))}")
         print("[final] pass 4: render")
         self.render(global_mapping)
-        multi = {gid: sorted({k.split("::", 1)[0] for k in members}) for gid, members in components.items() if len({k.split("::", 1)[0] for k in members}) > 1}
+        multi = {gid: sorted({k.split(":", 1)[0] for k in members}) for gid, members in components.items() if len({k.split(":", 1)[0] for k in members}) > 1}
         print("MULTI-CAMERA IDS:")
         for gid, cams in sorted(multi.items()):
             print(f"  {gid}: {', '.join(cams)}")

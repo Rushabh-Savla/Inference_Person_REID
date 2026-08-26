@@ -1,10 +1,17 @@
 from __future__ import annotations
 
+import sys
 from collections import defaultdict
 from dataclasses import dataclass, field
+from pathlib import Path
 from typing import Dict, Iterable, List, Mapping, Tuple
 
 import numpy as np
+
+ROOT = Path(__file__).resolve().parents[1]
+SRC = ROOT / "src"
+if str(SRC) not in sys.path:
+    sys.path.insert(0, str(SRC))
 
 from rebuild.identity_body_v6 import GlobalIdentityBodyV6
 from live.persistent_multimodel import PersistentMultimodelRegistry
@@ -124,8 +131,6 @@ class MultiModelLocalGlobalResolver:
         b1 = float(right.end) + self.offsets.get(right.camera, 0.0)
         a1 = float(left.start) + self.offsets.get(left.camera, 0.0)
         gap = min(abs(a0 - b1), abs(b0 - a1))
-        # Non-overlapping tracks are allowed only with extremely strong
-        # three-model appearance. Ordinary matches must be time-compatible.
         return gap <= self.max_gap_without_overlap or max(evidence.resnet, evidence.swin, evidence.solider) >= 0.90
 
     def _weights(self, a: str, b: str) -> Dict[str, float]:

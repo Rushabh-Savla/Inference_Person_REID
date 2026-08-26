@@ -23,6 +23,7 @@ def bank(person: np.ndarray):
 
 def make(camera, key, start, end, state_bank, colour, aspect=1.6):
     return SimpleNamespace(
+        key=key,
         camera=camera,
         start=float(start),
         end=float(end),

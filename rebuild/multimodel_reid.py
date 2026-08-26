@@ -7,7 +7,6 @@ from typing import Dict, Iterable, List, Tuple
 import numpy as np
 
 from rebuild.identity_body_v6 import GlobalIdentityBodyV6
-from rebuild.v6_local_global import LocalNode
 
 
 @dataclass(frozen=True)
@@ -24,21 +23,18 @@ class PairEvidence:
 
 
 class MultiModelLocalGlobalResolver:
-    """Conservative camera-local -> global resolver using three ReID spaces.
+    """Track-level multi-model cross-camera reconciliation.
 
-    ResNet is the proven V6 baseline. NVIDIA Swin-Base and SOLIDER are independent
-    cross-camera evidence sources. They are never concatenated: each model must
-    agree independently before a cross-camera link can become global identity
-    evidence. Clothing colour, body shape and soft temporal compatibility are
-    tie-breakers only. All accepted camera-pair links are one-to-one.
+    The proven V6 ResNet association remains the same-camera authority. Cross-camera
+    matching is performed on individual tracklets, never on already-global IDs, so
+    a bad local merge cannot contaminate another camera. NVIDIA Swin and SOLIDER are
+    independent evidence spaces; all three must be healthy and at least two must
+    support a link. Colour, body shape and soft time compatibility only break ties.
     """
 
     def __init__(self, cfg: dict):
         self.cfg = cfg
         self.resnet = GlobalIdentityBodyV6(cfg)
-        self.resnet_min = float(cfg.get("final_cross_resnet_min", 0.55))
-        self.swin_min = float(cfg.get("final_cross_swin_min", 0.55))
-        self.solider_min = float(cfg.get("final_cross_solider_min", 0.50))
         self.fused_min = float(cfg.get("final_cross_fused_min", 0.69))
         self.strong = float(cfg.get("final_cross_strong", 0.72))
         self.margin = float(cfg.get("final_cross_margin", 0.045))
@@ -126,33 +122,6 @@ class MultiModelLocalGlobalResolver:
     def _overlap(left, right) -> bool:
         return not (left.end < right.start or right.end < left.start)
 
-    def _node_pair(self, left: LocalNode, right: LocalNode) -> dict:
-        pairs = []
-        for a in left.tracks:
-            for b in right.tracks:
-                ev = self._pair(a, b)
-                pairs.append((ev, a.key, b.key))
-        if not pairs:
-            return {"score": 0.0}
-        pairs.sort(key=lambda x: x[0].fused, reverse=True)
-        top = pairs[0][0]
-        supporting = [x[0] for x in pairs[1:4] if x[0].fused >= self.fused_min - 0.04]
-        consensus = float(np.mean([x.fused for x in [top] + supporting])) if supporting else top.fused
-        score = 0.78 * top.fused + 0.22 * consensus
-        return {
-            "score": float(score),
-            "resnet": top.resnet,
-            "swin": top.swin,
-            "solider": top.solider,
-            "colour": top.colour,
-            "shape": top.shape,
-            "temporal": top.temporal,
-            "agreement": top.agreement,
-            "support": top.support,
-            "left_track": pairs[0][1],
-            "right_track": pairs[0][2],
-        }
-
     @staticmethod
     def _greedy_one_to_one(matrix: np.ndarray) -> List[Tuple[int, int]]:
         edges = sorted(
@@ -166,66 +135,70 @@ class MultiModelLocalGlobalResolver:
             used_r.add(i); used_c.add(j); out.append((i, j))
         return out
 
-    def _accepted(self, item: dict, row_margin: float, col_margin: float) -> bool:
-        if item["score"] < self.fused_min or row_margin < self.margin or col_margin < self.margin:
+    def _accepted(self, item: PairEvidence, row_margin: float, col_margin: float) -> bool:
+        if item.fused < self.fused_min or row_margin < self.margin or col_margin < self.margin:
             return False
-        strong = sum(x >= self.strong for x in (item["resnet"], item["swin"], item["solider"]))
-        usable = sum(x >= 0.62 for x in (item["resnet"], item["swin"], item["solider"]))
+        scores = (item.resnet, item.swin, item.solider)
+        strong = sum(x >= self.strong for x in scores)
+        usable = sum(x >= 0.62 for x in scores)
         if usable < 2:
             return False
-        if strong < 2 and item["agreement"] < 0.58:
+        if strong < 2 and item.agreement < 0.58:
             return False
-        if min(item["resnet"], item["swin"], item["solider"]) < self.conflict and strong < 3:
+        if min(scores) < self.conflict and strong < 3:
             return False
         return True
 
-    def resolve(self, local_mapping: Dict[str, str], tracks: Dict[str, object], cameras: List[str]):
-        # Split overlapping local IDs before building any cross-camera node.
-        safe: Dict[str, str] = dict(local_mapping)
-        grouped: Dict[Tuple[str, str], List[str]] = defaultdict(list)
-        for key, gid in safe.items():
-            grouped[(tracks[key].camera, gid)].append(key)
-        for (camera, gid), keys in grouped.items():
-            if len(keys) < 2:
-                continue
-            overlaps = any(self._overlap(tracks[a], tracks[b]) for idx, a in enumerate(keys) for b in keys[idx + 1:])
-            if overlaps:
-                for idx, key in enumerate(sorted(keys), 1):
-                    safe[key] = f"{gid}__split_{idx:03d}"
+    def _cross_track_edges(self, left: List[object], right: List[object]) -> List[dict]:
+        if not left or not right:
+            return []
+        matrix = np.zeros((len(left), len(right)), np.float32)
+        detail: Dict[Tuple[int, int], PairEvidence] = {}
+        for i, a in enumerate(left):
+            for j, b in enumerate(right):
+                item = self._pair(a, b)
+                detail[(i, j)] = item
+                if item.fused >= self.fused_min:
+                    matrix[i, j] = item.fused
+        accepted: List[dict] = []
+        for i, j in self._greedy_one_to_one(matrix):
+            row = np.sort(matrix[i][matrix[i] > 0])[::-1]
+            col = np.sort(matrix[:, j][matrix[:, j] > 0])[::-1]
+            rm = float(row[0] - row[1]) if len(row) > 1 else 1.0
+            cm = float(col[0] - col[1]) if len(col) > 1 else 1.0
+            item = detail[(i, j)]
+            if self._accepted(item, rm, cm):
+                accepted.append({
+                    "left": left[i].key,
+                    "right": right[j].key,
+                    "row_margin": rm,
+                    "col_margin": cm,
+                    "fused": item.fused,
+                    "resnet": item.resnet,
+                    "swin": item.swin,
+                    "solider": item.solider,
+                    "colour": item.colour,
+                    "shape": item.shape,
+                    "temporal": item.temporal,
+                    "agreement": item.agreement,
+                    "support": item.support,
+                })
+        return accepted
 
-        nodes: Dict[str, LocalNode] = {}
-        for key, gid in safe.items():
-            track = tracks[key]
-            nkey = f"{track.camera}::{gid}"
-            nodes.setdefault(nkey, LocalNode(nkey, track.camera, gid)).tracks.append(track)
-        keys = sorted(nodes)
+    def resolve(self, local_mapping: Dict[str, str], tracks: Dict[str, object], cameras: List[str]):
+        # Local V6 labels are evidence only. Cross-camera matching is track-level.
+        # This prevents a contaminated local identity from combining different
+        # people before the multi-model matcher sees them.
+        nodes = sorted(tracks.values(), key=lambda x: (x.start, x.camera, x.key))
+        by_camera = {camera: [x for x in nodes if x.camera == camera] for camera in cameras}
         edges: List[dict] = []
         for idx, ca in enumerate(sorted(cameras)):
             for cb in sorted(cameras)[idx + 1:]:
-                left = [nodes[k] for k in keys if nodes[k].camera == ca]
-                right = [nodes[k] for k in keys if nodes[k].camera == cb]
-                if not left or not right:
-                    continue
-                matrix = np.zeros((len(left), len(right)), np.float32)
-                details = {}
-                for i, a in enumerate(left):
-                    for j, b in enumerate(right):
-                        item = self._node_pair(a, b)
-                        details[(i, j)] = item
-                        if item.get("score", 0.0) >= self.fused_min:
-                            matrix[i, j] = item["score"]
-                for i, j in self._greedy_one_to_one(matrix):
-                    row = np.sort(matrix[i][matrix[i] > 0])[::-1]
-                    col = np.sort(matrix[:, j][matrix[:, j] > 0])[::-1]
-                    rm = float(row[0] - row[1]) if len(row) > 1 else 1.0
-                    cm = float(col[0] - col[1]) if len(col) > 1 else 1.0
-                    item = details[(i, j)]
-                    if self._accepted(item, rm, cm):
-                        edges.append({"left": left[i].key, "right": right[j].key, "row_margin": rm, "col_margin": cm, **item})
+                edges.extend(self._cross_track_edges(by_camera.get(ca, []), by_camera.get(cb, [])))
 
-        parent = {k: k for k in keys}
-        cams = {k: nodes[k].camera for k in keys}
-        members = {k: {k} for k in keys}
+        parent = {x.key: x.key for x in nodes}
+        members = {x.key: {x.key} for x in nodes}
+        camera = {x.key: x.camera for x in nodes}
 
         def find(x):
             while parent[x] != x:
@@ -233,25 +206,44 @@ class MultiModelLocalGlobalResolver:
                 x = parent[x]
             return x
 
-        for edge in sorted(edges, key=lambda x: x["score"], reverse=True):
+        # First lock high-confidence cross-camera edges. Then connect same-camera
+        # fragments only when they already share the protected local V6 identity
+        # and do not overlap in time.
+        for edge in sorted(edges, key=lambda x: x["fused"], reverse=True):
             a, b = find(edge["left"]), find(edge["right"])
             if a == b:
                 continue
-            if {cams[n] for n in members[a]} & {cams[n] for n in members[b]}:
+            if {camera[n] for n in members[a]} & {camera[n] for n in members[b]}:
                 continue
             parent[b] = a
             members[a].update(members[b]); del members[b]
 
+        by_local = defaultdict(list)
+        for key, gid in local_mapping.items():
+            if key in parent:
+                by_local[(key.split(":", 1)[0], gid)].append(key)
+        for (_, _gid), keys_local in by_local.items():
+            for i, akey in enumerate(keys_local):
+                for bkey in keys_local[i + 1:]:
+                    a, b = find(akey), find(bkey)
+                    if a == b or self._overlap(tracks[akey], tracks[bkey]):
+                        continue
+                    if {camera[n] for n in members[a]} & {camera[n] for n in members[b]}:
+                        continue
+                    # Same-camera local V6 continuity is allowed to reconnect a
+                    # fragmented person, but never simultaneously visible tracks.
+                    parent[b] = a
+                    members[a].update(members[b]); del members[b]
+
         components = {}
-        for key in keys:
-            components.setdefault(find(key), []).append(key)
-        ordered = sorted(components.values(), key=lambda c: min((nodes[x].start, x) for x in c))
-        global_mapping = {}
-        output_components = {}
+        for node in nodes:
+            components.setdefault(find(node.key), []).append(node.key)
+        ordered = sorted(components.values(), key=lambda c: min((tracks[x].start, x) for x in c))
+        global_mapping: Dict[str, str] = {}
+        output_components: Dict[str, List[str]] = {}
         for index, component in enumerate(ordered, 1):
             gid = f"G{index:06d}"
             output_components[gid] = sorted(component)
-            for node_key in component:
-                for track in nodes[node_key].tracks:
-                    global_mapping[track.key] = gid
+            for key in component:
+                global_mapping[key] = gid
         return global_mapping, output_components, edges

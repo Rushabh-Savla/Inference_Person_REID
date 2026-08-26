@@ -12,6 +12,13 @@ def vec(index: int, dim: int = 16, value: float = 1.0) -> np.ndarray:
     return out
 
 
+def mix(a: int, b: int, wa: float = 0.6, wb: float = 0.8, dim: int = 16) -> np.ndarray:
+    out = np.zeros(dim, np.float32)
+    out[a] = wa
+    out[b] = wb
+    return out
+
+
 def make_track(camera: str, tid: int, start: float, end: float, idx: int, colour: np.ndarray) -> Tracklet:
     item = Tracklet(camera, tid, 1, 20.0)
     for stamp in (start, end):
@@ -72,7 +79,15 @@ def cfg() -> dict:
         "final_w_solider": 0.30,
         "final_w_colour": 0.05,
         "final_w_shape": 0.03,
-        "final_pair_weights": {},
+        "final_pair_weights": {
+            "cam_222-cam_224": {
+                "resnet": 0.25,
+                "swin": 0.32,
+                "solider": 0.38,
+                "colour": 0.03,
+                "shape": 0.02,
+            }
+        },
     }
 
 
@@ -96,6 +111,27 @@ def test_three_model_permutation() -> None:
     assert result["cam_222:2:1"] == result["cam_224:1:1"]
     assert len(components) == 2
     assert len(edges) == 2
+
+
+def test_swin_and_solider_rescue_a_resnet_mistake() -> None:
+    colour = np.asarray([1.0, 0.0, 0.0, 0.0], np.float32)
+    left = make_track("cam_222", 1, 5.0, 15.0, 0, colour)
+    wrong = make_track("cam_224", 1, 5.1, 15.1, 0, colour)
+    correct = make_track("cam_224", 2, 5.1, 15.1, 1, colour)
+    # ResNet alone prefers wrong; Swin + SOLIDER agree on correct.
+    wrong.features = [type(left.features[0])(mix(0, 1, 0.93, 0.37), "full", 0.95, "cam_224", 5.1, left.features[0].meta)]
+    wrong.model_bank["swin"] = [mix(0, 1, 0.35, 0.94)]
+    wrong.model_bank["solider"] = [mix(0, 1, 0.30, 0.95)]
+    correct.features = [type(left.features[0])(mix(0, 1, 0.60, 0.80), "full", 0.95, "cam_224", 5.1, left.features[0].meta)]
+    correct.model_bank["swin"] = [mix(0, 1, 0.92, 0.39)]
+    correct.model_bank["solider"] = [mix(0, 1, 0.94, 0.34)]
+    local = {left.key: "G000001", wrong.key: "G000001", correct.key: "G000002"}
+    result, _, edges = MultiModelLocalGlobalResolver(cfg()).resolve(
+        local, {left.key: left, wrong.key: wrong, correct.key: correct}, ["cam_222", "cam_224"]
+    )
+    assert result[left.key] == result[correct.key]
+    assert result[left.key] != result[wrong.key]
+    assert edges
 
 
 def test_model_disagreement_is_not_forced() -> None:

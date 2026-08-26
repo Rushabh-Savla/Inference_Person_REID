@@ -21,7 +21,7 @@ cross_camera_models:
   solider_batch: 16
 
 identity_state:
-  path: identity_state/reid_state_invariant.sqlite3
+  path: identity_state/reid_state_invariant_v3.sqlite3
   model_id: final-state-invariant-v3
   bank_size: 64
 

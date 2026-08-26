@@ -1,8 +1,14 @@
 from __future__ import annotations
 
+import sys
 from pathlib import Path
 
 import numpy as np
+
+ROOT = Path(__file__).resolve().parents[1]
+SRC = ROOT / "src"
+if str(SRC) not in sys.path:
+    sys.path.insert(0, str(SRC))
 
 from rebuild.identity_v3 import Tracklet
 from rebuild.multimodel_reid import MultiModelLocalGlobalResolver
@@ -99,10 +105,7 @@ def test_registry_survives_engine_recreation(tmp_path: Path) -> None:
     track = make_track("cam_222", 1, 1.0, 3.0, 0)
     first.save_component(
         gid,
-        model_banks={
-            "resnet": [x.value for x in track.features],
-            **track.model_bank,
-        },
+        model_banks={"resnet": [x.value for x in track.features], **track.model_bank},
         cameras=["cam_222"],
         last_ts=3.0,
         obs=len(track.features),

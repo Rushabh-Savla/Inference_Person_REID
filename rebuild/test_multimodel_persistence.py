@@ -105,7 +105,7 @@ def test_registry_survives_engine_recreation(tmp_path: Path) -> None:
     track = make_track("cam_222", 1, 1.0, 3.0, 0)
     first.save_component(
         gid,
-        model_banks={"resnet": [x.value for x in track.features], **track.model_bank},
+        model_banks={"resnet": [x.vector for x in track.features], **track.model_bank},
         cameras=["cam_222"],
         last_ts=3.0,
         obs=len(track.features),
@@ -139,7 +139,7 @@ def test_multimodel_resolver_preserves_persistent_gid(tmp_path: Path) -> None:
     gid = registry.allocate_gid()
     registry.save_component(
         gid,
-        model_banks={"resnet": [x.value for x in seed.features], **seed.model_bank},
+        model_banks={"resnet": [x.vector for x in seed.features], **seed.model_bank},
         cameras=["cam_222"],
         last_ts=15.0,
         obs=len(seed.features),

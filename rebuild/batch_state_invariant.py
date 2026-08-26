@@ -15,7 +15,7 @@ if str(SRC) not in sys.path:
 
 from detector import PersonDetector  # noqa: E402
 from rebuild.batch_v6 import BatchPipelineV6  # noqa: E402
-from rebuild.multimodel_state_invariant import StateInvariantResolver  # noqa: E402
+from rebuild.multimodel_state_invariant_final import StateInvariantFinalResolver  # noqa: E402
 from rebuild.identity_body_v6 import GlobalIdentityBodyV6  # noqa: E402
 from rebuild.identity_v2 import crop, illumination_variant, quality  # noqa: E402
 from live.persistent_multimodel import PersistentMultimodelRegistry  # noqa: E402
@@ -33,21 +33,16 @@ class BatchPipelineStateInvariant(BatchPipelineV6):
     """
 
     VARIANTS = ("full", "light", "upper", "torso", "lower")
-    MULTIMODEL_VARIANTS = ("full", "light", "upper", "torso", "lower")
 
     def __init__(self, config_path: str):
         super().__init__(config_path)
         models = self.cfg["cross_camera_models"]
-        self.swin = NVIDIASwinReIDExtractor(
-            models["swin_weights"], device="cuda", max_batch=int(models.get("swin_batch", 16))
-        )
-        self.solider = SOLIDERReIDExtractor(
-            models["solider_weights"], device="cuda", max_batch=int(models.get("solider_batch", 16))
-        )
+        self.swin = NVIDIASwinReIDExtractor(models["swin_weights"], device="cuda", max_batch=int(models.get("swin_batch", 16)))
+        self.solider = SOLIDERReIDExtractor(models["solider_weights"], device="cuda", max_batch=int(models.get("solider_batch", 16)))
         state = self.cfg.get("identity_state", {})
         self.registry = PersistentMultimodelRegistry(
-            state.get("path", "identity_state/reid_multimodel.sqlite3"),
-            model_id=str(state.get("model_id", "final-state-invariant-v1")),
+            state.get("path", "identity_state/reid_state_invariant.sqlite3"),
+            model_id=str(state.get("model_id", "final-state-invariant-v2")),
             bank_size=int(state.get("bank_size", 48)),
         )
 
@@ -69,8 +64,6 @@ class BatchPipelineStateInvariant(BatchPipelineV6):
         h, w = image.shape[:2]
         if h < 40 or w < 20:
             return None
-        # Clothing descriptor is deliberately torso/upper weighted and invariant
-        # to the visibility of legs when a person is seated.
         x1, x2 = int(0.16 * w), int(0.84 * w)
         y1, y2 = int(0.08 * h), int(0.72 * h)
         torso = image[max(0, y1):max(y1 + 1, y2), max(0, x1):max(x1 + 1, x2)]
@@ -103,10 +96,7 @@ class BatchPipelineStateInvariant(BatchPipelineV6):
                 track.state_bank["resnet"][kind].append(np.asarray(vector, np.float32))
                 track.state_bank["resnet"][kind] = track.state_bank["resnet"][kind][-48:]
         for model in ("swin", "solider"):
-            values = multi.get(model, {})
-            for kind, vectors in values.items():
-                if kind not in track.state_bank[model]:
-                    track.state_bank[model][kind] = []
+            for kind, vectors in multi.get(model, {}).items():
                 track.state_bank[model][kind].extend(np.asarray(v, np.float32) for v in vectors)
                 track.state_bank[model][kind] = track.state_bank[model][kind][-48:]
         signature = self.colour_signature(image)
@@ -156,23 +146,13 @@ class BatchPipelineStateInvariant(BatchPipelineV6):
                     key = f"{camera}:{tid}:{seg}"
                     seen[tid] = frame
                     box = (item.x1, item.y1, item.x2, item.y2)
-                    rows.write(json.dumps({
-                        "camera": camera,
-                        "frame": frame,
-                        "timestamp": frame / fps,
-                        "track_id": tid,
-                        "segment": seg,
-                        "tracklet_key": key,
-                        "bbox": list(box),
-                        "detection_score": float(item.confidence),
-                    }) + "\n")
+                    rows.write(json.dumps({"camera": camera, "frame": frame, "timestamp": frame / fps, "track_id": tid, "segment": seg, "tracklet_key": key, "bbox": list(box), "detection_score": float(item.confidence)}) + "\n")
                     if frame - last.get(key, -10**9) < self.interval:
                         continue
                     person = crop(image, box)
                     q = quality(person) if person is not None else 0.0
                     if person is None or q < self.min_quality:
                         continue
-
                     variants: Dict[str, np.ndarray] = {"full": person}
                     if self.light and frame - last.get(key + ":light", -10**9) >= self.part_interval:
                         variants["light"] = illumination_variant(person)
@@ -181,30 +161,17 @@ class BatchPipelineStateInvariant(BatchPipelineV6):
                         variants.update(self.parts(person))
                         last[key + ":parts"] = frame
                     last[key] = frame
-
-                    ordered_names = list(variants.keys())
-                    crops = [variants[name] for name in ordered_names]
+                    ordered = list(variants.keys())
+                    crops = [variants[name] for name in ordered]
                     resnet = self.extractor.extract_batch(crops)
                     swin = self.swin.extract_batch(crops)
                     solider = self.solider.extract_batch(crops)
-
-                    resnet_feats = {name: value for name, value in zip(ordered_names, resnet)}
-                    state_multi = {
-                        "swin": {name: [value] for name, value in zip(ordered_names, swin)},
-                        "solider": {name: [value] for name, value in zip(ordered_names, solider)},
+                    resnet_feats = {name: value for name, value in zip(ordered, resnet)}
+                    multi = {
+                        "swin": {name: [value] for name, value in zip(ordered, swin)},
+                        "solider": {name: [value] for name, value in zip(ordered, solider)},
                     }
-                    self.add_body(
-                        key,
-                        camera,
-                        tid,
-                        seg,
-                        box,
-                        frame / fps,
-                        float(item.confidence),
-                        person,
-                        resnet_feats,
-                        state_multi,
-                    )
+                    self.add_body(key, camera, tid, seg, box, frame / fps, float(item.confidence), person, resnet_feats, multi)
                     samples += 1
         finally:
             cap.release()
@@ -223,42 +190,27 @@ class BatchPipelineStateInvariant(BatchPipelineV6):
             print(f"[state-final] SOLIDER:{self.solider.describe()}")
             print("[state-final] FACE: OFF")
             print(f"[state-final] cameras: {', '.join(cameras)}")
-            print("[state-final] pass 1: detect + track + full/upper/torso/lower multimodel embeddings")
+            print("[state-final] pass 1: detect + track + full/upper/torso/lower embeddings")
             for camera, path in sources:
                 self.collect(camera, path)
             self.save_cache()
-
-            print("[state-final] pass 2: independent protected V6 identity solving per camera")
             local_mapping: Dict[str, str] = {}
+            print("[state-final] pass 2: independent protected V6 identity solving per camera")
             for camera in cameras:
                 subset = {key: track for key, track in self.tracks.items() if track.camera == camera}
-                local_engine = GlobalIdentityBodyV6(self.cfg["identity_v6"])
-                mapping, _ = local_engine.run(subset)
+                mapping, _ = GlobalIdentityBodyV6(self.cfg["identity_v6"]).run(subset)
                 local_mapping.update(mapping)
                 print(f"[state-final] local {camera}: tracklets={len(subset)} local_ids={len(set(mapping.values()))}")
-
-            print("[state-final] pass 3: state-invariant cross-camera reconciliation")
-            resolver_cfg = dict(self.cfg["identity_v6"])
-            resolver = StateInvariantResolver(resolver_cfg, registry=self.registry)
+            print("[state-final] pass 3: final state-transition-aware cross-camera consensus")
+            resolver = StateInvariantFinalResolver(dict(self.cfg["identity_v6"]), registry=self.registry)
             global_mapping, components, edges = resolver.resolve(local_mapping, self.tracks, cameras)
-            debug = {
-                "local_mapping": local_mapping,
-                "global_mapping": global_mapping,
-                "components": components,
-                "edges": edges,
-            }
+            debug = {"local_mapping": local_mapping, "global_mapping": global_mapping, "components": components, "edges": edges}
             (self.out / "state_invariant_debug.json").write_text(json.dumps(debug, indent=2), encoding="utf-8")
             print(f"[state-final] accepted cross-camera links: {len(edges)}")
             print(f"[state-final] final global IDs: {len(set(global_mapping.values()))}")
             print(f"[state-final] persistent global IDs: {self.registry.gids()}")
-
-            print("[state-final] pass 4: render")
             self.render(global_mapping)
-            multi = {
-                gid: sorted({key.split(":", 1)[0] for key in members})
-                for gid, members in components.items()
-                if len({key.split(":", 1)[0] for key in members}) > 1
-            }
+            multi = {gid: sorted({key.split(":", 1)[0] for key in members}) for gid, members in components.items() if len({key.split(":", 1)[0] for key in members}) > 1}
             print("MULTI-CAMERA IDS:")
             for gid, cams in sorted(multi.items()):
                 print(f"  {gid}: {', '.join(cams)}")

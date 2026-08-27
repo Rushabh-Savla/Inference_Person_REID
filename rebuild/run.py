@@ -16,7 +16,7 @@ from rebuild.batch_v5 import BatchPipelineV5  # noqa: E402
 from rebuild.batch_v6 import BatchPipelineV6  # noqa: E402
 from rebuild.batch_v6_local_global import BatchPipelineV6LocalGlobal  # noqa: E402
 from rebuild.batch_multimodel import BatchPipelineMultiModel  # noqa: E402
-from rebuild.batch_state_invariant import BatchPipelineStateInvariant  # noqa: E402
+from rebuild.batch_state_invariant_safe import BatchPipelineStateInvariantSafe  # noqa: E402
 from rebuild.live_v4 import run_live_v4  # noqa: E402
 from rebuild.live_v2 import run_live_v2  # noqa: E402
 
@@ -98,7 +98,7 @@ def main():
     elif args.mode == "batch_final":
         BatchPipelineMultiModel(args.config).run(args.videos)
     elif args.mode == "batch_state_final":
-        BatchPipelineStateInvariant(args.config).run(args.videos)
+        BatchPipelineStateInvariantSafe(args.config).run(args.videos)
     elif args.mode == "batch_local_global":
         BatchPipelineV6LocalGlobal(args.config).run(args.videos)
     elif args.mode == "batch_v5":

@@ -44,6 +44,28 @@ class BatchPipelineStateInvariant(BatchPipelineV6):
             bank_size=int(state.get("bank_size", 64)),
         )
 
+    def sources(self, values: List[str]):
+        """Accept explicit CAMERA=RTSP_URL inputs while retaining file-path support."""
+        if values:
+            result = []
+            used = set()
+            for value in values:
+                if "=" in value and value.split("=", 1)[0] and value.split("=", 1)[1]:
+                    camera, source = value.split("=", 1)
+                    if camera in used:
+                        raise SystemExit(f"Duplicate camera name: {camera}")
+                    used.add(camera)
+                    result.append((camera, source))
+                else:
+                    path = Path(value)
+                    camera = path.stem
+                    if camera in used:
+                        raise SystemExit(f"Duplicate camera name: {camera}")
+                    used.add(camera)
+                    result.append((camera, value))
+            return result
+        return super().sources(values)
+
     @staticmethod
     def parts(image: np.ndarray) -> Dict[str, np.ndarray]:
         h, w = image.shape[:2]
@@ -96,17 +118,48 @@ class BatchPipelineStateInvariant(BatchPipelineV6):
             track.colour_bank = []
 
     def add_body(self, key, camera, track_id, segment, bbox, stamp, score, image, feats, multi):
-        super().add_body(key, camera, track_id, segment, bbox, stamp, score, image, feats)
+        # Important: use actual crop quality for V6 feature retention, but keep
+        # detector confidence separately in observation metadata. This avoids a
+        # high detector score on a visually poor crop dominating the local gallery.
+        measured = float(quality(image))
+        super().add_body(
+            key,
+            camera,
+            track_id,
+            segment,
+            bbox,
+            stamp,
+            measured,
+            image,
+            feats,
+            multi,
+        )
+
         track = self.tracks[key]
         self._init_state_bank(track)
+
+        # Restore the detector confidence on the observation metadata because the
+        # parent receives crop quality as the feature-selection score.
+        for observation in reversed(track.observations):
+            if abs(float(observation.get("timestamp", -1.0)) - float(stamp)) <= 1e-6:
+                observation["detection_score"] = float(score)
+                observation["crop_quality"] = measured
+                break
+
+        # The multimodel state bank is intentionally richer than the local V6
+        # bank: keep all validated model/view vectors for the state-invariant
+        # resolver, while the V6 body gallery itself remains quality/novelty
+        # filtered by the parent Tracklet.add().
         for kind, vector in feats.items():
             if kind in track.state_bank["resnet"]:
                 track.state_bank["resnet"][kind].append(np.asarray(vector, np.float32))
                 track.state_bank["resnet"][kind] = track.state_bank["resnet"][kind][-48:]
+
         for model in ("swin", "solider"):
             for kind, vectors in multi.get(model, {}).items():
                 track.state_bank[model][kind].extend(np.asarray(v, np.float32) for v in vectors)
                 track.state_bank[model][kind] = track.state_bank[model][kind][-48:]
+
         signature = self.colour_signature(image)
         if signature is not None:
             track.colour_bank.append(signature)
@@ -117,7 +170,7 @@ class BatchPipelineStateInvariant(BatchPipelineV6):
     def collect(self, camera: str, path: str):
         cap = cv2.VideoCapture(path)
         if not cap.isOpened():
-            raise RuntimeError(f"Cannot open video: {path}")
+            raise RuntimeError(f"Cannot open video/RTSP source: {path}")
         fps = float(cap.get(cv2.CAP_PROP_FPS)) or 20.0
         width = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH)); height = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT)); total = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
         self.meta[camera] = {"source": path, "fps": fps, "width": width, "height": height, "frames": total}

@@ -1,12 +1,28 @@
 from __future__ import annotations
 
 import json
+import cv2
 
 from rebuild.batch_state_invariant import BatchPipelineStateInvariant
 
 
 class BatchPipelineStateInvariantSafe(BatchPipelineStateInvariant):
     """Fresh-run V6 with quality-aware evidence and clear GID rendering."""
+
+    def sources(self, values):
+        """Accept NAME=RTSP_URL inputs while preserving normal path inputs."""
+        if values:
+            out = []
+            for value in values:
+                text = str(value)
+                if "=" in text:
+                    name, source = text.split("=", 1)
+                    if name and source:
+                        out.append((name, source))
+                        continue
+                out.append((text.rsplit("/", 1)[-1] or text, text))
+            return out
+        return super().sources(values)
 
     @staticmethod
     def short_gid(gid: str) -> str:
@@ -42,9 +58,8 @@ class BatchPipelineStateInvariantSafe(BatchPipelineStateInvariant):
     def render(self, mapping):
         """Render final detections with short, stable, colour-coded GID labels."""
         for camera, meta in self.meta.items():
-            cap = __import__("cv2").VideoCapture(meta["source"])
+            cap = cv2.VideoCapture(meta["source"])
             out = self.out / f"{camera}_v6.mp4"
-            cv2 = __import__("cv2")
             writer = cv2.VideoWriter(
                 str(out),
                 cv2.VideoWriter_fourcc(*"mp4v"),

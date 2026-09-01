@@ -16,6 +16,12 @@ from rebuild.batch_v5 import BatchPipelineV5  # noqa: E402
 from rebuild.batch_v6 import BatchPipelineV6  # noqa: E402
 from rebuild.batch_v6_local_global import BatchPipelineV6LocalGlobal  # noqa: E402
 from rebuild.batch_multimodel import BatchPipelineMultiModel  # noqa: E402
+from rebuild import batch_state_invariant as state_pipeline  # noqa: E402
+from rebuild.multimodel_state_invariant_fast import StateInvariantFinalResolverFast  # noqa: E402
+
+# The final state-invariant entry point uses the optimized resolver while all
+# extraction, tracking, model weights, thresholds and rendering remain unchanged.
+state_pipeline.StateInvariantFinalResolver = StateInvariantFinalResolverFast
 from rebuild.batch_state_invariant_safe import BatchPipelineStateInvariantSafe  # noqa: E402
 from rebuild.live_v4 import run_live_v4  # noqa: E402
 from rebuild.live_v2 import run_live_v2  # noqa: E402

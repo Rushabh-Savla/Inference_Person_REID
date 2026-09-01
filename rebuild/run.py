@@ -4,6 +4,10 @@ import argparse
 import sys
 from pathlib import Path
 
+import onnxruntime as ort
+
+ort.set_default_logger_severity(3)
+
 ROOT = Path(__file__).resolve().parents[1]
 SRC = ROOT / "src"
 sys.path.insert(0, str(ROOT))

@@ -84,10 +84,10 @@ overlap_guard:
 recovery_guard:
   enabled: true
   required_models: 2
-  fused_min: 0.52
-  resnet_min: 0.48
-  swin_min: 0.48
-  solider_min: 0.46
+  fused_min: 0.56
+  resnet_min: 0.52
+  swin_min: 0.52
+  solider_min: 0.50
   fail_limit: 4
 
 input:

@@ -20,7 +20,7 @@ from rebuild import batch_state_invariant as state_pipeline  # noqa: E402
 from rebuild.multimodel_state_invariant_fast import StateInvariantFinalResolverFast  # noqa: E402
 
 state_pipeline.StateInvariantFinalResolver = StateInvariantFinalResolverFast
-from rebuild.batch_state_invariant_joint import BatchPipelineStateInvariantJoint  # noqa: E402
+from rebuild.batch_state_invariant_joint_guarded import BatchPipelineStateInvariantJointGuarded  # noqa: E402
 from rebuild.live_v4 import run_live_v4  # noqa: E402
 from rebuild.live_v2 import run_live_v2  # noqa: E402
 
@@ -56,7 +56,7 @@ def main():
 
     state_final = sub.add_parser(
         "batch_state_final",
-        help="Joint multi-camera state-invariant final ReID",
+        help="Joint multi-camera state-invariant final ReID with high-overlap recovery guard",
     )
     state_final.add_argument("--config", default="rebuild/config_state_invariant.yaml")
     state_final.add_argument("--videos", nargs="*", default=[])
@@ -102,7 +102,7 @@ def main():
     elif args.mode == "batch_final":
         BatchPipelineMultiModel(args.config).run(args.videos)
     elif args.mode == "batch_state_final":
-        BatchPipelineStateInvariantJoint(args.config).run(args.videos)
+        BatchPipelineStateInvariantJointGuarded(args.config).run(args.videos)
     elif args.mode == "batch_local_global":
         BatchPipelineV6LocalGlobal(args.config).run(args.videos)
     elif args.mode == "batch_v5":

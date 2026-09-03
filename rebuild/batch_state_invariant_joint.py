@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import json
+import subprocess
+from pathlib import Path
 from typing import Dict, List
 
 import cv2
@@ -16,26 +18,87 @@ from rebuild.identity_body_v6 import GlobalIdentityBodyV6
 class BatchPipelineStateInvariantJoint(BatchPipelineStateInvariantSafeOverlap):
     """Safe V6 MTMC session with one shared multi-camera processing loop.
 
-    Existing V6 extraction, multimodel state banks, local proposals, state-
-    invariant resolver, persistence and overlap protection remain unchanged.
-    All source streams are opened together and advanced in a common session so
-    their evidence is accumulated together instead of exhausting one complete
-    camera before starting the next.
+    The three cameras are opened before processing starts and advanced in a
+    common session. Video inputs are resolved robustly and, when OpenCV cannot
+    decode an otherwise valid source, FFmpeg creates a local H.264 working copy
+    so detection/tracking/rendering use a decoder that is known to be available
+    on the deployment host.
     """
 
+    @staticmethod
+    def _resolve_source(path: str) -> str:
+        value = Path(path).expanduser()
+        if value.exists():
+            return str(value)
+        candidates = []
+        try:
+            for base in (Path.cwd(), Path.cwd().parent):
+                candidates.extend(x for x in base.rglob(value.name) if x.is_file())
+        except Exception:
+            pass
+        unique = []
+        seen = set()
+        for item in candidates:
+            key = str(item.resolve())
+            if key not in seen:
+                seen.add(key)
+                unique.append(item)
+        if len(unique) == 1:
+            print(f"[state-joint] resolved missing input {path} -> {unique[0]}")
+            return str(unique[0])
+        if not value.exists():
+            hint = ", ".join(str(item) for item in unique[:5])
+            if hint:
+                raise RuntimeError(f"Input video not found: {path}. Candidate match(es): {hint}")
+            raise RuntimeError(f"Input video not found: {path}")
+        return str(value)
+
+    @staticmethod
+    def _transcode(path: str, target: Path) -> str:
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.unlink(missing_ok=True)
+        command = [
+            "ffmpeg", "-hide_banner", "-loglevel", "warning", "-nostdin", "-y",
+            "-i", path,
+            "-map", "0:v:0", "-an",
+            "-c:v", "libx264", "-preset", "veryfast", "-crf", "18",
+            "-pix_fmt", "yuv420p", "-movflags", "+faststart", str(target),
+        ]
+        result = subprocess.run(command, capture_output=True, text=True, check=False)
+        if result.returncode != 0 or not target.exists() or target.stat().st_size <= 0:
+            detail = (result.stderr or result.stdout or "").strip()
+            raise RuntimeError(f"FFmpeg could not create a working video copy for {path}: {detail[-1000:]}")
+        return str(target)
+
     def _open(self, camera: str, path: str):
-        cap = cv2.VideoCapture(path, cv2.CAP_FFMPEG)
+        source = self._resolve_source(path)
+        cap = cv2.VideoCapture(source, cv2.CAP_FFMPEG)
         if not cap.isOpened():
             cap.release()
-            cap = cv2.VideoCapture(path)
+            cap = cv2.VideoCapture(source)
+
+        if not cap.isOpened():
+            cache = self.cache / "decoded_inputs"
+            stem = Path(source).stem.replace(".", "_")
+            working = cache / f"{camera}_{stem}_h264.mp4"
+            print(f"[state-joint] OpenCV decode failed for {source}; creating FFmpeg H.264 working copy")
+            working_source = self._transcode(source, working)
+            cap = cv2.VideoCapture(working_source, cv2.CAP_FFMPEG)
+            if not cap.isOpened():
+                cap.release()
+                cap = cv2.VideoCapture(working_source)
+            source = working_source
+
         if not cap.isOpened():
             raise RuntimeError(f"Cannot open video/RTSP source: {path}")
+
         fps = float(cap.get(cv2.CAP_PROP_FPS)) or 20.0
         width = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
         height = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
         total = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
         self.meta[camera] = {
-            "source": path,
+            "source": source,
+            "original_source": path,
             "fps": fps,
             "width": width,
             "height": height,
@@ -49,6 +112,7 @@ class BatchPipelineStateInvariantJoint(BatchPipelineStateInvariantSafeOverlap):
             pose_ensemble=None,
             iou=float(self.detector["iou"]),
         )
+        print(f"[state-joint] {camera}: source={source} frames={total} fps={fps:.2f} size={width}x{height}")
         return cap, detector, fps, total
 
     def _extract(

@@ -1,0 +1,6 @@
+# Final state-invariant batch/runtime environment.
+# Use this file for `batch_state_final`; it deliberately excludes InsightFace
+# because FACE is OFF and InsightFace's dependency metadata pulls CPU-only
+# `onnxruntime`, which conflicts with the required CUDA provider.
+
+-r ../requirements.txt

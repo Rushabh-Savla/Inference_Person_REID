@@ -9,8 +9,8 @@ reid:
   weights: weights/reid/resnet50_market1501_aicity156.onnx
   device: cuda
   max_batch: 32
-  interval: 5
-  part_interval: 10
+  interval: 3
+  part_interval: 6
   illumination_variant: true
   min_quality: 0.20
 
@@ -73,9 +73,17 @@ tracking:
 
 overlap_guard:
   enabled: true
-  iou_min: 0.05
-  intersection_min: 0.20
-  recovery_samples: 2
+  iou_min: 0.80
+  intersection_min: 0.85
+  recovery_samples: 3
+
+recovery_guard:
+  enabled: true
+  required_models: 2
+  fused_min: 0.48
+  resnet_min: 0.44
+  swin_min: 0.44
+  solider_min: 0.42
 
 input:
   videos: []

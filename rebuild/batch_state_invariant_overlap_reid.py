@@ -14,8 +14,25 @@ class BatchPipelineStateInvariantOverlapReid(BatchPipelineStateInvariantAccurate
         super().__init__(config_path)
         self.post_overlap_interval = max(1, int(self.cfg.get("post_overlap_interval_frames", 1)))
         self.trajectory_history = max(8, int(self.cfg.get("trajectory_history_frames", 30)))
+        self._trajectory: dict[str, list[dict]] = {}
+
+    def _remember_position(self, key: str, frame: int, fps: float, box) -> None:
+        """Record tracker position on every observed frame, including overlap."""
+        x1, y1, x2, y2 = [float(v) for v in box]
+        row = {
+            "frame": int(frame),
+            "timestamp": float(frame / fps),
+            "bbox": [x1, y1, x2, y2],
+            "center": [0.5 * (x1 + x2), 0.5 * (y1 + y2)],
+            "height": max(1.0, y2 - y1),
+        }
+        history = self._trajectory.setdefault(key, [])
+        history.append(row)
+        if len(history) > self.trajectory_history:
+            del history[:-self.trajectory_history]
 
     def _touch_track(self, key: str, frame: int, fps: float) -> None:
+        """Keep track timing and trajectory attached to the actual Tracklet."""
         track = self.tracks.get(key)
         history = self._trajectory.get(key)
         if track is None or not history:
@@ -27,6 +44,12 @@ class BatchPipelineStateInvariantOverlapReid(BatchPipelineStateInvariantAccurate
             track.start = min(float(track.start), stamp)
         track.end = max(float(getattr(track, "end", stamp)), stamp)
         setattr(track, "trajectory", list(history))
+
+    def _attach_position_history(self, key: str) -> None:
+        track = self.tracks.get(key)
+        history = self._trajectory.get(key)
+        if track is not None and history:
+            setattr(track, "trajectory", list(history))
 
     def _check_anchor(self, key: str):
         track = self.tracks.get(key)
@@ -88,8 +111,8 @@ class BatchPipelineStateInvariantOverlapReid(BatchPipelineStateInvariantAccurate
                 reason = "high_overlap_start_feature_pause"
 
             elif previous_active and not active:
-                # Tracking never stopped. Only the ReID evidence stream is split
-                # here so the clean post-overlap body can be assigned independently.
+                # Tracking never stops. Only the ReID evidence stream is split
+                # so the clean post-overlap observation can be reassigned.
                 info["segments"][tid] = info["segments"].get(tid, old_seg) + 1
                 self._segments[camera][tid] = info["segments"][tid]
                 seg = info["segments"][tid]
@@ -147,8 +170,8 @@ class BatchPipelineStateInvariantOverlapReid(BatchPipelineStateInvariantAccurate
             if not normal_due and not recovery_due:
                 continue
 
-            # First four clean frames after overlap are sampled densely. Each uses
-            # full + all available body parts/light through ResNet + Swin + SOLIDER.
+            # First clean post-overlap observations are dense: full + all available
+            # body-part/light variants through all three ReID models.
             ok = self._extract_one(
                 camera,
                 frame,
@@ -192,7 +215,8 @@ class BatchPipelineStateInvariantOverlapReid(BatchPipelineStateInvariantAccurate
                         info.setdefault("post_overlap_feature_checks", 0)
                         info["post_overlap_feature_checks"] += 1
 
-            self._touch_track(key, frame, fps)
+            self._attach_position_history(key)
+
             if recovery <= 1 and info["recovery_left"].get(key, 0) == 0:
                 self._overlap_refs.pop(key, None)
 

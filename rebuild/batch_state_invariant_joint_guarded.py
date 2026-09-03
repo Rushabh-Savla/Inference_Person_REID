@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import json
 from typing import Dict
 
 import numpy as np
@@ -202,7 +201,7 @@ class HighConfidenceIdentityBodyV6(GlobalIdentityBodyV6):
 
 
 class BatchPipelineStateInvariantJointGuarded(BatchPipelineStateInvariantJoint):
-    """Joint V6 MTMC with high-overlap isolation and high-confidence promotion."""
+    """Joint V6 MTMC with high-overlap isolation and strict recovery validation."""
 
     def __init__(self, config_path: str):
         super().__init__(config_path)
@@ -327,7 +326,11 @@ class BatchPipelineStateInvariantJointGuarded(BatchPipelineStateInvariantJoint):
 
             recovery = info["recovery_left"].get(key, 0)
             due = recovery > 0
-            if not due and frame - info["last"].get(key, -10**9) < self.interval:
+            last_frame = info["last"].get(key, -10**9)
+            if due:
+                if not boundary and frame - last_frame < self.interval:
+                    continue
+            elif frame - last_frame < self.interval:
                 continue
 
             person = crop(image, box)
@@ -366,6 +369,7 @@ class BatchPipelineStateInvariantJointGuarded(BatchPipelineStateInvariantJoint):
                 if not accepted:
                     info.setdefault("recovery_rejected", 0)
                     info["recovery_rejected"] += 1
+                    info["last"][key] = frame
                     rows.write(json.dumps({
                         "camera": camera,
                         "frame": frame,
@@ -380,9 +384,6 @@ class BatchPipelineStateInvariantJointGuarded(BatchPipelineStateInvariantJoint):
                         "recovery_rejected": True,
                         "recovery_scores": scores,
                     }) + "\n")
-                    info["recovery_left"][key] = max(0, recovery - 1)
-                    if info["recovery_left"][key] == 0:
-                        self._recovery_refs.pop(key, None)
                     continue
                 self._remember_recovery(key, vectors)
                 info.setdefault("recovery_accepted", 0)

@@ -1,0 +1,70 @@
+# Final independent live MTMC Re-ID configuration.
+# No dependency on seif744/Inference_PersonReid.
+
+detector:
+  model: weights/yolo11m.pt
+  conf: 0.55
+  iou: 0.60
+  tracker: bytetrack.yaml
+
+models:
+  device: cuda
+  resnet_weights: weights/reid/resnet50_market1501_aicity156.onnx
+  resnet_model: nvidia_reidentificationnet
+  resnet_tap: post_relu
+  resnet_batch: 32
+  swin_weights: weights/reid/nvidia_swin_base_1024/export_55/swin_base_market1501_aicity156_featuredim1024.onnx
+  swin_batch: 16
+  solider_weights: weights/solider_swin_base_msmt17.onnx
+  solider_batch: 16
+
+capture:
+  feature_interval: 5
+  part_interval: 10
+  min_quality: 0.20
+  overlap_iou: 0.05
+  overlap_intersection: 0.20
+  recovery_samples: 2
+  reconnect_sec: 2.0
+
+tracking:
+  fragment_gap_sec: 2.0
+  active_conflict_sec: 2.0
+
+identity:
+  # A GID is assigned only after multimodel feature agreement.
+  cross_deep_threshold: 0.56
+  same_deep_threshold: 0.52
+  model_min:
+    resnet: 0.44
+    swin: 0.44
+    solider: 0.42
+  required_models: 2
+  required_views: 2
+  strong_deep: 0.76
+  attribute_mean: 0.46
+  strong_attribute_relax: 0.68
+  match_margin: 0.035
+  switch_margin: 0.05
+  confirm_samples: 2
+  verify_grace_samples: 3
+  cross_gap_sec: 30.0
+  same_gap_sec: 15.0
+  bank_size: 64
+  novelty: 0.985
+  new_identity_min_resnet: 0.74
+  new_identity_min_swin: 0.74
+  new_identity_min_solider: 0.72
+  new_identity_attribute: 0.42
+  persistence: true
+  state_path: identity_state/live_reid_final.sqlite3
+  save_every: 50
+
+geometry:
+  enabled: true
+  calibration_path: calibration/floor_frame.json
+
+output:
+  root: rebuild_outputs_live_final
+  save_evidence: true
+  max_evidence_per_gid_camera: 12

@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import json
-
 from typing import Dict
 
 import numpy as np
@@ -19,6 +18,7 @@ class BatchPipelineStateInvariantOverlapReid(BatchPipelineStateInvariantAccurate
         self.trajectory_history = max(8, int(self.cfg.get("trajectory_history_frames", 30)))
         self._trajectory: Dict[str, list[dict]] = {}
         self._overlap_refs = self._refs
+        self._post_overlap_fails: Dict[str, int] = {}
 
     @staticmethod
     def _unit(value):
@@ -68,7 +68,7 @@ class BatchPipelineStateInvariantOverlapReid(BatchPipelineStateInvariantAccurate
             refs[model] = list(bank.get(model, {}).get("full", [])[-4:])
         if all(refs[model] for model in refs):
             self._overlap_refs[key] = refs
-            self._post_overlap_fails[key] = 0 if hasattr(self, "_post_overlap_fails") else 0
+            self._post_overlap_fails[key] = 0
 
     def _extract_one(self, camera, frame, fps, image, item, key, seg, recovery, info, rows, active=False):
         del active, rows

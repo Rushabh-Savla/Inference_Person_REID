@@ -15,6 +15,10 @@ class BatchPipelineStateInvariantOverlapReid(BatchPipelineStateInvariantAccurate
         self.post_overlap_interval = max(1, int(self.cfg.get("post_overlap_interval_frames", 1)))
         self.trajectory_history = max(8, int(self.cfg.get("trajectory_history_frames", 30)))
         self._trajectory: dict[str, list[dict]] = {}
+        # The accurate base implementation stores its trusted clean anchors in
+        # ``_refs``. Keep one shared dictionary so overlap-specific recovery and
+        # the base Safe055 feature-state logic cannot diverge.
+        self._overlap_refs = self._refs
 
     def _remember_position(self, key: str, frame: int, fps: float, box) -> None:
         """Record tracker position on every observed frame, including overlap."""
@@ -107,7 +111,7 @@ class BatchPipelineStateInvariantOverlapReid(BatchPipelineStateInvariantAccurate
                 info["overlap_events"] += 1
                 info["overlap_tids"].add(tid)
                 info["recovery_left"][old_key] = 0
-                self._save_clean_anchor(old_key)
+                self._save_refs(old_key)
                 reason = "high_overlap_start_feature_pause"
 
             elif previous_active and not active:
@@ -126,7 +130,10 @@ class BatchPipelineStateInvariantOverlapReid(BatchPipelineStateInvariantAccurate
                 info["last"][key + ":recovery"] = -10**9
                 anchor = self._overlap_refs.get(old_key)
                 if anchor:
-                    self._overlap_refs[key] = anchor
+                    self._overlap_refs[key] = {
+                        model: list(values)
+                        for model, values in anchor.items()
+                    }
                 info["overlap_tids"].discard(tid)
                 boundary = True
                 reason = "high_overlap_exit_dense_feature_reassignment"

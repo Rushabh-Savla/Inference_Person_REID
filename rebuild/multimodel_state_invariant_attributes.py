@@ -77,9 +77,10 @@ class AttributeAwareResolver(StateInvariantFinalResolverFast):
         patternlow = cls._best(aq, bq)
         headscore = cls._best(ah, bh)
         eyescore = cls._best(ae, be)
+        upright = bool(float(getattr(left, "aspect", 0.0)) >= 1.35 and float(getattr(right, "aspect", 0.0)) >= 1.35)
         return {
             "ready": True,
-            "full": bool(upvis and lowvis),
+            "full": bool(upvis and lowvis and upright),
             "upper": colorup,
             "lower": colorlow,
             "upperpattern": patternup,

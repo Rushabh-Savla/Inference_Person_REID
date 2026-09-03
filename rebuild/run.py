@@ -15,12 +15,12 @@ from rebuild.batch_v4 import BatchPipelineV4  # noqa: E402
 from rebuild.batch_v5 import BatchPipelineV5  # noqa: E402
 from rebuild.batch_v6 import BatchPipelineV6  # noqa: E402
 from rebuild.batch_v6_local_global import BatchPipelineV6LocalGlobal  # noqa: E402
-from rebuild.batch_multimodel import BatchPipelineMultiModel  # noqa: E402
 from rebuild import batch_state_invariant as state_pipeline  # noqa: E402
 from rebuild.multimodel_state_invariant_attributes import AttributeAwareResolver  # noqa: E402
 
 state_pipeline.StateInvariantFinalResolver = AttributeAwareResolver
 from rebuild.batch_state_invariant_joint_attributes import BatchPipelineStateInvariantJointAttributes  # noqa: E402
+from rebuild.live_state_invariant import run_live_state  # noqa: E402
 from rebuild.live_v4 import run_live_v4  # noqa: E402
 from rebuild.live_v2 import run_live_v2  # noqa: E402
 
@@ -84,8 +84,11 @@ def main():
     old.add_argument("--config", default="rebuild/config.yaml")
     old.add_argument("--videos", nargs="*", default=[])
 
-    live = sub.add_parser("live", help="V4 live/RTSP sources")
-    live.add_argument("--config", default="rebuild/config_v4.yaml")
+    live = sub.add_parser(
+        "live",
+        help="Safe055/V6 live capture: record all RTSP sources, then run the exact joint video ReID pipeline",
+    )
+    live.add_argument("--config", default="rebuild/config_state_invariant.yaml")
     live.add_argument("--sources", nargs="+", required=True)
     live.add_argument("--output-dir", default=None)
     live.add_argument("--show", action="store_true")
@@ -114,7 +117,7 @@ def main():
     elif args.mode == "batch_v2":
         BatchPipelineV2(args.config).run(args.videos)
     elif args.mode == "live":
-        run_live_v4(args.config, parse_source(args.sources), args.output_dir, args.show)
+        run_live_state(args.config, parse_source(args.sources), args.output_dir, args.show)
     else:
         run_live_v2(args.config, parse_source(args.sources), args.output_dir, args.show)
 

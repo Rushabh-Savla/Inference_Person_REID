@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from typing import Dict, Iterable
+from typing import Iterable
 
 import numpy as np
 
@@ -8,16 +8,16 @@ from rebuild.multimodel_state_invariant_fast import StateInvariantFinalResolverF
 
 
 class AttributeAwareResolver(StateInvariantFinalResolverFast):
-    """V6 resolver with conservative visibility-aware appearance validation."""
+    """V6 resolver with visibility-aware clothing and head evidence."""
 
     VIEWS = ("full", "upper", "torso", "lower", "attributes")
 
     def __init__(self, cfg, registry=None):
         super().__init__(cfg, registry=registry)
-        self._attr = {}
         self.attr_color = float(cfg.get("attribute_color_min", 0.84))
         self.attr_pattern = float(cfg.get("attribute_pattern_min", 0.64))
         self.attr_detail = float(cfg.get("attribute_detail_min", 0.72))
+        self._pending = {"ready": False}
 
     @staticmethod
     def _unit(value):
@@ -45,60 +45,50 @@ class AttributeAwareResolver(StateInvariantFinalResolverFast):
         return float(np.mean(vals[: min(3, len(vals))]))
 
     @classmethod
-    def _attrpack(cls, group):
+    def _pack(cls, group):
         values = list(group.state_bank.get("resnet", {}).get("attributes", []))
-        if not values:
-            return None
         arr = [np.asarray(value, np.float32).reshape(-1) for value in values if value is not None]
         arr = [value for value in arr if value.size == 112 and np.isfinite(value).all()]
-        if not arr:
-            return None
-        return np.stack(arr)
+        return np.stack(arr) if arr else None
 
     @classmethod
     def _attrs(cls, left, right):
-        a = cls._attrpack(left)
-        b = cls._attrpack(right)
+        a = cls._pack(left)
+        b = cls._pack(right)
         if a is None or b is None:
-            return {"ready": False, "full": False, "upper": 0.5, "lower": 0.5, "upperpattern": 0.5, "lowerpattern": 0.5, "head": 0.5, "eye": 0.5, "detail": 0.5, "cloth": 0.5}
+            return {"ready": False}
 
-        au = a[:, 0:20]
-        al = a[:, 20:40]
-        ap = a[:, 40:54]
-        aq = a[:, 54:68]
-        ah = a[:, 68:102]
-        ae = a[:, 102:108]
+        au, al = a[:, 0:20], a[:, 20:40]
+        ap, aq = a[:, 40:54], a[:, 54:68]
+        ah, ae = a[:, 68:102], a[:, 102:108]
         av = a[:, 108:112]
-        bu = b[:, 0:20]
-        bl = b[:, 20:40]
-        bp = b[:, 40:54]
-        bq = b[:, 54:68]
-        bh = b[:, 68:102]
-        be = b[:, 102:108]
+        bu, bl = b[:, 0:20], b[:, 20:40]
+        bp, bq = b[:, 40:54], b[:, 54:68]
+        bh, be = b[:, 68:102], b[:, 102:108]
         bv = b[:, 108:112]
 
-        upper = float(np.mean(av[:, 0]) > 0.15 and np.mean(bv[:, 0]) > 0.15)
-        lower = float(np.mean(av[:, 1]) > 0.15 and np.mean(bv[:, 1]) > 0.15)
-        head = float(np.mean(av[:, 2]) > 0.15 and np.mean(bv[:, 2]) > 0.15)
-        eye = float(np.mean(av[:, 3]) > 0.15 and np.mean(bv[:, 3]) > 0.15)
+        upvis = float(np.mean(av[:, 0]) > 0.15 and np.mean(bv[:, 0]) > 0.15)
+        lowvis = float(np.mean(av[:, 1]) > 0.15 and np.mean(bv[:, 1]) > 0.15)
+        headvis = float(np.mean(av[:, 2]) > 0.15 and np.mean(bv[:, 2]) > 0.15)
+        eyevis = float(np.mean(av[:, 3]) > 0.15 and np.mean(bv[:, 3]) > 0.15)
         colorup = cls._best(au, bu)
         colorlow = cls._best(al, bl)
         patternup = cls._best(ap, bp)
         patternlow = cls._best(aq, bq)
         headscore = cls._best(ah, bh)
         eyescore = cls._best(ae, be)
-        detail = max(patternup, patternlow, headscore, eyescore)
-        full = bool(upper and lower)
         return {
             "ready": True,
-            "full": full,
+            "full": bool(upvis and lowvis),
             "upper": colorup,
             "lower": colorlow,
             "upperpattern": patternup,
             "lowerpattern": patternlow,
             "head": headscore,
             "eye": eyescore,
-            "detail": detail,
+            "headvis": bool(headvis),
+            "eyevis": bool(eyevis),
+            "detail": max(patternup, patternlow, headscore, eyescore),
             "cloth": min(colorup, colorlow),
         }
 
@@ -115,38 +105,31 @@ class AttributeAwareResolver(StateInvariantFinalResolverFast):
             for model, views in group.state_bank.items():
                 result.setdefault(model, [])
                 for view, values in views.items():
-                    if view == "attributes":
-                        continue
-                    result[model].extend(values)
+                    if view != "attributes":
+                        result[model].extend(values)
         return result
 
     def pair(self, left, right, left_pool, right_pool):
         evidence = super().pair(left, right, left_pool, right_pool)
-        key = tuple(sorted((left.key, right.key)))
-        self._attr[key] = self._attrs(left, right)
+        self._pending = self._attrs(left, right)
         return evidence
 
-    def _gate(self):
-        if not self._attr:
-            return {"ready": False}
-        return next(reversed(self._attr.values()))
+    def _accept(self, evidence, same=False):
+        good = super()._same_accept(evidence) if same else super()._cross_accept(evidence)
+        if not good:
+            return False
+        attr = self._pending
+        if not attr.get("ready", False):
+            return True
+        if attr["full"]:
+            cloth = attr["cloth"] >= self.attr_color
+            pattern = min(attr["upperpattern"], attr["lowerpattern"]) >= self.attr_pattern
+            return bool(cloth and pattern)
+        detail = attr["detail"] >= self.attr_detail
+        return bool(detail and (attr["headvis"] or attr["eyevis"] or attr["upperpattern"] >= self.attr_pattern or attr["lowerpattern"] >= self.attr_pattern))
 
     def _same_accept(self, evidence):
-        if not super()._same_accept(evidence):
-            return False
-        attr = self._gate()
-        if not attr.get("ready", False):
-            return True
-        if attr["full"]:
-            return attr["cloth"] >= self.attr_color and min(attr["upperpattern"], attr["lowerpattern"]) >= self.attr_pattern
-        return attr["detail"] >= self.attr_detail
+        return self._accept(evidence, True)
 
     def _cross_accept(self, evidence):
-        if not super()._cross_accept(evidence):
-            return False
-        attr = self._gate()
-        if not attr.get("ready", False):
-            return True
-        if attr["full"]:
-            return attr["cloth"] >= self.attr_color and min(attr["upperpattern"], attr["lowerpattern"]) >= self.attr_pattern
-        return attr["detail"] >= self.attr_detail
+        return self._accept(evidence, False)

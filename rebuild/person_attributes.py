@@ -4,16 +4,6 @@ import cv2
 import numpy as np
 
 
-def hist(image: np.ndarray, bins: int, low: float, high: float) -> np.ndarray:
-    value = image.astype(np.float32)
-    flat = value.reshape(-1)
-    if flat.size == 0:
-        return np.zeros(bins, np.float32)
-    item, _ = np.histogram(flat, bins=bins, range=(low, high))
-    out = item.astype(np.float32)
-    return out / (np.linalg.norm(out) + 1e-12)
-
-
 def color(image: np.ndarray) -> np.ndarray:
     hsv = cv2.cvtColor(image, cv2.COLOR_BGR2HSV)
     sat = hsv[..., 1].astype(np.float32) / 255.0
@@ -68,7 +58,7 @@ def eye(image: np.ndarray) -> np.ndarray:
 def pack(person: np.ndarray, frame: np.ndarray, box) -> np.ndarray:
     h, w = person.shape[:2]
     if h < 40 or w < 20:
-        return np.zeros(82, np.float32)
+        return np.zeros(112, np.float32)
     upper = person[int(h * 0.12):max(int(h * 0.58), int(h * 0.12) + 1)]
     lower = person[int(h * 0.45):]
     headpart = person[:max(int(h * 0.34), 1)]
@@ -80,8 +70,8 @@ def pack(person: np.ndarray, frame: np.ndarray, box) -> np.ndarray:
     headpart = head(headpart)
     eyepart = eye(eyepart)
 
-    height, width = frame.shape[:2]
-    x1, y1, x2, y2 = [float(v) for v in box]
+    height, _ = frame.shape[:2]
+    _, y1, _, y2 = [float(v) for v in box]
     full = max(1.0, float(y2 - y1))
     uppervis = 1.0 if y1 > height * 0.015 and full >= 60.0 else -1.0
     lowervis = 1.0 if y2 < height * 0.975 and full >= 100.0 else -1.0

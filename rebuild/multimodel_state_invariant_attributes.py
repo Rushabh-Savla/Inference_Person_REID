@@ -8,7 +8,13 @@ from rebuild.multimodel_state_invariant_fast import StateInvariantFinalResolverF
 
 
 class AttributeAwareResolver(StateInvariantFinalResolverFast):
-    """V6 resolver with visibility-aware clothing and head evidence."""
+    """High-confidence V6 resolver with attributes as supporting evidence.
+
+    Deep ReID remains the primary identity signal. Clothing/head/detail
+    attributes can reinforce a strong multimodel decision, but they can never
+    create an identity by themselves. Same-camera fragment repair also permits
+    sequential chains instead of limiting every tracklet to one repair edge.
+    """
 
     VIEWS = ("full", "upper", "torso", "lower", "attributes")
 
@@ -17,6 +23,9 @@ class AttributeAwareResolver(StateInvariantFinalResolverFast):
         self.attr_color = float(cfg.get("attribute_color_min", 0.84))
         self.attr_pattern = float(cfg.get("attribute_pattern_min", 0.64))
         self.attr_detail = float(cfg.get("attribute_detail_min", 0.72))
+        self.same_chain_min = float(cfg.get("state_same_chain_min", 0.53))
+        self.same_chain_support = int(cfg.get("state_same_chain_support", 2))
+        self.same_chain_continuity = float(cfg.get("state_same_chain_continuity_min", 0.28))
         self._pending = {"ready": False}
 
     @staticmethod
@@ -104,33 +113,109 @@ class AttributeAwareResolver(StateInvariantFinalResolverFast):
         result = {}
         for group in component:
             for model, views in group.state_bank.items():
-                result.setdefault(model, [])
                 for view, values in views.items():
                     if view != "attributes":
-                        result[model].extend(values)
+                        result.setdefault(model, []).extend(values)
         return result
 
     def pair(self, left, right, left_pool, right_pool):
         evidence = super().pair(left, right, left_pool, right_pool)
         self._pending = self._attrs(left, right)
+        attr = self._pending
+        # Attributes are deliberately capped reinforcement. They never replace
+        # the three-model ReID decision and can add at most 0.025 to the fused
+        # score when both upper and lower evidence are actually visible.
+        if attr.get("ready") and evidence.model_support >= 2:
+            bonus = 0.0
+            if attr["full"] and attr["cloth"] >= self.attr_color and min(attr["upperpattern"], attr["lowerpattern"]) >= self.attr_pattern:
+                bonus = 0.025
+            elif not attr["full"] and attr["detail"] >= self.attr_detail and (attr["headvis"] or attr["eyevis"] or attr["upperpattern"] >= self.attr_pattern or attr["lowerpattern"] >= self.attr_pattern):
+                bonus = 0.015
+            if bonus:
+                from rebuild.multimodel_state_invariant_final import PairEvidence
+                evidence = PairEvidence(
+                    min(0.99, float(evidence.fused + bonus)),
+                    evidence.resnet,
+                    evidence.swin,
+                    evidence.solider,
+                    evidence.colour,
+                    evidence.geometry,
+                    evidence.temporal,
+                    evidence.continuity,
+                    evidence.agreement,
+                    evidence.model_support,
+                    evidence.mutual_models,
+                    evidence.view_support,
+                    evidence.state_transition,
+                )
         return evidence
 
     def _accept(self, evidence, same=False):
-        good = super()._same_accept(evidence) if same else super()._cross_accept(evidence)
-        if not good:
+        # Strong assignment comes from at least two independent ReID models.
+        # Attribute evidence only reinforces an already-credible match.
+        threshold = self.partial_min if evidence.state_transition else (self.same_min if same else self.cross_min)
+        if evidence.fused < threshold:
             return False
-        attr = self._pending
-        if not attr.get("ready", False):
+        if evidence.model_support >= 2 and evidence.agreement >= (0.50 if same else 0.48):
+            if same:
+                return evidence.continuity >= self.same_spatial_min
             return True
-        if attr["full"]:
-            cloth = attr["cloth"] >= self.attr_color
-            pattern = min(attr["upperpattern"], attr["lowerpattern"]) >= self.attr_pattern
-            return bool(cloth and pattern)
-        detail = attr["detail"] >= self.attr_detail
-        return bool(detail and (attr["headvis"] or attr["eyevis"] or attr["upperpattern"] >= self.attr_pattern or attr["lowerpattern"] >= self.attr_pattern))
+        return False
 
     def _same_accept(self, evidence):
         return self._accept(evidence, True)
 
     def _cross_accept(self, evidence):
         return self._accept(evidence, False)
+
+    def same_camera_edges(self, groups):
+        """Build sequential same-camera repair links, allowing chains.
+
+        A tracklet may have one incoming and one outgoing repair edge, which
+        lets A->B->C represent one person after repeated tracker resets while
+        still preventing unrelated overlapping intervals from being joined.
+        """
+        ordered = sorted(groups, key=lambda group: (group.start, group.end, group.key))
+        candidates = []
+        for i, left in enumerate(ordered):
+            for j in range(i + 1, len(ordered)):
+                right = ordered[j]
+                if right.start <= left.end:
+                    continue
+                gap = right.start - left.end
+                if gap > self.same_max_gap:
+                    break
+                evidence = self.pair(left, right, ordered, ordered)
+                strong = evidence.fused >= self.same_chain_min and evidence.model_support >= self.same_chain_support and evidence.continuity >= self.same_chain_continuity and evidence.agreement >= 0.52
+                if self._same_accept(evidence) or strong:
+                    candidates.append((float(evidence.fused), left, right, evidence))
+
+        candidates.sort(key=lambda item: item[0], reverse=True)
+        incoming = set()
+        outgoing = set()
+        chosen = []
+        for score, left, right, evidence in candidates:
+            if left.key in outgoing or right.key in incoming:
+                continue
+            # Do not create a same-camera edge if the two tracklets overlap in
+            # time; overlap is a physical two-person constraint, not a stitch.
+            if left.end >= right.start:
+                continue
+            outgoing.add(left.key)
+            incoming.add(right.key)
+            chosen.append({
+                "left": left.key,
+                "right": right.key,
+                "fused": score,
+                "resnet": evidence.resnet,
+                "swin": evidence.swin,
+                "solider": evidence.solider,
+                "colour": evidence.colour,
+                "continuity": evidence.continuity,
+                "geometry": evidence.geometry,
+                "temporal": evidence.temporal,
+                "agreement": evidence.agreement,
+                "model_support": evidence.model_support,
+                "state_transition": evidence.state_transition,
+            })
+        return chosen

@@ -112,9 +112,9 @@ class StateInvariantFinalResolverFast(StateInvariantFinalResolver):
         deep_top2 = float(np.mean(ordered[:2])) if len(ordered) >= 2 else (ordered[0] if ordered else 0.0)
         strongest = ordered[0] if ordered else 0.0
         if left.camera == right.camera:
-            fused = 0.78 * deep_top2 + 0.12 * colour + 0.10 * continuity
+            fused = 0.83 * deep_top2 + 0.07 * colour + 0.10 * continuity
         else:
-            fused = 0.70 * deep_top2 + 0.12 * strongest + 0.10 * colour + 0.05 * temporal + 0.03 * geometry
+            fused = 0.75 * deep_top2 + 0.12 * strongest + 0.05 * colour + 0.05 * temporal + 0.03 * geometry
         return PairEvidence(
             float(fused),
             float(scores["resnet"]),

@@ -16,11 +16,11 @@ from rebuild.batch_v5 import BatchPipelineV5  # noqa: E402
 from rebuild.batch_v6 import BatchPipelineV6  # noqa: E402
 from rebuild.batch_v6_local_global import BatchPipelineV6LocalGlobal  # noqa: E402
 from rebuild import batch_state_invariant as state_pipeline  # noqa: E402
-from rebuild.multimodel_state_invariant_attributes import AttributeAwareResolver  # noqa: E402
+from rebuild.multimodel_state_invariant_accurate import AccurateAttributeAwareResolver  # noqa: E402
+from rebuild.batch_state_invariant_accurate import BatchPipelineStateInvariantAccurate  # noqa: E402
 
-state_pipeline.StateInvariantFinalResolver = AttributeAwareResolver
-from rebuild.batch_state_invariant_joint_attributes import BatchPipelineStateInvariantJointAttributes  # noqa: E402
-from rebuild.live_state_invariant import run_live_state  # noqa: E402
+state_pipeline.StateInvariantFinalResolver = AccurateAttributeAwareResolver
+from rebuild.live_state_invariant_accurate import run_live_state  # noqa: E402
 from rebuild.live_v4 import run_live_v4  # noqa: E402
 from rebuild.live_v2 import run_live_v2  # noqa: E402
 
@@ -56,7 +56,7 @@ def main():
 
     state_final = sub.add_parser(
         "batch_state_final",
-        help="Joint multi-camera state-invariant final ReID with visibility-aware attribute recovery",
+        help="Joint multi-camera state-invariant final ReID with strict feature-first overlap handling",
     )
     state_final.add_argument("--config", default="rebuild/config_state_invariant.yaml")
     state_final.add_argument("--videos", nargs="*", default=[])
@@ -86,7 +86,7 @@ def main():
 
     live = sub.add_parser(
         "live",
-        help="Safe055/V6 live capture: record all RTSP sources, then run the exact joint video ReID pipeline",
+        help="Safe055/V6 live capture: record all RTSP sources, then run the strict feature-first joint video ReID pipeline",
     )
     live.add_argument("--config", default="rebuild/config_state_invariant.yaml")
     live.add_argument("--sources", nargs="+", required=True)
@@ -103,9 +103,9 @@ def main():
     if args.mode == "batch":
         BatchPipelineV6(args.config).run(args.videos)
     elif args.mode == "batch_final":
-        BatchPipelineMultiModel(args.config).run(args.videos)
+        raise SystemExit("batch_final legacy runner is unavailable in this branch; use batch_state_final")
     elif args.mode == "batch_state_final":
-        BatchPipelineStateInvariantJointAttributes(args.config).run(args.videos)
+        BatchPipelineStateInvariantAccurate(args.config).run(args.videos)
     elif args.mode == "batch_local_global":
         BatchPipelineV6LocalGlobal(args.config).run(args.videos)
     elif args.mode == "batch_v5":

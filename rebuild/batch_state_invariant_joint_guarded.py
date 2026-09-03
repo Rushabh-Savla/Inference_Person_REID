@@ -1,12 +1,11 @@
 from __future__ import annotations
 
-from typing import Dict, List
+from typing import Dict
 
 import numpy as np
 
 from rebuild.batch_state_invariant_joint import BatchPipelineStateInvariantJoint
-from rebuild.identity_body_v6 import GlobalIdentityBodyV6
-from rebuild.identity_v6 import DecisionBodyV6
+from rebuild.identity_body_v6 import DecisionBodyV6, GlobalIdentityBodyV6
 from rebuild.identity_v2 import crop, illumination_variant, quality
 
 
@@ -178,9 +177,7 @@ class HighConfidenceIdentityBodyV6(GlobalIdentityBodyV6):
             pending = remain
 
         self.merge_pass(tracks)
-        final = {}
-        for key, gid in self.mapping.items():
-            final[key] = gid
+        final = {key: gid for key, gid in self.mapping.items()}
         for row in self.decisions:
             row_gid = final.get(row.key, row.gid)
             if row_gid != row.gid:
@@ -395,7 +392,18 @@ class BatchPipelineStateInvariantJointGuarded(BatchPipelineStateInvariantJoint):
                 "swin": {name: [value] for name, value in swin_map.items()},
                 "solider": {name: [value] for name, value in solider_map.items()},
             }
-            self.add_body(key, camera, tid, seg, box, frame / fps, float(detection.confidence), person, resnet_map, multi)
+            self.add_body(
+                key,
+                camera,
+                tid,
+                seg,
+                box,
+                frame / fps,
+                float(detection.confidence),
+                person,
+                resnet_map,
+                multi,
+            )
             stats["samples"] += 1
             stats["feature_batches"] += 1
             if due:
@@ -403,3 +411,12 @@ class BatchPipelineStateInvariantJointGuarded(BatchPipelineStateInvariantJoint):
                 recovery_left[key] = max(0, recovery - 1)
                 if recovery_left[key] == 0:
                     self._recovery_refs.pop(key, None)
+
+    def run(self, values):
+        import rebuild.identity_body_v6 as body_module
+        original = body_module.GlobalIdentityBodyV6
+        body_module.GlobalIdentityBodyV6 = HighConfidenceIdentityBodyV6
+        try:
+            return super().run(values)
+        finally:
+            body_module.GlobalIdentityBodyV6 = original

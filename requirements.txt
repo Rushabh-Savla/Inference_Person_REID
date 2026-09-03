@@ -1,11 +1,10 @@
 # Runtime dependencies for the multi-camera person ReID pipeline.
-# Pins reflect the versions verified working in the project venv.
 # Install:  pip install -r requirements.txt
 
 # --- Detection + tracking -------------------------------------------------
 ultralytics==8.4.89        # YOLO11 detector + ByteTrack tracker
 
-# --- ReID model (appearance embeddings) -----------------------------------
+# --- ReID models -----------------------------------------------------------
 torch==2.12.1
 torchvision==0.27.1
 torchreid==0.2.5
@@ -17,10 +16,7 @@ scipy==1.15.3
 gdown==5.2.2
 tensorboard==2.21.0
 
-# --- Face ReID -------------------------------------------------------------
-# InsightFace 1.0.1 is the current PyPI release. V4 uses buffalo_l through
-# FaceAnalysis. The provided pretrained model packs are for non-commercial
-# research use; review licensing before commercial deployment.
+# --- Face / ONNX support ---------------------------------------------------
 insightface==1.0.1
 onnxruntime-gpu==1.28.0
 
@@ -36,3 +32,9 @@ opencv-python==5.0.0.93
 PyYAML==6.0.3
 
 # tkinter is optional and OS-provided. Headless inference does not require it.
+
+# IMPORTANT:
+# insightface declares plain `onnxruntime` as a dependency. That package is
+# CPU-only and can replace/precede onnxruntime-gpu in the environment.
+# The runtime code requires CUDAExecutionProvider, so remove the CPU package:
+#   python -m pip uninstall -y onnxruntime

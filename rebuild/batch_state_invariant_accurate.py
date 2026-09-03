@@ -7,18 +7,10 @@ import numpy as np
 
 from rebuild.batch_state_invariant_joint_attributes import BatchPipelineStateInvariantJointAttributes
 from rebuild.identity_v2 import crop, illumination_variant, quality
-from rebuild.person_attributes import pack
 
 
 class BatchPipelineStateInvariantAccurate(BatchPipelineStateInvariantJointAttributes):
-    """Feature-first Safe055/V6 pipeline with stable overlap identity anchors.
-
-    Overlap never creates a segment, never changes a GID, and never decides an
-    identity by geometry alone. At every configured observation interval the
-    three Re-ID models are evaluated again. During severe overlap those features
-    are compared with the clean pre-overlap identity history and only verified
-    observations may update the trusted state bank.
-    """
+    """Feature-first Safe055/V6 pipeline with stable overlap identity anchors."""
 
     def __init__(self, config_path: str):
         super().__init__(config_path)
@@ -49,19 +41,11 @@ class BatchPipelineStateInvariantAccurate(BatchPipelineStateInvariantJointAttrib
 
     def _score(self, key: str, vectors: Dict[str, np.ndarray], relaxed: bool = False):
         refs = self._refs.get(key, {})
-        strong = {
-            "resnet": float(self.recovery_min["resnet"]),
-            "swin": float(self.recovery_min["swin"]),
-            "solider": float(self.recovery_min["solider"]),
-        }
-        fused_min = float(self.recovery_fused)
+        mins = self.recovery_min
+        fused_min = self.recovery_fused
         if relaxed:
-            strong = {
-                "resnet": float(self.recovery_relaxed_min["resnet"]),
-                "swin": float(self.recovery_relaxed_min["swin"]),
-                "solider": float(self.recovery_relaxed_min["solider"]),
-            }
-            fused_min = float(self.recovery_relaxed)
+            mins = self.recovery_relaxed_min
+            fused_min = self.recovery_relaxed
 
         scores = {}
         for model in ("resnet", "swin", "solider"):
@@ -77,9 +61,8 @@ class BatchPipelineStateInvariantAccurate(BatchPipelineStateInvariantJointAttrib
 
         ordered = sorted(scores.values(), reverse=True)
         fused = float(np.mean(ordered[:2])) if len(ordered) >= 2 else 0.0
-        support = sum(scores[name] >= strong[name] for name in scores)
-        ok = support >= self.recovery_models and fused >= fused_min
-        return bool(ok), scores, fused
+        support = sum(scores[name] >= float(mins[name]) for name in scores)
+        return bool(support >= self.recovery_models and fused >= float(fused_min)), scores, fused
 
     def _remember(self, key: str, vectors: Dict[str, np.ndarray]) -> None:
         refs = self._refs.setdefault(key, {"resnet": [], "swin": [], "solider": []})
@@ -87,37 +70,12 @@ class BatchPipelineStateInvariantAccurate(BatchPipelineStateInvariantJointAttrib
             refs[model].append(np.asarray(vectors[model], np.float32))
             refs[model] = refs[model][-self.anchor:]
 
-    def _add_verified(
-        self,
-        key,
-        camera,
-        tid,
-        seg,
-        box,
-        stamp,
-        confidence,
-        person,
-        resnet_map,
-        swin_map,
-        solider_map,
-    ):
-        self._frame_image = self._frame_image if self._frame_image is not None else person
+    def _add_verified(self, key, camera, tid, seg, box, stamp, confidence, person, resnet_map, swin_map, solider_map):
         multi = {
             "swin": {name: [value] for name, value in swin_map.items()},
             "solider": {name: [value] for name, value in solider_map.items()},
         }
-        self.add_body(
-            key,
-            camera,
-            tid,
-            seg,
-            box,
-            stamp,
-            confidence,
-            person,
-            resnet_map,
-            multi,
-        )
+        self.add_body(key, camera, tid, seg, box, stamp, confidence, person, resnet_map, multi)
 
     def _extract(self, camera, frame, fps, image, prepared, blocked, partners, info, rows):
         for item in prepared:
@@ -135,7 +93,6 @@ class BatchPipelineStateInvariantAccurate(BatchPipelineStateInvariantJointAttrib
                 info["overlap_events"] += 1
                 info["overlap_tids"].add(tid)
                 self._save_refs(key)
-                info["overlap_identity_anchor"] = info.get("overlap_identity_anchor", 0) + 1
                 reason = "high_overlap_feature_lock"
             elif previous and not active:
                 info["recovery_left"][key] = self.recovery_samples
@@ -206,7 +163,6 @@ class BatchPipelineStateInvariantAccurate(BatchPipelineStateInvariantJointAttrib
             if active:
                 matched, scores, fused = self._score(key, vectors, relaxed=True)
                 info["last"][key + ":overlap"] = frame
-                info["last"][key] = max(info["last"].get(key, -10**9), frame)
                 info["overlap_feature_checks"] = info.get("overlap_feature_checks", 0) + 1
                 rows.write(json.dumps({
                     "camera": camera,
@@ -222,12 +178,11 @@ class BatchPipelineStateInvariantAccurate(BatchPipelineStateInvariantJointAttrib
                     "overlap_reid_fused": float(fused),
                     "overlap_reid_scores": scores,
                 }) + "\n")
-                # Never change the identity because overlap occurred. A feature
-                # verified against the clean anchor may enrich the existing bank;
-                # an unverified feature is quarantined and cannot create a GID.
+                # Overlap itself NEVER assigns or changes an identity. The only
+                # state update allowed here is enrichment after an explicit
+                # multimodel feature match to the clean anchor history.
                 if matched:
                     self._add_verified(key, camera, tid, seg, box, stamp, float(detection.confidence), person, resnet_map, swin_map, solider_map)
-                    self._remember(key, vectors)
                     info["overlap_feature_accepts"] = info.get("overlap_feature_accepts", 0) + 1
                 else:
                     info["overlap_feature_rejects"] = info.get("overlap_feature_rejects", 0) + 1
@@ -256,12 +211,12 @@ class BatchPipelineStateInvariantAccurate(BatchPipelineStateInvariantJointAttrib
                         "recovery_fused": float(fused),
                         "recovery_fail_count": self._fails[key],
                     }) + "\n")
-                    # Keep checking this SAME track/identity. Never make a new
-                    # segment merely because appearance is temporarily weak.
+                    # Continue checking the same track indefinitely; no new
+                    # segment/GID is manufactured because recovery is difficult.
                     info["recovery_left"][key] = self.recovery_samples
                     continue
+
                 info["recovery_accepted"] = info.get("recovery_accepted", 0) + 1
-                self._remember(key, vectors)
                 info["recovery_left"][key] = 0
                 self._fails.pop(key, None)
 
@@ -272,11 +227,3 @@ class BatchPipelineStateInvariantAccurate(BatchPipelineStateInvariantJointAttrib
             info["feature_batches"] += 1
             if due:
                 info["recovery_samples"] += 1
-
-    def add_body(self, key, camera, track_id, segment, bbox, stamp, score, image, feats, multi):
-        measured = float(quality(image))
-        super().add_body(key, camera, track_id, segment, bbox, stamp, measured, image, feats, multi)
-        bank = self.tracks[key].state_bank.setdefault("resnet", {})
-        bank.setdefault("attributes", [])
-        bank["attributes"].append(pack(image, self._frame_image, bbox))
-        bank["attributes"] = bank["attributes"][-64:]

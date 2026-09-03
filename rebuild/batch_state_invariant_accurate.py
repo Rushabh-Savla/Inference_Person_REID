@@ -35,18 +35,14 @@ class BatchPipelineStateInvariantAccurate(BatchPipelineStateInvariantJointAttrib
         refs = {"resnet": [], "swin": [], "solider": []}
         for model in refs:
             refs[model] = list(bank.get(model, {}).get("full", [])[-self.anchor:])
-        if any(refs.values()):
+        if all(refs[model] for model in refs):
             self._refs[key] = refs
             self._fails[key] = 0
 
     def _score(self, key: str, vectors: Dict[str, np.ndarray], relaxed: bool = False):
         refs = self._refs.get(key, {})
-        mins = self.recovery_min
-        fused_min = self.recovery_fused
-        if relaxed:
-            mins = self.recovery_relaxed_min
-            fused_min = self.recovery_relaxed
-
+        mins = self.recovery_relaxed_min if relaxed else self.recovery_min
+        fused_min = self.recovery_relaxed if relaxed else self.recovery_fused
         scores = {}
         for model in ("resnet", "swin", "solider"):
             query = self._unit(vectors[model])
@@ -58,7 +54,6 @@ class BatchPipelineStateInvariantAccurate(BatchPipelineStateInvariantJointAttrib
                         values.append(float(np.dot(query, ref)))
             values.sort(reverse=True)
             scores[model] = float(np.mean(values[: min(3, len(values))])) if values else 0.0
-
         ordered = sorted(scores.values(), reverse=True)
         fused = float(np.mean(ordered[:2])) if len(ordered) >= 2 else 0.0
         support = sum(scores[name] >= float(mins[name]) for name in scores)
@@ -178,9 +173,6 @@ class BatchPipelineStateInvariantAccurate(BatchPipelineStateInvariantJointAttrib
                     "overlap_reid_fused": float(fused),
                     "overlap_reid_scores": scores,
                 }) + "\n")
-                # Overlap itself NEVER assigns or changes an identity. The only
-                # state update allowed here is enrichment after an explicit
-                # multimodel feature match to the clean anchor history.
                 if matched:
                     self._add_verified(key, camera, tid, seg, box, stamp, float(detection.confidence), person, resnet_map, swin_map, solider_map)
                     info["overlap_feature_accepts"] = info.get("overlap_feature_accepts", 0) + 1
@@ -211,11 +203,8 @@ class BatchPipelineStateInvariantAccurate(BatchPipelineStateInvariantJointAttrib
                         "recovery_fused": float(fused),
                         "recovery_fail_count": self._fails[key],
                     }) + "\n")
-                    # Continue checking the same track indefinitely; no new
-                    # segment/GID is manufactured because recovery is difficult.
                     info["recovery_left"][key] = self.recovery_samples
                     continue
-
                 info["recovery_accepted"] = info.get("recovery_accepted", 0) + 1
                 info["recovery_left"][key] = 0
                 self._fails.pop(key, None)

@@ -66,6 +66,7 @@ identity_v6:
   state_same_chain_min: 0.53
   state_same_chain_support: 2
   state_same_chain_continuity_min: 0.28
+  state_same_trajectory_min: 0.35
 
   state_gallery_match_min: 0.62
   state_gallery_margin: 0.02
@@ -78,6 +79,8 @@ identity_v6:
 tracking:
   fragment_gap_sec: 2.0
 
+# Severe physical overlap only. 80% IoU / 85% intersection-over-min-area
+# avoids treating ordinary near-crossing as an identity ambiguity.
 overlap_guard:
   enabled: true
   iou_min: 0.80
@@ -96,6 +99,11 @@ recovery_guard:
   relaxed_swin_min: 0.48
   relaxed_solider_min: 0.46
   fail_limit: 4
+
+# After overlap clears, run dense all-model ReID for four clean frames.
+# Tracking position is recorded every detector/tracker observation.
+post_overlap_interval_frames: 1
+trajectory_history_frames: 30
 
 input:
   videos: []

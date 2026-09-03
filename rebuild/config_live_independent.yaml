@@ -28,7 +28,7 @@ capture:
 tracking:
   fragment_gap_sec: 2.0
 
-g eometry:
+geometry:
   enabled: true
   calibration_path: calibration/floor_frame.json
 

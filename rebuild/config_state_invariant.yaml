@@ -10,7 +10,7 @@ reid:
   device: cuda
   max_batch: 32
   interval: 5
-  part_interval: 5
+  part_interval: 10
   illumination_variant: true
   min_quality: 0.20
 

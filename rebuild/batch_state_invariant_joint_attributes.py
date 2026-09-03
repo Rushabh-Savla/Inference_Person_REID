@@ -123,7 +123,6 @@ class BatchPipelineStateInvariantJointAttributes(BatchPipelineStateInvariantJoin
                 info["overlap_events"] += 1
                 info["overlap_tids"].add(tid)
                 # Preserve the last four clean observations BEFORE the overlap.
-                # We do not create a replacement tracklet at the boundary.
                 track = self.tracks.get(old_key)
                 refs = {"resnet": [], "swin": [], "solider": []}
                 if track is not None:
@@ -136,9 +135,8 @@ class BatchPipelineStateInvariantJointAttributes(BatchPipelineStateInvariantJoin
                 reason = "high_overlap_start_identity_locked"
 
             elif previous and not active:
-                # IMPORTANT: keep the SAME tracklet key. The old global identity
-                # remains the assignment anchor while post-overlap observations
-                # pass the recovery gate.
+                # Keep the SAME tracklet key. The old global identity remains the
+                # assignment anchor while post-overlap observations recover.
                 info["recovery_left"][old_key] = self.recovery_samples
                 info["last"][old_key] = -10**9
                 self._fails[old_key] = 0
@@ -177,11 +175,9 @@ class BatchPipelineStateInvariantJointAttributes(BatchPipelineStateInvariantJoin
                 continue
 
             # During severe overlap we CONTINUE extracting features, but keep
-            # them quarantined: they can be checked against pre-overlap identity
-            # history, yet never contaminate the trusted gallery by themselves.
+            # them quarantined. They are checked against the pre-overlap identity
+            # history but are not allowed to contaminate the trusted gallery.
             if active:
-                variants = {"full": person}
-                ordered = ["full"]
                 crops = [person]
                 resnet = self.extractor.extract_batch(crops)
                 swin = self.swin.extract_batch(crops)
@@ -203,7 +199,10 @@ class BatchPipelineStateInvariantJointAttributes(BatchPipelineStateInvariantJoin
                     "frame": frame,
                     "timestamp": frame / fps,
                     "track_id": tid,
+                    "segment": seg,
                     "tracklet_key": key,
+                    "bbox": list(box),
+                    "detection_score": float(detection.confidence),
                     "overlap_feature_check": True,
                     "overlap_reid_match": bool(checked),
                     "overlap_reid_fused": float(fused),
@@ -262,9 +261,9 @@ class BatchPipelineStateInvariantJointAttributes(BatchPipelineStateInvariantJoin
                         "recovery_fused": float(fused),
                         "recovery_fail_count": self._fails[key],
                     }) + "\n")
-                    # Never create a fresh identity merely because a few first
-                    # recovery samples are weak. Keep the same key alive and keep
-                    # checking; the final resolver also has the full history.
+                    # Never create a fresh tracklet/identity because a handful
+                    # of post-overlap samples are weak. Keep checking the same
+                    # identity until a strong multimodel observation returns.
                     info["recovery_left"][key] = max(1, recovery - 1)
                     if info["recovery_left"][key] == 0:
                         info["recovery_left"][key] = self.recovery_samples
@@ -301,7 +300,8 @@ class BatchPipelineStateInvariantJointAttributes(BatchPipelineStateInvariantJoin
             with (self.cache / f"{camera}.detections.jsonl").open("r", encoding="utf-8") as handle:
                 for line in handle:
                     item = json.loads(line)
-                    rows.setdefault(int(item["frame"]), []).append(item)
+                    if "bbox" in item and "tracklet_key" in item:
+                        rows.setdefault(int(item["frame"]), []).append(item)
             frame = 0
             try:
                 while True:

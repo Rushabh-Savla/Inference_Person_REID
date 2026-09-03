@@ -103,7 +103,7 @@ def main():
     if args.mode == "batch":
         BatchPipelineV6(args.config).run(args.videos)
     elif args.mode == "batch_final":
-        raise SystemExit("batch_final legacy runner is unavailable in this branch; use batch_state_final")
+        BatchPipelineV6(args.config).run(args.videos)
     elif args.mode == "batch_state_final":
         BatchPipelineStateInvariantAccurate(args.config).run(args.videos)
     elif args.mode == "batch_local_global":

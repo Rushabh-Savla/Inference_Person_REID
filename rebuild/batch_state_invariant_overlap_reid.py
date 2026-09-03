@@ -15,6 +15,19 @@ class BatchPipelineStateInvariantOverlapReid(BatchPipelineStateInvariantAccurate
         self.post_overlap_interval = max(1, int(self.cfg.get("post_overlap_interval_frames", 1)))
         self.trajectory_history = max(8, int(self.cfg.get("trajectory_history_frames", 30)))
 
+    def _touch_track(self, key: str, frame: int, fps: float) -> None:
+        track = self.tracks.get(key)
+        history = self._trajectory.get(key)
+        if track is None or not history:
+            return
+        stamp = float(frame / fps)
+        if getattr(track, "start", None) is None:
+            track.start = stamp
+        else:
+            track.start = min(float(track.start), stamp)
+        track.end = max(float(getattr(track, "end", stamp)), stamp)
+        setattr(track, "trajectory", list(history))
+
     def _check_anchor(self, key: str):
         track = self.tracks.get(key)
         anchor = self._overlap_refs.get(key)
@@ -56,9 +69,10 @@ class BatchPipelineStateInvariantOverlapReid(BatchPipelineStateInvariantAccurate
             box = item["bbox"]
             detection = item["item"]
 
-            # ByteTrack stalking/trajectory is updated on every detector result,
-            # including the ambiguity window. Feature extraction is separate.
+            # ByteTrack stalking/trajectory is updated on every detector result.
             self._remember_position(old_key, frame, fps, box)
+            self._touch_track(old_key, frame, fps)
+
             active = old_key in blocked
             previous_active = bool(info["was_overlap"].get(tid, False))
             key = old_key
@@ -74,14 +88,14 @@ class BatchPipelineStateInvariantOverlapReid(BatchPipelineStateInvariantAccurate
                 reason = "high_overlap_start_feature_pause"
 
             elif previous_active and not active:
-                # Keep ByteTrack continuity, but create a new appearance segment.
-                # GID reassignment is decided only from the clean post-overlap
-                # observations, never from overlap state itself.
+                # Tracking never stopped. Only the ReID evidence stream is split
+                # here so the clean post-overlap body can be assigned independently.
                 info["segments"][tid] = info["segments"].get(tid, old_seg) + 1
                 self._segments[camera][tid] = info["segments"][tid]
                 seg = info["segments"][tid]
                 key = f"{camera}:{tid}:{seg}"
                 self._trajectory[key] = []
+                self._remember_position(key, frame, fps, box)
                 info["recovery_left"][key] = max(4, self.recovery_samples)
                 info["last"][key] = -10**9
                 info["last"][key + ":parts"] = -10**9
@@ -97,8 +111,6 @@ class BatchPipelineStateInvariantOverlapReid(BatchPipelineStateInvariantAccurate
                 info["post_overlap_events"] += 1
 
             info["was_overlap"][tid] = active
-            if key != old_key:
-                self._remember_position(key, frame, fps, box)
 
             rows.write(
                 json.dumps(
@@ -116,12 +128,13 @@ class BatchPipelineStateInvariantOverlapReid(BatchPipelineStateInvariantAccurate
                         "overlap_boundary": bool(boundary),
                         "segment_reason": reason,
                         "recovery_after_overlap": bool((not active) and info["recovery_left"].get(key, 0) > 0),
+                        "position_tracked_every_frame": True,
                     }
                 )
                 + "\n"
             )
 
-            # HARD RULE: severe overlap => tracking only, ZERO feature extraction.
+            # HARD RULE: severe overlap => tracking/position only, ZERO feature extraction.
             if active:
                 continue
 
@@ -134,8 +147,8 @@ class BatchPipelineStateInvariantOverlapReid(BatchPipelineStateInvariantAccurate
             if not normal_due and not recovery_due:
                 continue
 
-            # Four clean frames after overlap are sampled densely. Each sample
-            # gets full + available parts/light through all three ReID models.
+            # First four clean frames after overlap are sampled densely. Each uses
+            # full + all available body parts/light through ResNet + Swin + SOLIDER.
             ok = self._extract_one(
                 camera,
                 frame,
@@ -149,6 +162,7 @@ class BatchPipelineStateInvariantOverlapReid(BatchPipelineStateInvariantAccurate
                 rows,
                 active=False,
             )
+            self._touch_track(key, frame, fps)
 
             if recovery_due:
                 info["last"][key + ":recovery"] = frame
@@ -178,7 +192,7 @@ class BatchPipelineStateInvariantOverlapReid(BatchPipelineStateInvariantAccurate
                         info.setdefault("post_overlap_feature_checks", 0)
                         info["post_overlap_feature_checks"] += 1
 
-            self._attach_position_history(key)
+            self._touch_track(key, frame, fps)
             if recovery <= 1 and info["recovery_left"].get(key, 0) == 0:
                 self._overlap_refs.pop(key, None)
 

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 from typing import Dict
 
 import numpy as np
@@ -244,20 +245,19 @@ class BatchPipelineStateInvariantJointGuarded(BatchPipelineStateInvariantJoint):
             return None
         return arr / norm
 
-    def _recovery_ok(self, key: str, vectors: Dict[str, np.ndarray]) -> tuple[bool, Dict[str, float]]:
+    def _recovery_ok(self, key: str, vectors: Dict[str, np.ndarray]):
         refs = self._recovery_refs.get(key, {})
         scores: Dict[str, float] = {}
         for model in ("resnet", "swin", "solider"):
             query = self._unit(vectors[model])
-            bank = refs.get(model, [])
             values = []
             if query is not None:
-                for value in bank[-4:]:
+                for value in refs.get(model, [])[-4:]:
                     ref = self._unit(value)
                     if ref is not None and ref.shape == query.shape:
                         values.append(float(np.dot(query, ref)))
             scores[model] = max(values) if values else 0.0
-        support = sum(scores[model] >= self.recovery_model_min[model] for model in scores)
+        support = sum(scores[m] >= self.recovery_model_min[m] for m in scores)
         ordered = sorted(scores.values(), reverse=True)
         fused = float(np.mean(ordered[:2])) if len(ordered) >= 2 else 0.0
         return support >= self.recovery_models and fused >= self.recovery_fused, scores
@@ -268,23 +268,23 @@ class BatchPipelineStateInvariantJointGuarded(BatchPipelineStateInvariantJoint):
             refs[model].append(np.asarray(vectors[model], np.float32))
             refs[model] = refs[model][-4:]
 
-    def _extract(self, camera, frame, fps, image, prepared, blocked, partners, last, was_overlap, recovery_left, stats, rows):
+    def _extract(self, camera, frame, fps, image, prepared, blocked, partners, info, rows):
         for item in prepared:
             tid = item["tid"]
             box = item["bbox"]
             detection = item["item"]
             old_key = item["key"]
             active = old_key in blocked
-            previous_active = bool(was_overlap.get(tid, False))
+            previous_active = bool(info["was_overlap"].get(tid, False))
             key = old_key
             seg = item["seg"]
             boundary = False
             reason = "normal"
 
             if active and not previous_active:
-                stats["overlap_events"] += 1
-                stats["overlap_tids"].add(tid)
-                recovery_left[key] = 0
+                info["overlap_events"] += 1
+                info["overlap_tids"].add(tid)
+                info["recovery_left"][old_key] = 0
                 reason = "high_overlap_start"
             elif previous_active and not active:
                 old_track = self.tracks.get(old_key)
@@ -293,19 +293,20 @@ class BatchPipelineStateInvariantJointGuarded(BatchPipelineStateInvariantJoint):
                     bank = getattr(old_track, "state_bank", {})
                     for model in refs:
                         refs[model] = list(bank.get(model, {}).get("full", [])[-4:])
-                self._overlap_exit_segment(tid, camera, old_key, seg, recovery_left, last)
-                seg = self._segments[camera][tid]
+                info["segments"][tid] = info["segments"].get(tid, seg) + 1
+                self._segments[camera][tid] = info["segments"][tid]
+                seg = info["segments"][tid]
                 key = f"{camera}:{tid}:{seg}"
                 self._recovery_refs[key] = refs
-                recovery_left[key] = self.recovery_samples
-                last[key] = -10**9
+                info["recovery_left"][key] = self.recovery_samples
+                info["last"][key] = -10**9
                 boundary = True
                 reason = "high_overlap_exit_new_segment"
-                stats["overlap_tids"].discard(tid)
+                info["overlap_tids"].discard(tid)
 
-            was_overlap[tid] = active
+            info["was_overlap"][tid] = active
             partner_keys = partners.get(old_key, []) if active else []
-            rows.write(__import__("json").dumps({
+            rows.write(json.dumps({
                 "camera": camera,
                 "frame": frame,
                 "timestamp": frame / fps,
@@ -318,15 +319,15 @@ class BatchPipelineStateInvariantJointGuarded(BatchPipelineStateInvariantJoint):
                 "overlap_partners": partner_keys,
                 "overlap_boundary": bool(boundary),
                 "segment_reason": reason,
-                "recovery_after_overlap": bool((not active) and recovery_left.get(key, 0) > 0),
+                "recovery_after_overlap": bool((not active) and info["recovery_left"].get(key, 0) > 0),
             }) + "\n")
 
             if active:
                 continue
 
-            recovery = recovery_left.get(key, 0)
+            recovery = info["recovery_left"].get(key, 0)
             due = recovery > 0
-            if not due and frame - last.get(key, -10**9) < self.interval:
+            if not due and frame - info["last"].get(key, -10**9) < self.interval:
                 continue
 
             person = crop(image, box)
@@ -335,12 +336,12 @@ class BatchPipelineStateInvariantJointGuarded(BatchPipelineStateInvariantJoint):
                 continue
 
             variants: Dict[str, np.ndarray] = {"full": person}
-            if self.light and (due or frame - last.get(key + ":light", -10**9) >= self.part_interval):
+            if self.light and (due or frame - info["last"].get(key + ":light", -10**9) >= self.part_interval):
                 variants["light"] = illumination_variant(person)
-                last[key + ":light"] = frame
-            if due or frame - last.get(key + ":parts", -10**9) >= self.part_interval:
+                info["last"][key + ":light"] = frame
+            if due or frame - info["last"].get(key + ":parts", -10**9) >= self.part_interval:
                 variants.update(self.parts(person))
-                last[key + ":parts"] = frame
+                info["last"][key + ":parts"] = frame
 
             ordered = list(variants.keys())
             crops = [variants[name] for name in ordered]
@@ -363,9 +364,9 @@ class BatchPipelineStateInvariantJointGuarded(BatchPipelineStateInvariantJoint):
                 }
                 accepted, scores = self._recovery_ok(key, vectors)
                 if not accepted:
-                    stats.setdefault("recovery_rejected", 0)
-                    stats["recovery_rejected"] += 1
-                    rows.write(__import__("json").dumps({
+                    info.setdefault("recovery_rejected", 0)
+                    info["recovery_rejected"] += 1
+                    rows.write(json.dumps({
                         "camera": camera,
                         "frame": frame,
                         "timestamp": frame / fps,
@@ -379,15 +380,15 @@ class BatchPipelineStateInvariantJointGuarded(BatchPipelineStateInvariantJoint):
                         "recovery_rejected": True,
                         "recovery_scores": scores,
                     }) + "\n")
-                    recovery_left[key] = max(0, recovery - 1)
-                    if recovery_left[key] == 0:
+                    info["recovery_left"][key] = max(0, recovery - 1)
+                    if info["recovery_left"][key] == 0:
                         self._recovery_refs.pop(key, None)
                     continue
                 self._remember_recovery(key, vectors)
-                stats.setdefault("recovery_accepted", 0)
-                stats["recovery_accepted"] += 1
+                info.setdefault("recovery_accepted", 0)
+                info["recovery_accepted"] += 1
 
-            last[key] = frame
+            info["last"][key] = frame
             multi = {
                 "swin": {name: [value] for name, value in swin_map.items()},
                 "solider": {name: [value] for name, value in solider_map.items()},
@@ -404,12 +405,12 @@ class BatchPipelineStateInvariantJointGuarded(BatchPipelineStateInvariantJoint):
                 resnet_map,
                 multi,
             )
-            stats["samples"] += 1
-            stats["feature_batches"] += 1
+            info["samples"] += 1
+            info["feature_batches"] += 1
             if due:
-                stats["recovery_samples"] += 1
-                recovery_left[key] = max(0, recovery - 1)
-                if recovery_left[key] == 0:
+                info["recovery_samples"] += 1
+                info["recovery_left"][key] = max(0, recovery - 1)
+                if info["recovery_left"][key] == 0:
                     self._recovery_refs.pop(key, None)
 
     def run(self, values):

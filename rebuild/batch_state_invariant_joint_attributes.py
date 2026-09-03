@@ -22,11 +22,11 @@ class BatchPipelineStateInvariantJointAttributes(BatchPipelineStateInvariantJoin
         self.recovery_samples = max(1, int(guard.get("recovery_samples", 4)))
         recovery = self.cfg.get("recovery_guard", {}) or {}
         self.recovery_models = max(2, int(recovery.get("required_models", 2)))
-        self.recovery_fused = float(recovery.get("fused_min", 0.52))
+        self.recovery_fused = float(recovery.get("fused_min", 0.56))
         self.recovery_min = {
-            "resnet": float(recovery.get("resnet_min", 0.48)),
-            "swin": float(recovery.get("swin_min", 0.48)),
-            "solider": float(recovery.get("solider_min", 0.46)),
+            "resnet": float(recovery.get("resnet_min", 0.52)),
+            "swin": float(recovery.get("swin_min", 0.52)),
+            "solider": float(recovery.get("solider_min", 0.50)),
         }
         self.recovery_fails = max(2, int(recovery.get("fail_limit", 4)))
         self._refs: Dict[str, Dict[str, list[np.ndarray]]] = {}
@@ -69,7 +69,8 @@ class BatchPipelineStateInvariantJointAttributes(BatchPipelineStateInvariantJoin
                     ref = self._unit(value)
                     if ref is not None and ref.shape == query.shape:
                         vals.append(float(np.dot(query, ref)))
-            scores[model] = max(vals) if vals else 0.0
+            vals.sort(reverse=True)
+            scores[model] = float(np.mean(vals[: min(3, len(vals))])) if vals else 0.0
         support = sum(scores[name] >= self.recovery_min[name] for name in scores)
         ordered = sorted(scores.values(), reverse=True)
         fused = float(np.mean(ordered[:2])) if len(ordered) >= 2 else 0.0
@@ -83,18 +84,7 @@ class BatchPipelineStateInvariantJointAttributes(BatchPipelineStateInvariantJoin
 
     def add_body(self, key, camera, track_id, segment, bbox, stamp, score, image, feats, multi):
         measured = float(quality(image))
-        super().add_body(
-            key,
-            camera,
-            track_id,
-            segment,
-            bbox,
-            stamp,
-            measured,
-            image,
-            feats,
-            multi,
-        )
+        super().add_body(key, camera, track_id, segment, bbox, stamp, measured, image, feats, multi)
         track = self.tracks[key]
         bank = getattr(track, "state_bank", None)
         if bank is None:
@@ -122,6 +112,7 @@ class BatchPipelineStateInvariantJointAttributes(BatchPipelineStateInvariantJoin
                 info["overlap_tids"].add(tid)
                 info["recovery_left"][old_key] = 0
                 self._fails.pop(old_key, None)
+                self._refs.pop(old_key, None)
                 reason = "high_overlap_start"
             elif previous and not active:
                 old = self.tracks.get(old_key)
@@ -239,18 +230,7 @@ class BatchPipelineStateInvariantJointAttributes(BatchPipelineStateInvariantJoin
                 "swin": {name: [value] for name, value in swin_map.items()},
                 "solider": {name: [value] for name, value in solider_map.items()},
             }
-            self.add_body(
-                key,
-                camera,
-                tid,
-                seg,
-                box,
-                frame / fps,
-                float(detection.confidence),
-                person,
-                resnet_map,
-                multi,
-            )
+            self.add_body(key, camera, tid, seg, box, frame / fps, float(detection.confidence), person, resnet_map, multi)
             info["samples"] += 1
             info["feature_batches"] += 1
             if due:

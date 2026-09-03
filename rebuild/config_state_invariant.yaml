@@ -71,6 +71,12 @@ identity_v6:
 tracking:
   fragment_gap_sec: 2.0
 
+overlap_guard:
+  enabled: true
+  iou_min: 0.05
+  intersection_min: 0.20
+  recovery_samples: 2
+
 input:
   videos: []
   output_dir: rebuild_outputs_state_invariant

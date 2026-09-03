@@ -6,7 +6,7 @@ from typing import Dict
 import numpy as np
 
 from rebuild.batch_state_invariant_joint import BatchPipelineStateInvariantJoint
-from rebuild.identity_body_v6 import HighConfidenceIdentityBodyV6
+from rebuild.batch_state_invariant_joint_guarded import HighConfidenceIdentityBodyV6
 from rebuild.identity_v2 import crop, illumination_variant, quality
 from rebuild.person_attributes import pack
 
@@ -31,6 +31,7 @@ class BatchPipelineStateInvariantJointAttributes(BatchPipelineStateInvariantJoin
         self.recovery_fails = max(2, int(recovery.get("fail_limit", 4)))
         self._refs: Dict[str, Dict[str, list[np.ndarray]]] = {}
         self._fails: Dict[str, int] = {}
+        self._frame_image = None
 
     def _overlaps(self, items):
         blocked: set[str] = set()
@@ -232,12 +233,12 @@ class BatchPipelineStateInvariantJointAttributes(BatchPipelineStateInvariantJoin
                 info.setdefault("recovery_accepted", 0)
                 info["recovery_accepted"] += 1
 
+            self._frame_image = image
             info["last"][key] = frame
             multi = {
                 "swin": {name: [value] for name, value in swin_map.items()},
                 "solider": {name: [value] for name, value in solider_map.items()},
             }
-            self._frame_image = image
             self.add_body(
                 key,
                 camera,

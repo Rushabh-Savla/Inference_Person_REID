@@ -1,0 +1,43 @@
+detector:
+  model: weights/yolo11m.pt
+  conf: 0.35
+  iou: 0.60
+  tracker: bytetrack.yaml
+
+reid:
+  model: nvidia_reidentificationnet
+  weights: weights/reid/resnet50_market1501_aicity156.onnx
+  device: cuda
+  max_batch: 32
+  interval: 5
+  part_interval: 15
+  illumination_variant: true
+  min_quality: 0.20
+
+identity_v6:
+  # Body-only persistent identity association. Face is intentionally disabled.
+  match_threshold: 0.60
+  match_margin: 0.035
+  strong_threshold: 0.72
+  support_required: 2
+  accumulated_body: 0.56
+  accumulated_support: 3
+  partial_threshold: 0.58
+  partial_support: 2
+  gallery: 32
+  candidate_gallery: 12
+  promote_quality: 0.68
+  novelty: 0.985
+  same_camera_gap_sec: 15.0
+  same_camera_distance: 5.0
+  same_camera_min_continuity: 0.35
+  merge_body: 0.82
+  merge_support: 3
+  seed_count: 3
+
+tracking:
+  fragment_gap_sec: 2.0
+
+input:
+  videos: []
+  output_dir: rebuild_outputs

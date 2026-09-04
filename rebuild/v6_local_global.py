@@ -227,8 +227,9 @@ class LocalGlobalResolver:
         node_keys = sorted(nodes)
         node_camera = {key: nodes[key].camera for key in node_keys}
         edges: List[dict] = []
-        for i, ca in enumerate(sorted(cameras)):
-            for cb in sorted(cameras)[i + 1:]:
+        sorted_cameras = sorted(cameras)
+        for i, ca in enumerate(sorted_cameras):
+            for cb in sorted_cameras[i + 1:]:
                 left = [nodes[k] for k in node_keys if nodes[k].camera == ca]
                 right = [nodes[k] for k in node_keys if nodes[k].camera == cb]
                 edges.extend(self._pair_camera_nodes(left, right))

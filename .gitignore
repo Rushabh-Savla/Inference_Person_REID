@@ -1,0 +1,91 @@
+# ------------------------
+# Python
+# ------------------------
+__pycache__/
+*.py[cod]
+*.so
+
+# ------------------------
+# Virtual environments
+# ------------------------
+venv/
+.env
+
+# ------------------------
+# IDE
+# ------------------------
+.vscode/
+.idea/
+
+# ------------------------
+# Logs
+# ------------------------
+logs/
+*.log
+*.pid
+
+# ------------------------
+# Videos
+# ------------------------
+*.mp4
+*.avi
+*.mov
+*.mkv
+
+# ------------------------
+# Model weights
+# ------------------------
+*.pt
+*.pth
+*.onnx
+*.engine
+
+# ------------------------
+# Runtime data
+# ------------------------
+qdrant_storage/
+identity_state/
+clips_*/
+clips_/
+
+# ------------------------
+# macOS metadata
+# ------------------------
+.DS_Store
+._*
+
+# ------------------------
+# Python cache
+# ------------------------
+.pytest_cache/
+.mypy_cache/
+
+# ------------------------
+# Misc
+# ------------------------
+*.tmp
+*.cache
+
+# ------------------------
+# Generated outputs
+# ------------------------
+experiments/videos/
+experiments/clips/
+experiments/archive/
+
+# Runtime reports
+logs/runtime/
+
+# Test artifacts
+sheets/
+
+# Calibration outputs (keep only if generated)
+# calibration/
+
+# Misc
+run.pid
+
+rebuild_outputs_state_invariant/
+docs/
+
+weights/

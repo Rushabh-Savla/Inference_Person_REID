@@ -1,0 +1,36 @@
+# Runtime dependencies for the multi-camera person ReID pipeline.
+# Install: python -m pip install -r requirements.txt
+
+# --- Detection + tracking -------------------------------------------------
+ultralytics==8.4.89
+
+# --- ReID models -----------------------------------------------------------
+torch==2.12.1
+torchvision==0.27.1
+torchreid==0.2.5
+
+# FastReID is vendored under src/reid/vendor/fastreid/.
+
+scipy==1.15.3
+gdown==5.2.2
+tensorboard==2.21.0
+
+# --- CUDA ONNX Runtime -----------------------------------------------------
+# Do NOT add plain `onnxruntime` here. Both NVIDIA ReID models and SOLIDER
+# require CUDAExecutionProvider in this final runtime.
+onnxruntime-gpu==1.28.0
+
+# --- Tracking --------------------------------------------------------------
+lap==0.5.13
+
+# --- Vector store ----------------------------------------------------------
+qdrant-client==1.18.0
+
+# --- Core numerics / IO ----------------------------------------------------
+numpy==2.2.6
+opencv-python==5.0.0.93
+PyYAML==6.0.3
+
+# InsightFace is intentionally not installed in the state-final runtime:
+# FACE is OFF, and insightface declares CPU-only `onnxruntime`, which can
+# replace the CUDA runtime package during dependency resolution.

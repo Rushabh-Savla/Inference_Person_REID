@@ -1,0 +1,110 @@
+detector:
+  model: weights/yolo11m.pt
+  conf: 0.55
+  iou: 0.60
+  tracker: bytetrack.yaml
+
+reid:
+  model: nvidia_reidentificationnet
+  weights: weights/reid/resnet50_market1501_aicity156.onnx
+  device: cuda
+  max_batch: 32
+  interval: 2
+  part_interval: 4
+  illumination_variant: true
+  min_quality: 0.20
+
+cross_camera_models:
+  swin_weights: weights/reid/nvidia_swin_base_1024/export_55/swin_base_market1501_aicity156_featuredim1024.onnx
+  solider_weights: weights/solider_swin_base_msmt17.onnx
+  swin_batch: 16
+  solider_batch: 16
+
+identity_state:
+  path: identity_state/reid_state_invariant_v4.sqlite3
+  model_id: final-state-invariant-v4
+  bank_size: 96
+
+identity_v6:
+  match_threshold: 0.60
+  match_margin: 0.035
+  strong_threshold: 0.72
+  support_required: 2
+  accumulated_body: 0.56
+  accumulated_support: 3
+  partial_threshold: 0.58
+  partial_support: 2
+  gallery: 64
+  candidate_gallery: 24
+  promote_quality: 0.68
+  novelty: 0.985
+  same_camera_gap_sec: 15.0
+  same_camera_distance: 5.0
+  same_camera_min_continuity: 0.35
+  merge_body: 0.82
+  merge_support: 3
+  seed_count: 3
+
+  state_cross_fused_min: 0.50
+  state_cross_partial_fused_min: 0.47
+  state_cross_strong: 0.80
+  state_cross_margin: 0.0
+  state_cross_partial_margin: 0.0
+  state_cross_resnet_min: 0.44
+  state_cross_swin_min: 0.44
+  state_cross_solider_min: 0.42
+  state_cross_required_models: 2
+  state_cross_required_mutual_models: 0
+  state_cross_required_views: 1
+  state_cross_max_gap_sec: 30.0
+
+  state_same_fused_min: 0.48
+  state_same_model_min: 0.42
+  state_same_margin: 0.0
+  state_same_max_gap_sec: 30.0
+  state_same_camera_continuity_min: 0.22
+  state_same_chain_min: 0.53
+  state_same_chain_support: 2
+  state_same_chain_continuity_min: 0.28
+  state_same_trajectory_min: 0.35
+
+  state_gallery_match_min: 0.62
+  state_gallery_margin: 0.02
+  camera_time_offsets_sec: {}
+
+  attribute_color_min: 0.84
+  attribute_pattern_min: 0.64
+  attribute_detail_min: 0.72
+
+tracking:
+  fragment_gap_sec: 2.0
+
+# Severe physical overlap only. 80% IoU / 85% intersection-over-min-area
+# avoids treating ordinary near-crossing as an identity ambiguity.
+overlap_guard:
+  enabled: true
+  iou_min: 0.80
+  intersection_min: 0.85
+  recovery_samples: 4
+
+recovery_guard:
+  enabled: true
+  required_models: 2
+  fused_min: 0.56
+  resnet_min: 0.52
+  swin_min: 0.52
+  solider_min: 0.50
+  relaxed_fused_min: 0.50
+  relaxed_resnet_min: 0.48
+  relaxed_swin_min: 0.48
+  relaxed_solider_min: 0.46
+  fail_limit: 4
+
+# After overlap clears, run dense all-model ReID for four clean frames.
+# Tracking position is recorded every detector/tracker observation.
+post_overlap_interval_frames: 1
+trajectory_history_frames: 30
+
+input:
+  videos: []
+  output_dir: rebuild_outputs_state_invariant

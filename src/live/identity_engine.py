@@ -1,0 +1,518 @@
+"""
+identity_engine.py  --  Stage 3: the full in-memory identity engine.
+
+This is the FRESH live active-set engine that turns per-frame
+appearance embeddings into stable reids WITHOUT Qdrant and WITHOUT the offline
+reconcile the file path uses. It ports the PROVEN decision policies from the
+tuned file system (`identity/service.py::_assign_online` / `_two_lane_match` /
+`_reciprocal_best_ok` and `reconcile.py`) -- fresh implementation, same logic --
+so the online path *approximates* (never equals) offline quality.
+
+Two objects, deliberately thread-free and deterministic so they can be
+logic-tested on synthetic embeddings with no GPU/video/threads:
+
+  * ActiveIdentitySet  -- the in-memory gallery: per-identity exemplar bank
+    (prototype mean + medoid-style best exemplar), per-camera time spans, and
+    last-seen bookkeeping, with TTL + LRU eviction to bound memory.
+  * IdentityEngine     -- the per-observation decision core: evidence gate ->
+    two-lane match (same-camera cold-reactivation lane, then cross-camera
+    reciprocal-best lane with a pluggable topology veto) -> mint-when-uncertain.
+
+Ported invariants (false-merge-conservative):
+  * A new track shows a PROVISIONAL (negative) id and commits to nothing until it
+    has `min_evidence_obs` good views -- match-or-mint runs on the AGGREGATE.
+  * Same-camera time-overlap is a HARD veto (one body can't be two tracks at once).
+  * Same-camera lane re-acquires a dropped track at a strict threshold (cold
+    reactivation). Cross-camera lane links a person across cams only past a
+    lower threshold AND a runner-up margin AND reciprocal-best AND topology.
+  * When uncertain -> MINT (never guess a merge that no reconcile can undo).
+
+Timestamps are the frame's wall-clock `ts` (frame.py's single clock); spans,
+TTLs and topology all reason in seconds, which is what makes cross-camera
+temporal logic comparable across cameras (frame indices are per-camera and
+frames get dropped, so they are NOT comparable in the live path).
+"""
+
+import collections
+
+import numpy as np
+
+from identity.verifier import bbox_quality_scalar     # proven crop-quality scalar
+from live.topology import FailOpenTopology
+
+
+def _unit(vec):
+    """L2-normalize a vector; return None if degenerate (zero / non-finite)."""
+    v = np.asarray(vec, dtype=np.float32).ravel()
+    n = np.linalg.norm(v)
+    if not np.isfinite(n) or n <= 0:
+        return None
+    return v / n
+
+
+# Score histogram bins for tuning thresholds from REAL data (not guesses):
+# index of a cosine score in [<.5, .5-.6, .6-.7, .7-.8, .8-.9, >=.9].
+HIST_LABELS = ["<.5", ".5-.6", ".6-.7", ".7-.8", ".8-.9", ".9+"]
+
+
+def _bin6(s):
+    if s < 0.5:
+        return 0
+    if s >= 0.9:
+        return 5
+    return int(s * 10) - 4      # 0.5->1, 0.6->2, 0.7->3, 0.8->4
+
+
+class ActiveIdentitySet:
+    """In-memory gallery of live identities (prototypes/medoids).
+
+    Per gid we keep a bounded bank of recent UNIT exemplar embeddings. Scoring a
+    query blends the prototype (bank mean) with the strongest single exemplar
+    (medoid-style) -- ported verbatim from service.py::_bank_score, which is more
+    robust than a mean alone when a person flips front/back or pose-shifts.
+    Per-camera time spans back the same-camera overlap veto and lane routing.
+    """
+
+    def __init__(self, bank_size=20):
+        self.bank_size = max(1, int(bank_size))
+        self._banks = {}       # gid -> deque[unit np.ndarray] (maxlen bank_size)
+        self._spans = {}       # gid -> {cam: [[t0, t1], ...]} wall-clock seconds
+        self._obs = {}         # gid -> int observation count
+        self._last_ts = {}     # gid -> float last time seen (any camera)
+        self._last_cam = {}    # gid -> str camera of the most recent observation
+
+    # ---- membership / read ------------------------------------------------
+    def gids(self):
+        return list(self._banks.keys())
+
+    def has(self, gid):
+        return gid in self._banks
+
+    def cameras(self, gid):
+        return set(self._spans.get(gid, {}).keys())
+
+    def obs_count(self, gid):
+        return self._obs.get(gid, 0)
+
+    def last_seen(self, gid):
+        """(camera, ts) of this identity's most recent observation, or None."""
+        if gid not in self._last_ts:
+            return None
+        return self._last_cam.get(gid), self._last_ts[gid]
+
+    # ---- write ------------------------------------------------------------
+    def add_observation(self, gid, cam, unit_emb, ts, ts_start=None):
+        """Record one UNIT embedding + its (cam, ts) against `gid`, extending the
+        camera span over [ts_start or ts, ts]. `unit_emb` must already be
+        L2-normalized (or None to only extend the span/bookkeeping without a bank
+        entry). `ts_start` lets a track that just crossed the evidence gate open
+        its span back at its FIRST observation, so the overlap veto also covers
+        the provisional window (a co-present second body is still vetoed)."""
+        if gid not in self._banks:
+            self._banks[gid] = collections.deque(maxlen=self.bank_size)
+            self._spans[gid] = {}
+            self._obs[gid] = 0
+        if unit_emb is not None:
+            self._banks[gid].append(np.asarray(unit_emb, dtype=np.float32))
+        self._obs[gid] += 1
+        self._last_ts[gid] = ts
+        self._last_cam[gid] = cam
+        self._record_span(gid, cam, ts if ts_start is None else ts_start, ts)
+
+    def _record_span(self, gid, cam, t0, t1):
+        spans = self._spans[gid].setdefault(cam, [])
+        # A start within 1s of the last span end is treated as the same continuous
+        # visit (mirrors the file path's +1 frame tolerance) so a handoff between
+        # two track ids in one camera stays one span rather than fragmenting.
+        if spans and t0 <= spans[-1][1] + 1.0:
+            spans[-1][1] = max(spans[-1][1], t1)
+        else:
+            spans.append([t0, t1])
+
+    def extend_span(self, gid, cam, ts):
+        """Extend the current camera span to `ts` without adding a bank entry
+        (an already-assigned track seen again with no fresh embedding)."""
+        if gid in self._spans:
+            self._record_span(gid, cam, ts, ts)
+            self._last_ts[gid] = ts
+            self._last_cam[gid] = cam
+
+    # ---- scoring (prototype + medoid-style exemplar) ----------------------
+    def score(self, gid, unit_query):
+        """max(prototype-mean score, strongest-exemplar score). Ported from
+        service.py::_bank_score. `unit_query` must be L2-normalized. None if the
+        bank is empty."""
+        bank = self._banks.get(gid)
+        if not bank:
+            return None
+        vecs = np.stack(list(bank)).astype(np.float32)     # already unit vectors
+        q = np.asarray(unit_query, dtype=np.float32).ravel()
+        proto = np.mean(vecs, axis=0)
+        pn = np.linalg.norm(proto)
+        proto_score = float((proto / pn) @ q) if pn > 0 else None
+        exemplar_score = float(np.max(vecs @ q))            # medoid-style nearest
+        if proto_score is None:
+            return exemplar_score
+        return max(proto_score, exemplar_score)
+
+    def prototype(self, gid):
+        """L2-normalized bank mean (this identity's representative vector)."""
+        bank = self._banks.get(gid)
+        if not bank:
+            return None
+        return _unit(np.mean(np.stack(list(bank)), axis=0))
+
+    # ---- physical veto ----------------------------------------------------
+    def same_camera_overlap(self, gid, cam, ts):
+        """True if `gid` already has a span in `cam` that STRICTLY contains `ts`
+        -- it is co-present here via another track, so it cannot also be this new
+        track (two bodies). Boundary touches are allowed so a track-id handoff
+        can reuse the identity."""
+        for (t0, t1) in self._spans.get(gid, {}).get(cam, []):
+            if t0 < ts < t1:
+                return True
+        return False
+
+    # ---- eviction (bound memory) --------------------
+    def sweep(self, now, ttl_sec, max_active):
+        """Evict identities unseen for `ttl_sec` seconds, then LRU-cap the set at
+        `max_active`. Returns the number evicted. TTL is generous by design: an
+        identity must survive a person's absence for cold reactivation to work,
+        so eviction only bounds memory, it is not part of the match logic."""
+        evicted = 0
+        if ttl_sec and ttl_sec > 0:
+            stale = [g for g, t in self._last_ts.items() if (now - t) > ttl_sec]
+            for g in stale:
+                self._drop(g)
+                evicted += 1
+        if max_active and len(self._banks) > max_active:
+            # drop the least-recently-seen down to the cap
+            order = sorted(self._last_ts.items(), key=lambda kv: kv[1])
+            for g, _ in order[:len(self._banks) - int(max_active)]:
+                self._drop(g)
+                evicted += 1
+        return evicted
+
+    def _drop(self, gid):
+        self._banks.pop(gid, None)
+        self._spans.pop(gid, None)
+        self._obs.pop(gid, None)
+        self._last_ts.pop(gid, None)
+        self._last_cam.pop(gid, None)
+
+
+class IdentityEngine:
+    """Per-observation decision core (thread-free, deterministic).
+
+    Call `assign(cam, track_id, embedding, crop_quality, ts, has_fresh_emb)` once
+    per detection per frame; it returns the reid to display now (a NEGATIVE
+    provisional id while gathering evidence, a POSITIVE stable gid once resolved).
+    """
+
+    def __init__(self, min_evidence_obs=3, same_camera_threshold=0.90,
+                 cross_camera_threshold=0.63, accept_margin=0.03,
+                 bank_size=20, active_ttl_sec=300.0, max_active_identities=200,
+                 topology=None, coactive_window_sec=2.0):
+        self.min_obs = max(1, int(min_evidence_obs))
+        self.same_thr = float(same_camera_threshold)
+        self.cross_thr = float(cross_camera_threshold)
+        self.margin = float(accept_margin)
+        self.active_ttl_sec = float(active_ttl_sec)
+        self.max_active = int(max_active_identities)
+        self.topology = topology or FailOpenTopology()
+        # A gid seen via another assigned track in the same camera within this
+        # many seconds is treated as CO-PRESENT (on screen now) -> hard veto.
+        self.coactive_window = float(coactive_window_sec)
+
+        self.store = ActiveIdentitySet(bank_size=bank_size)
+        self._tracks = {}          # (cam, track_id) -> track state dict
+        self._next_gid = 1
+        self._next_prov = -1
+        # counters (surfaced by the stage for metrics)
+        self.minted = 0
+        self.reacquired = 0        # same-camera cold reactivations
+        self.linked = 0            # cross-camera links
+        # cross-camera diagnostics: why links do / don't happen
+        self.xcam_attempts = 0     # resolves that had >=1 cross-camera candidate
+        self.xcam_rej_threshold = 0
+        self.xcam_rej_margin = 0
+        self.xcam_rej_reciprocal = 0
+        self.xcam_rej_topology = 0         # (kept for stats compat; topology now prunes
+                                           #  candidates during gathering, see below)
+        self.topology_pruned = 0           # candidates removed as physically unreachable
+        self.xcam_max_subthreshold = 0.0   # highest score rejected for < cross_thr
+        # same-camera reacquisition diagnostics: fragmentation signal
+        self.recam_attempts = 0    # resolves with a same-camera reacquire candidate
+        self.recam_rej_below = 0   # rejected for scoring < same_camera_threshold -> mint
+        self.recam_max_rej = 0.0   # highest score rejected below same_camera_threshold
+        self.coactive_vetoes = 0   # co-present false-merges prevented (same cam, live now)
+        # best-candidate score histograms (all attempts) for data-driven threshold
+        # tuning -- see HIST_LABELS. recam = same-camera reacquire, xcam = cross-camera.
+        self.recam_hist = [0] * 6
+        self.xcam_hist = [0] * 6
+        # Score behind the gid that _match just returned, read by _resolve. It is
+        # a hand-off between two calls in the same stack, NOT state -- _match
+        # clears it on entry so a mint can never inherit a previous match's score.
+        self._last_match_score = None
+
+    # ---- public API -------------------------------------------------------
+    def assign(self, cam, track_id, embedding, crop_quality, ts, has_fresh_emb):
+        """Resolve one detection to a reid. Sticky once assigned."""
+        key = (cam, track_id)
+        st = self._tracks.get(key)
+        if st is None:
+            st = {"gid": self._mint_provisional(), "status": "provisional",
+                  "sum": None, "w": 0.0, "obs": 0, "first_ts": ts, "last_ts": ts,
+                  "score": None}
+            self._tracks[key] = st
+        st["last_ts"] = ts
+
+        if not has_fresh_emb or embedding is None:
+            # No new evidence this frame -> keep the current (sticky) id and, if
+            # already assigned, extend its active-camera window so the overlap
+            # veto stays correct while the person is still on screen.
+            if st["status"] == "assigned":
+                self.store.extend_span(st["gid"], cam, ts)
+            return st["gid"]
+
+        unit = _unit(embedding)
+        if unit is None:
+            # Degenerate embedding (zero / non-finite): it contributes NO evidence,
+            # so it must not advance the evidence gate either. Counting it used to
+            # let a track cross min_evidence_obs on fewer real observations, which
+            # resolves identity off a thinner aggregate -- and a thin aggregate is
+            # exactly what loses the match and mints a duplicate id.
+            #
+            # An ASSIGNED track still extends its camera span (same as the
+            # no-fresh-evidence branch above): the person IS on screen, and the
+            # co-presence veto depends on that window staying current even when
+            # this particular crop produced nothing usable.
+            if st["status"] == "assigned":
+                self.store.extend_span(st["gid"], cam, ts)
+            return st["gid"]
+
+        w = max(bbox_quality_scalar(crop_quality), 0.05)   # floor: never zero
+        st["sum"] = (unit * w) if st["sum"] is None else (st["sum"] + unit * w)
+        st["w"] += w
+        st["obs"] += 1
+
+        if st["status"] == "provisional":
+            if st["obs"] >= self.min_obs:
+                self._resolve(cam, st, ts, key)
+        else:                                   # assigned -> reinforce, stay sticky
+            self._reinforce(cam, st, unit, ts)
+        return st["gid"]
+
+    def score_for(self, cam, track_id):
+        """The IDENTITY match score (cosine) behind this track's current reid, or
+        None if it hasn't matched anything yet (still provisional, or freshly
+        minted). Read-only accessor so the overlay can show identity confidence
+        WITHOUT changing assign()'s `-> gid` contract, which reconcile, the
+        offline path and the live tests all depend on.
+        """
+        st = self._tracks.get((cam, track_id))
+        return st.get("score") if st is not None else None
+
+    def sweep(self, now):
+        """Evict cold identities + stale track state (call periodically)."""
+        self.store.sweep(now, self.active_ttl_sec, self.max_active)
+        if self.active_ttl_sec and self.active_ttl_sec > 0:
+            stale = [k for k, s in self._tracks.items()
+                     if (now - s["last_ts"]) > self.active_ttl_sec]
+            for k in stale:
+                del self._tracks[k]
+
+    # ---- aggregate / resolve / reinforce ----------------------------------
+    def _aggregate(self, st):
+        if st["sum"] is None or st["w"] <= 0:
+            return None
+        return _unit(st["sum"] / st["w"])
+
+    def _resolve(self, cam, st, ts, key):
+        """Evidence gate reached: match-or-mint on the quality-weighted aggregate,
+        then seed the active set with this track's evidence + span."""
+        agg = self._aggregate(st)
+        if agg is None:
+            st["obs"] = self.min_obs - 1        # degenerate; wait for more
+            return
+        gid = self._match(cam, agg, ts, key)
+        if gid is None:
+            gid = self._mint()
+        st["gid"] = gid
+        st["status"] = "assigned"
+        # Score behind this resolution, for the overlay. A mint matched nothing,
+        # so _match left it None -- which the label renders as "new", not "0.00".
+        st["score"] = self._last_match_score
+        # Open the span back at the track's first observation so the overlap veto
+        # covers the whole time it has been on screen, not just from resolve on.
+        self.store.add_observation(gid, cam, agg, ts, ts_start=st["first_ts"])
+
+    def _reinforce(self, cam, st, unit, ts):
+        """An assigned track keeps its id (sticky) but feeds the identity's bank +
+        span with fresh evidence so the prototype/medoid stays current."""
+        # Refresh the overlay score FIRST: scoring this crop against the identity
+        # AFTER add_observation would compare the crop to a bank that now contains
+        # it, and store.score()'s medoid term would return ~1.0 every frame. This
+        # is read-only w.r.t. the decision -- the id stays sticky either way.
+        if unit is not None:
+            s = self.store.score(st["gid"], unit)
+            if s is not None:
+                st["score"] = s
+        self.store.add_observation(st["gid"], cam, unit, ts)
+
+    # ---- matching (two-lane, false-merge-conservative) --------------------
+    def _match(self, cam, agg, ts, exclude_key):
+        """Return a gid to reuse, or None to mint. Mirrors the proven
+        service.py::_two_lane_match on the in-memory active set.
+
+        Order matters: the SAME-camera reactivation lane is tried FIRST (a
+        dropped track re-entering its own camera is the common case and gets a
+        strict threshold), then the CROSS-camera lane (lower threshold, but
+        guarded by a runner-up margin + reciprocal-best + topology). Uncertain ->
+        None (mint). The same-camera co-presence HARD veto is applied while
+        gathering candidates, so an identity on screen NOW via another track (or
+        historically overlapping) is never a candidate -- one body can't be two.
+        """
+        self._last_match_score = None      # cleared per attempt (see __init__)
+        scored = {}
+        for gid in self.store.gids():
+            if self._gid_coactive(gid, cam, ts, exclude_key):
+                continue                      # on screen NOW via another track here
+            if self.store.same_camera_overlap(gid, cam, ts):
+                continue                      # historical time-overlap in this camera
+            if not self._topology_ok(gid, cam, ts):
+                self.topology_pruned += 1     # physically can't have reached here yet
+                continue                      # -> removes impossible COMPETITORS, so the
+                                              #    reachable true match can win the margin
+            s = self.store.score(gid, agg)
+            if s is not None:
+                scored[gid] = s
+        if not scored:
+            return None
+
+        # --- SAME-CAMERA lane: cold reactivation of a dropped-then-reacquired
+        # track (its prior span in this camera is time-disjoint -- it passed the
+        # overlap veto above). Strict threshold; no cross-camera margin needed.
+        same_cam = [g for g in scored if cam in self.store.cameras(g)]
+        if same_cam:
+            best = max(same_cam, key=lambda g: scored[g])
+            self.recam_attempts += 1
+            self.recam_hist[_bin6(scored[best])] += 1
+            if scored[best] >= self.same_thr:
+                self.reacquired += 1
+                self._last_match_score = scored[best]
+                return best
+            # Failed the strict same-camera bar -> this track will (usually) mint a
+            # new id = identity fragmentation. Track how far below we landed so we
+            # can see whether same_camera_threshold is too strict for this footage.
+            self.recam_rej_below += 1
+            self.recam_max_rej = max(self.recam_max_rej, scored[best])
+
+        # --- CROSS-CAMERA lane: link the same person across cameras. Lower
+        # threshold than same-camera, but a merge only survives if it clears
+        # cross_thr, BEATS the runner-up by `margin` (no ambiguous crowd),
+        # is RECIPROCAL-best (we are the candidate's best partner too), and the
+        # topology veto ALLOWS the transition. Any failure -> mint (conservative).
+        cross_cam = [g for g in scored if any(cc != cam for cc in self.store.cameras(g))]
+        if cross_cam:
+            ranked = sorted(cross_cam, key=lambda g: scored[g], reverse=True)
+            best = ranked[0]
+            best_s = scored[best]
+            runner = scored[ranked[1]] if len(ranked) > 1 else -1.0
+            # Same accept rule as before (ALL four gates must pass); the sequential
+            # form just attributes the FIRST failing gate to a counter, so the
+            # metrics summary can tell us WHY cross-camera linking isn't happening
+            # (topology veto vs threshold-too-high vs ambiguous vs look-alike).
+            self.xcam_attempts += 1
+            self.xcam_hist[_bin6(best_s)] += 1
+            if best_s < self.cross_thr:
+                self.xcam_rej_threshold += 1
+                self.xcam_max_subthreshold = max(self.xcam_max_subthreshold, best_s)
+            elif (best_s - runner) < self.margin:
+                self.xcam_rej_margin += 1
+            elif not self._reciprocal_best_ok(best, agg, cam, ts, best_s):
+                self.xcam_rej_reciprocal += 1
+            else:
+                # topology is already enforced during candidate gathering (impossible
+                # candidates are pruned before they can compete), so anything reaching
+                # here is physically reachable.
+                self.linked += 1
+                self._last_match_score = best_s
+                return best
+
+        return None
+
+    def _gid_coactive(self, gid, cam, ts, exclude_key):
+        """HARD co-presence veto that does NOT depend on span-bracket timing:
+        True if `gid` is on screen in `cam` RIGHT NOW via another assigned track
+        seen within `coactive_window` seconds. One body cannot be two live tracks
+        at once, so a resolving track must never take a gid another co-present
+        track already holds. This is the fix for two co-present people being
+        merged into one reid: the old span check (t0 < ts < t1) silently missed
+        it whenever the other track's span lagged the resolving track's timestamp
+        (which happens constantly under frame drops / interleaved processing)."""
+        for key, s in self._tracks.items():
+            if key == exclude_key or key[0] != cam:
+                continue
+            if (s["status"] == "assigned" and s["gid"] == gid
+                    and abs(ts - s["last_ts"]) <= self.coactive_window):
+                self.coactive_vetoes += 1
+                return True
+        return False
+
+    def _reciprocal_best_ok(self, gid_star, agg, cam, ts, our_score):
+        """Reciprocal-best guard: confirm no other active identity is a better
+        partner for gid_star than we are. Stops one track absorbing a look-alike
+        crowd when scores are compressed. Fail-safe: nothing to compare -> allow.
+
+        BOTH sides must be measured against the SAME reference bank, or the
+        comparison is not a comparison. `our_score` is store.score(gid_star, agg)
+        -- gid_star's bank queried with our aggregate. So the competitors are
+        scored the same way, store.score(gid_star, other_prototype), rather than
+        the other way round (scoring the OTHER identity's bank with gid_star's
+        prototype, which is what this did before). That older form compared two
+        different quantities built from different exemplar sets, and because a
+        prototype averaged over ~20 observations is denoised while our aggregate
+        is a mean of `min_evidence_obs` noisy crops, it was systematically biased
+        AGAINST accepting -- it rejected real links for being new rather than for
+        being wrong.
+
+        A residual bias remains and is unavoidable: our aggregate has genuinely
+        less evidence behind it than an established prototype. That is a reason to
+        watch the xcam rejection counters, not to add a fudge constant here.
+
+        `agg` is unused (kept so the signature mirrors service.py's version).
+        """
+        best_other = -1.0
+        for gid in self.store.gids():
+            if gid == gid_star or self.store.same_camera_overlap(gid, cam, ts):
+                continue
+            other_proto = self.store.prototype(gid)
+            if other_proto is None:
+                continue
+            s = self.store.score(gid_star, other_proto)
+            if s is not None:
+                best_other = max(best_other, s)
+        return our_score >= best_other
+
+    def _topology_ok(self, gid, cam, ts):
+        """Cross-camera transition veto (pluggable; fail-open by default). Asks
+        the topology model whether a person last seen in gid's most-recent camera
+        at that time could plausibly be here now. FailOpenTopology allows all."""
+        ls = self.store.last_seen(gid)
+        if ls is None:
+            return True
+        src_cam, src_ts = ls
+        return self.topology.allowed(src_cam, cam, src_ts, ts)
+
+    # ---- id minting -------------------------------------------------------
+    def _mint(self):
+        gid = self._next_gid
+        self._next_gid += 1
+        self.minted += 1
+        return gid
+
+    def _mint_provisional(self):
+        pid = self._next_prov
+        self._next_prov -= 1
+        return pid

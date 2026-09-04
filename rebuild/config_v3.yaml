@@ -1,0 +1,34 @@
+detector:
+  model: weights/yolo11m.pt
+  conf: 0.35
+  iou: 0.60
+  tracker: bytetrack.yaml
+
+reid:
+  model: fastreid_sbs_R101_ibn
+  weights: src/reid/weights/msmt_sbs_R101-ibn.pth
+  device: auto
+  max_batch: 32
+  interval: 5
+  part_interval: 15
+  illumination_variant: true
+  min_quality: 0.20
+
+identity_v3:
+  match_threshold: 0.61
+  match_margin: 0.035
+  strong_threshold: 0.74
+  support: 2
+  gallery: 24
+  track_bank: 24
+  crop_bank: 8
+  novelty: 0.985
+  promote_quality: 0.70
+  new_count: 3
+
+tracking:
+  fragment_gap_sec: 2.0
+
+input:
+  videos: []
+  output_dir: rebuild_outputs

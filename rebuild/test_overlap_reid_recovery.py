@@ -124,10 +124,13 @@ def test_face_is_ignored_when_visibility_is_below_gate():
     face = {"vector": unit(0, 16), "quality": 0.90, "visibility": 0.40, "valid": False}
     left = group("a", "cam_213", 0, 10, person, attr=attrs(0, 2), face=[face])
     right = group("b", "cam_224", 12, 22, person, attr=attrs(0, 2), face=[face])
-    evidence = resolver.pair(left, right, [left], [right])
+    evidence_no_face = resolver.pair(left, right, [left], [right])
+    clean_left = group("c", "cam_213", 0, 10, person, attr=attrs(0, 2))
+    clean_right = group("d", "cam_224", 12, 22, person, attr=attrs(0, 2))
+    evidence_clean = resolver.pair(clean_left, clean_right, [clean_left], [clean_right])
     meta = resolver._meta[tuple(sorted((left.key, right.key)))]
     assert not meta["face"]["valid"]
-    assert evidence.fused < 0.99
+    assert abs(evidence_no_face.fused - evidence_clean.fused) < 1e-6
 
 
 def test_face_visibility_proxy_distinguishes_full_and_partial_landmarks():

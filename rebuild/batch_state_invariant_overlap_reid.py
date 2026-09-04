@@ -96,13 +96,11 @@ class BatchPipelineStateInvariantOverlapReid(BatchPipelineStateInvariantAccurate
                 left = items[i]
                 right = items[j]
                 metrics = bbox_overlap_metrics(left["bbox"], right["bbox"])
-                a = left["key"]
-                b = right["key"]
+                a, b = left["key"], right["key"]
                 self._pair_metrics[tuple(sorted((a, b)))] = dict(metrics)
                 if not is_severe_overlap(metrics, self.overlap_iou, self.overlap_intersection):
                     continue
-                blocked.add(a)
-                blocked.add(b)
+                blocked.add(a); blocked.add(b)
                 partners.setdefault(a, []).append(b)
                 partners.setdefault(b, []).append(a)
         return blocked, partners
@@ -110,7 +108,7 @@ class BatchPipelineStateInvariantOverlapReid(BatchPipelineStateInvariantAccurate
     def _anchor_for(self, key: str) -> bool:
         return participant_anchor(self.tracks.get(key))
 
-    def _update_overlap_episode(self, camera: str, frame: int, fps: float, prepared, blocked) -> OverlapEpisode | None:
+    def _update_overlap_episode(self, camera: str, frame: int, prepared, blocked):
         episodes = self._episodes.setdefault(camera, [])
         active = self._episode_active.get(camera)
         if blocked:
@@ -120,27 +118,16 @@ class BatchPipelineStateInvariantOverlapReid(BatchPipelineStateInvariantAccurate
                 self._episode_active[camera] = active
             active.block(frame)
             for item in prepared:
-                if item["key"] not in blocked:
-                    continue
-                key = item["key"]
-                active.touch(key, item["bbox"], frame, self._anchor_for(key))
-            return None
-
-        if active is not None and not active.closed:
-            if active.clear(frame, self.overlap_clear_grace):
-                self._episode_active[camera] = None
-                return active
-        return None
+                if item["key"] in blocked:
+                    active.touch(item["key"], item["bbox"], frame, self._anchor_for(item["key"]))
+            return
+        if active is not None and not active.closed and active.clear(frame, self.overlap_clear_grace):
+            self._episode_active[camera] = None
 
     def _find_recovery_sources(self, camera: str, box, frame: int, fps: float) -> list[str]:
         episodes = self._episodes.get(camera, [])
         sources = recovery_sources(
-            box,
-            frame,
-            fps,
-            episodes,
-            self.recovery_spatial_scale,
-            self.recovery_search_sec,
+            box, frame, fps, episodes, self.recovery_spatial_scale, self.recovery_search_sec
         )
         cutoff = float(frame / max(fps, 1.0)) - max(self.recovery_search_sec, 0.5) * 2.0
         self._episodes[camera] = [
@@ -152,11 +139,7 @@ class BatchPipelineStateInvariantOverlapReid(BatchPipelineStateInvariantAccurate
     def _set_recovery_meta(self, key: str, sources: list[str], camera: str) -> None:
         if not sources:
             return
-        self._recovery_meta[key] = {
-            "camera": camera,
-            "sources": list(sources),
-            "recovery": True,
-        }
+        self._recovery_meta[key] = {"camera": camera, "sources": list(sources), "recovery": True}
         track = self.tracks.get(key)
         if track is not None:
             setattr(track, "overlap_recovery", True)
@@ -203,7 +186,6 @@ class BatchPipelineStateInvariantOverlapReid(BatchPipelineStateInvariantAccurate
         q = quality(person) if person is not None else 0.0
         if person is None or q < self.min_quality:
             return False
-
         dense = bool(recovery)
         variants = {"full": person}
         if self.light and (dense or frame - info["last"].get(key + ":light", -10**9) >= self.part_interval):
@@ -212,7 +194,6 @@ class BatchPipelineStateInvariantOverlapReid(BatchPipelineStateInvariantAccurate
         if dense or frame - info["last"].get(key + ":parts", -10**9) >= self.part_interval:
             variants.update(self.parts(person))
             info["last"][key + ":parts"] = frame
-
         ordered = list(variants)
         crops = [variants[name] for name in ordered]
         resnet = self.extractor.extract_batch(crops)
@@ -221,58 +202,48 @@ class BatchPipelineStateInvariantOverlapReid(BatchPipelineStateInvariantAccurate
         self._check(resnet, "NVIDIA ResNet", len(crops))
         self._check(swin, "NVIDIA Swin", len(crops))
         self._check(solider, "SOLIDER", len(crops))
-
         resnet_map = {name: value for name, value in zip(ordered, resnet)}
-        swin_map = {name: value for name, value in zip(ordered, swin)}
-        solider_map = {name: value for name, value in zip(ordered, solider)}
-        self._frame_image = image
         multi = {
-            "swin": {name: [value] for name, value in swin_map.items()},
-            "solider": {name: [value] for name, value in solider_map.items()},
+            "swin": {name: [value] for name, value in zip(ordered, swin)},
+            "solider": {name: [value] for name, value in zip(ordered, solider)},
         }
-        self.add_body(
-            key,
-            camera,
-            item["tid"],
-            seg,
-            box,
-            frame / fps,
-            float(detection.confidence),
-            person,
-            resnet_map,
-            multi,
-        )
+        self._frame_image = image
+        self.add_body(key, camera, item["tid"], seg, box, frame / fps, float(detection.confidence), person, resnet_map, multi)
         self._attach_position_history(key)
         info["samples"] += 1
         info["feature_batches"] += 1
         info["last"][key] = frame
         if recovery:
             info["recovery_samples"] += 1
+            info["last"][key + ":recovery"] = frame
         return True
 
     def _extract(self, camera, frame, fps, image, prepared, blocked, partners, info, rows):
-        self._update_overlap_episode(camera, frame, fps, prepared, blocked)
+        self._update_overlap_episode(camera, frame, prepared, blocked)
         for item in prepared:
             tid = item["tid"]
-            old_key = item["key"]
+            key = item["key"]
             box = item["bbox"]
             seg = item["seg"]
-            self._remember_position(old_key, frame, fps, box)
-            self._touch_track(old_key, frame, fps)
-
-            active = old_key in blocked
+            self._remember_position(key, frame, fps, box)
+            self._touch_track(key, frame, fps)
+            active = key in blocked
+            sources = []
             reason = "normal"
-            sources: list[str] = []
+
             if active:
                 reason = "severe_overlap_feature_pause"
             else:
-                sources = self._find_recovery_sources(camera, box, frame, fps)
-                if sources:
-                    self._set_recovery_meta(old_key, sources, camera)
-                    info["recovery_left"][old_key] = max(
-                        info["recovery_left"].get(old_key, 0), self.recovery_samples
-                    )
-                    info["last"][old_key + ":recovery"] = -10**9
+                existing = self._recovery_meta.get(key)
+                if existing is None or info["recovery_left"].get(key, 0) <= 0:
+                    sources = self._find_recovery_sources(camera, box, frame, fps)
+                    if sources:
+                        self._set_recovery_meta(key, sources, camera)
+                        info["recovery_left"][key] = self.recovery_samples
+                        info["last"][key + ":recovery"] = -10**9
+                        reason = "post_overlap_feature_recovery"
+                elif existing:
+                    sources = list(existing["sources"])
                     reason = "post_overlap_feature_recovery"
 
             info["was_overlap"][tid] = active
@@ -282,45 +253,33 @@ class BatchPipelineStateInvariantOverlapReid(BatchPipelineStateInvariantAccurate
                 "timestamp": frame / fps,
                 "track_id": tid,
                 "segment": seg,
-                "tracklet_key": old_key,
+                "tracklet_key": key,
                 "bbox": list(box),
                 "detection_score": float(item["item"].confidence),
                 "overlap_blocked": bool(active),
-                "overlap_partners": partners.get(old_key, []) if active else [],
+                "overlap_partners": partners.get(key, []) if active else [],
                 "recovery_after_overlap": bool(sources),
                 "recovery_sources": list(sources),
                 "segment_reason": reason,
                 "position_tracked_every_frame": True,
             }) + "\n")
 
-            # Severe overlap is a tracking-only period. No body, attribute or
-            # face features from the occluded mixture enter any identity bank.
+            # Severe overlap is tracking-only: no appearance or face feature is
+            # allowed to enter the trusted state while two bodies are mixed.
             if active:
                 continue
 
-            recovery = info["recovery_left"].get(old_key, 0)
-            normal_due = frame - info["last"].get(old_key, -10**9) >= self.interval
-            recovery_due = recovery > 0 and frame - info["last"].get(old_key + ":recovery", -10**9) >= self.post_overlap_interval
+            recovery = info["recovery_left"].get(key, 0)
+            normal_due = frame - info["last"].get(key, -10**9) >= self.interval
+            recovery_due = recovery > 0 and frame - info["last"].get(key + ":recovery", -10**9) >= self.post_overlap_interval
             if not normal_due and not recovery_due:
                 continue
 
-            ok = self._extract_one(
-                camera,
-                frame,
-                fps,
-                image,
-                item,
-                old_key,
-                seg,
-                bool(recovery_due),
-                info,
-                rows,
-            )
+            ok = self._extract_one(camera, frame, fps, image, item, key, seg, recovery_due, info, rows)
             if not ok:
                 continue
             if recovery_due:
-                info["last"][old_key + ":recovery"] = frame
-                info["recovery_left"][old_key] = max(0, recovery - 1)
-            self._attach_position_history(old_key)
+                info["recovery_left"][key] = max(0, recovery - 1)
+            self._attach_position_history(key)
 
     __all__ = ["BatchPipelineStateInvariantOverlapReid"]

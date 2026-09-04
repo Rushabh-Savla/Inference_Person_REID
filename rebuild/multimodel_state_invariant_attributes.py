@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-from collections import defaultdict
 from typing import Iterable
 
 import numpy as np
@@ -60,21 +59,20 @@ class AttributeAwareResolver(StateInvariantFinalResolverFast):
             return values
         return group.state_bank.get("resnet", {}).get("attributes", [])
 
-    @classmethod
-    def _attrs(cls, left, right):
-        first = [np.asarray(x, np.float32).reshape(-1) for x in cls._attr_bank(left)]
-        second = [np.asarray(x, np.float32).reshape(-1) for x in cls._attr_bank(right)]
+    def _attrs(self, left, right):
+        first = [np.asarray(x, np.float32).reshape(-1) for x in self._attr_bank(left)]
+        second = [np.asarray(x, np.float32).reshape(-1) for x in self._attr_bank(right)]
         first = [x for x in first if x.size == 112 and np.isfinite(x).all()]
         second = [x for x in second if x.size == 112 and np.isfinite(x).all()]
         if not first or not second:
             return {"ready": False}
         a, b = np.stack(first), np.stack(second)
-        upper_color = cls._best(a[:, 0:20], b[:, 0:20])
-        lower_color = cls._best(a[:, 20:40], b[:, 20:40])
-        upper_pattern = cls._best(a[:, 40:54], b[:, 40:54])
-        lower_pattern = cls._best(a[:, 54:68], b[:, 54:68])
-        head = cls._best(a[:, 68:102], b[:, 68:102])
-        eye = cls._best(a[:, 102:108], b[:, 102:108])
+        upper_color = self._best(a[:, 0:20], b[:, 0:20])
+        lower_color = self._best(a[:, 20:40], b[:, 20:40])
+        upper_pattern = self._best(a[:, 40:54], b[:, 40:54])
+        lower_pattern = self._best(a[:, 54:68], b[:, 54:68])
+        head = self._best(a[:, 68:102], b[:, 68:102])
+        eye = self._best(a[:, 102:108], b[:, 102:108])
         upper_visible = bool(np.mean(a[:, 108] > 0.0) >= 0.5 and np.mean(b[:, 108] > 0.0) >= 0.5)
         lower_visible = bool(np.mean(a[:, 109] > 0.0) >= 0.5 and np.mean(b[:, 109] > 0.0) >= 0.5)
         head_visible = bool(np.mean(a[:, 110] > 0.0) >= 0.5 and np.mean(b[:, 110] > 0.0) >= 0.5)
@@ -83,7 +81,7 @@ class AttributeAwareResolver(StateInvariantFinalResolverFast):
         lower = 0.60 * lower_color + 0.40 * lower_pattern
         pattern = 0.50 * upper_pattern + 0.50 * lower_pattern
         clothing = 0.34 * upper + 0.52 * lower + 0.14 * pattern
-        conflict = lower_visible and upper >= 0.78 and lower < cls.lower_conflict_floor
+        conflict = lower_visible and upper >= 0.78 and lower < self.lower_conflict_floor
         return {
             "ready": True,
             "upper": float(upper), "lower": float(lower), "pattern": float(pattern), "clothing": float(clothing),
@@ -125,17 +123,6 @@ class AttributeAwareResolver(StateInvariantFinalResolverFast):
         right = {key: value for key, value in right.items() if key != "attributes"}
         return super()._best_view_score(left, right)
 
-    @staticmethod
-    def _merge_groups_preserve(left, right):
-        merged = StateInvariantFinalResolverFast._merge_groups(left, right)
-        attrs = list(getattr(left, "attribute_bank", []) or []) + list(getattr(right, "attribute_bank", []) or [])
-        faces = list(getattr(left, "face_bank", []) or []) + list(getattr(right, "face_bank", []) or [])
-        setattr(merged, "attribute_bank", attrs[-64:])
-        setattr(merged, "face_bank", faces[-32:])
-        setattr(merged, "overlap_recovery", bool(getattr(left, "overlap_recovery", False) or getattr(right, "overlap_recovery", False)))
-        setattr(merged, "recovery_sources", sorted(set(getattr(left, "recovery_sources", []) or []) | set(getattr(right, "recovery_sources", []) or [])))
-        return merged
-
     @classmethod
     def _group_from_track(cls, key, track, local_gid):
         group = super()._group_from_track(key, track, local_gid)
@@ -147,7 +134,14 @@ class AttributeAwareResolver(StateInvariantFinalResolverFast):
 
     @staticmethod
     def _merge_groups(left, right):
-        return AttributeAwareResolver._merge_groups_preserve(left, right)
+        merged = StateInvariantFinalResolverFast._merge_groups(left, right)
+        attrs = list(getattr(left, "attribute_bank", []) or []) + list(getattr(right, "attribute_bank", []) or [])
+        faces = list(getattr(left, "face_bank", []) or []) + list(getattr(right, "face_bank", []) or [])
+        setattr(merged, "attribute_bank", attrs[-64:])
+        setattr(merged, "face_bank", faces[-32:])
+        setattr(merged, "overlap_recovery", bool(getattr(left, "overlap_recovery", False) or getattr(right, "overlap_recovery", False)))
+        setattr(merged, "recovery_sources", sorted(set(getattr(left, "recovery_sources", []) or []) | set(getattr(right, "recovery_sources", []) or [])))
+        return merged
 
     def pair(self, left, right, left_pool, right_pool):
         evidence = super().pair(left, right, left_pool, right_pool)
@@ -180,8 +174,6 @@ class AttributeAwareResolver(StateInvariantFinalResolverFast):
         if evidence.fused < threshold:
             return False
         if attrs.get("conflict"):
-            # A strong shirt match plus a visibly incompatible lower body is not
-            # identity proof. Only very strong 3-model + face evidence can override it.
             if not (evidence.model_support == 3 and evidence.agreement >= 0.78 and face.get("valid") and face.get("score", 0.0) >= self.face_strong):
                 return False
         if face.get("valid") and face.get("score", 0.0) >= self.face_strong and evidence.model_support >= 2 and evidence.agreement < 0.43:
@@ -223,9 +215,9 @@ class AttributeAwareResolver(StateInvariantFinalResolverFast):
                 "continuity": evidence.continuity, "agreement": evidence.agreement,
                 "model_support": evidence.model_support, "view_support": evidence.view_support,
                 "state_transition": evidence.state_transition, "recovery_priority": priority,
-                "post_overlap_recovery": bool(priority),
-                "recovery_source_match": bool(left.key in (getattr(right, "recovery_sources", []) or []) or right.key in (getattr(left, "recovery_sources", []) or [])),
-                "upper_clothing": attrs.get("upper", 0.0), "lower_clothing": attrs.get("lower", 0.0),
+                "post_overlap_recovery": bool(priority), "recovery_source_match": bool(
+                    left.key in (getattr(right, "recovery_sources", []) or []) or right.key in (getattr(left, "recovery_sources", []) or [])
+                ), "upper_clothing": attrs.get("upper", 0.0), "lower_clothing": attrs.get("lower", 0.0),
                 "upper_pattern": attrs.get("upper_pattern", 0.0), "lower_pattern": attrs.get("lower_pattern", 0.0),
                 "face": face.get("score", 0.0), "face_valid": bool(face.get("valid", False)),
             })
@@ -257,8 +249,9 @@ class AttributeAwareResolver(StateInvariantFinalResolverFast):
                 "state_transition": evidence.state_transition, "upper_clothing": attrs.get("upper", 0.0),
                 "lower_clothing": attrs.get("lower", 0.0), "upper_pattern": attrs.get("upper_pattern", 0.0),
                 "lower_pattern": attrs.get("lower_pattern", 0.0), "face": face.get("score", 0.0),
-                "face_valid": bool(face.get("valid", False)),
-                "post_overlap_recovery": bool(getattr(first, "overlap_recovery", False) or getattr(second, "overlap_recovery", False)),
+                "face_valid": bool(face.get("valid", False)), "post_overlap_recovery": bool(
+                    getattr(first, "overlap_recovery", False) or getattr(second, "overlap_recovery", False)
+                ),
             })
         return result
 

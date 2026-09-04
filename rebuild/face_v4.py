@@ -16,19 +16,29 @@ class FaceObservation:
     height: float
     area: float
     roll: float
+    visibility: float = 0.0
+    valid: bool = False
 
 
 class FaceExtractorV4:
-    """InsightFace buffalo_l wrapper used only for face evidence."""
+    """InsightFace buffalo_l wrapper used only when geometric face visibility is sufficient."""
 
-    def __init__(self, model="buffalo_l", det_size=(640, 640), min_detection=0.55,
-                 min_size=32, min_quality=0.42, device="auto"):
+    def __init__(
+        self,
+        model="buffalo_l",
+        det_size=(640, 640),
+        min_detection=0.55,
+        min_size=32,
+        min_quality=0.50,
+        min_visibility=0.60,
+        device="auto",
+    ):
         try:
             import torch
             from insightface.app import FaceAnalysis
         except Exception as exc:
             raise RuntimeError(
-                "V4 face recognition requires insightface. Run `pip install -r requirements.txt`."
+                "Face ReID requires InsightFace. Install it separately without replacing the CUDA ONNX Runtime."
             ) from exc
 
         providers = ["CUDAExecutionProvider", "CPUExecutionProvider"]
@@ -45,6 +55,7 @@ class FaceExtractorV4:
         self.min_detection = float(min_detection)
         self.min_size = int(min_size)
         self.min_quality = float(min_quality)
+        self.min_visibility = float(min_visibility)
         self.device = "cuda" if ctx_id == 0 else "cpu"
 
     @staticmethod
@@ -74,6 +85,37 @@ class FaceExtractorV4:
         exposure = 1.0 - min(1.0, abs(mean - 128.0) / 128.0)
         return float(np.clip(0.65 * exposure + 0.35 * min(1.0, contrast / 55.0), 0.0, 1.0))
 
+    @staticmethod
+    def _points(face):
+        for name in ("landmark_3d_68", "landmark_2d_106", "kps"):
+            value = getattr(face, name, None)
+            if value is not None:
+                points = np.asarray(value, dtype=np.float32).reshape(-1, 2)
+                if len(points) >= 5 and np.isfinite(points).all():
+                    return points
+        return None
+
+    @classmethod
+    def _visibility_fraction(cls, face, bbox):
+        points = cls._points(face)
+        if points is None:
+            return 0.0
+        x1, y1, x2, y2 = (float(v) for v in bbox)
+        bw = max(1.0, x2 - x1)
+        bh = max(1.0, y2 - y1)
+        inside = ((points[:, 0] >= x1) & (points[:, 0] <= x2) & (points[:, 1] >= y1) & (points[:, 1] <= y2)).astype(np.float32)
+        inside_ratio = float(np.mean(inside))
+        shifted = points - np.asarray([x1, y1], dtype=np.float32)
+        scale = np.asarray([bw, bh], dtype=np.float32)
+        normalized = shifted / scale
+        visible = normalized[(normalized[:, 0] >= 0.0) & (normalized[:, 0] <= 1.0) & (normalized[:, 1] >= 0.0) & (normalized[:, 1] <= 1.0)]
+        if len(visible) < 3:
+            return inside_ratio
+        hull = cv2.convexHull(visible.astype(np.float32).reshape(-1, 1, 2))
+        hull_area = float(cv2.contourArea(hull))
+        coverage = float(np.clip(hull_area, 0.0, 1.0))
+        return float(np.clip(0.75 * coverage + 0.25 * inside_ratio, 0.0, 1.0))
+
     def extract(self, image):
         if image is None or image.size == 0:
             return None
@@ -100,18 +142,23 @@ class FaceExtractorV4:
             light = self._light(crop)
             roll = self._roll(face)
             pose = float(np.clip(1.0 - abs(roll) / 35.0, 0.0, 1.0))
-            quality = float(np.clip(0.40 * det + 0.25 * size_score + 0.20 * sharp + 0.10 * light + 0.05 * pose, 0.0, 1.0))
+            visibility = self._visibility_fraction(face, (x1, y1, x2, y2))
+            quality = float(np.clip(0.25 * det + 0.15 * size_score + 0.15 * sharp + 0.10 * light + 0.10 * pose + 0.25 * visibility, 0.0, 1.0))
             embedding = getattr(face, "normed_embedding", None)
             if embedding is None:
                 embedding = getattr(face, "embedding", None)
             if embedding is None:
                 continue
             vector = np.asarray(embedding, dtype=np.float32)
-            vector /= np.linalg.norm(vector) + 1e-12
-            obs = FaceObservation(vector, quality, det, fw, fh, area, roll)
-            if best is None or obs.quality > best.quality:
+            norm = float(np.linalg.norm(vector))
+            if vector.size == 0 or not np.isfinite(norm) or norm <= 0.0:
+                continue
+            vector /= norm
+            valid = bool(visibility >= self.min_visibility and quality >= self.min_quality)
+            obs = FaceObservation(vector, quality, det, fw, fh, area, roll, visibility, valid)
+            if best is None or (obs.valid, obs.quality, obs.visibility) > (best.valid, best.quality, best.visibility):
                 best = obs
-        return best if best is not None and best.quality >= self.min_quality else None
+        return best if best is not None and best.valid else None
 
     def describe(self):
-        return f"InsightFace {self.device}, buffalo_l, SCRFD + ArcFace"
+        return f"InsightFace {self.device}, buffalo_l, SCRFD + ArcFace, visibility>={self.min_visibility:.2f}"

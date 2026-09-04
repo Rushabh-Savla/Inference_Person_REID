@@ -44,7 +44,6 @@ identity_v6:
   merge_body: 0.82
   merge_support: 3
   seed_count: 3
-
   state_cross_fused_min: 0.50
   state_cross_partial_fused_min: 0.47
   state_cross_strong: 0.80
@@ -57,7 +56,6 @@ identity_v6:
   state_cross_required_mutual_models: 0
   state_cross_required_views: 1
   state_cross_max_gap_sec: 30.0
-
   state_same_fused_min: 0.48
   state_same_model_min: 0.42
   state_same_margin: 0.0
@@ -67,25 +65,31 @@ identity_v6:
   state_same_chain_support: 2
   state_same_chain_continuity_min: 0.28
   state_same_trajectory_min: 0.35
-
   state_gallery_match_min: 0.62
   state_gallery_margin: 0.02
   camera_time_offsets_sec: {}
-
   attribute_color_min: 0.84
   attribute_pattern_min: 0.64
   attribute_detail_min: 0.72
+  clothing_match_weight: 0.12
+  lower_match_weight: 0.10
+  lower_conflict_penalty: 0.08
+  lower_conflict_floor: 0.38
+  face_match_weight: 0.40
+  face_match_min: 0.72
+  face_strong: 0.82
 
 tracking:
   fragment_gap_sec: 2.0
 
-# Severe physical overlap only. 80% IoU / 85% intersection-over-min-area
-# avoids treating ordinary near-crossing as an identity ambiguity.
 overlap_guard:
   enabled: true
   iou_min: 0.80
   intersection_min: 0.85
-  recovery_samples: 4
+  clear_grace_frames: 2
+  recovery_samples: 6
+  recovery_search_sec: 1.75
+  recovery_spatial_scale: 4.5
 
 recovery_guard:
   enabled: true
@@ -100,10 +104,19 @@ recovery_guard:
   relaxed_solider_min: 0.46
   fail_limit: 4
 
-# After overlap clears, run dense all-model ReID for four clean frames.
-# Tracking position is recorded every detector/tracker observation.
 post_overlap_interval_frames: 1
 trajectory_history_frames: 30
+
+face:
+  enabled: true
+  required: false
+  model: buffalo_l
+  det_size: [640, 640]
+  min_detection: 0.55
+  min_size: 32
+  min_quality: 0.50
+  min_visibility: 0.60
+  device: cuda
 
 input:
   videos: []

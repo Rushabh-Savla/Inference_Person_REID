@@ -6,19 +6,48 @@ from typing import Dict
 import numpy as np
 
 from rebuild.batch_state_invariant_accurate import BatchPipelineStateInvariantAccurate
+from rebuild.face_v4 import FaceExtractorV4
 from rebuild.identity_v2 import crop, illumination_variant, quality
+from rebuild.overlap_recovery import OverlapEpisode, bbox_overlap_metrics, is_severe_overlap, participant_anchor, recovery_sources
 
 
 class BatchPipelineStateInvariantOverlapReid(BatchPipelineStateInvariantAccurate):
-    """Safe055/V6 overlap path: track always, pause features during severe overlap, then re-identify densely."""
+    """Overlap-aware Safe055/V6 pipeline with tracker-ID-independent recovery."""
 
     def __init__(self, config_path: str):
         super().__init__(config_path)
+        guard = self.cfg.get("overlap_guard", {}) or {}
+        self.overlap_iou = float(guard.get("iou_min", 0.80))
+        self.overlap_intersection = float(guard.get("intersection_min", 0.85))
+        self.overlap_clear_grace = max(1, int(guard.get("clear_grace_frames", 2)))
+        self.recovery_samples = max(4, int(guard.get("recovery_samples", 6)))
+        self.recovery_search_sec = float(guard.get("recovery_search_sec", 1.75))
+        self.recovery_spatial_scale = float(guard.get("recovery_spatial_scale", 4.5))
         self.post_overlap_interval = max(1, int(self.cfg.get("post_overlap_interval_frames", 1)))
         self.trajectory_history = max(8, int(self.cfg.get("trajectory_history_frames", 30)))
         self._trajectory: Dict[str, list[dict]] = {}
-        self._overlap_refs = self._refs
-        self._post_overlap_fails: Dict[str, int] = {}
+        self._episodes: Dict[str, list[OverlapEpisode]] = {}
+        self._episode_active: Dict[str, OverlapEpisode | None] = {}
+        self._pair_metrics: Dict[tuple[str, str], dict] = {}
+        self._recovery_meta: Dict[str, dict] = {}
+        self.face = None
+        face_cfg = self.cfg.get("face", {}) or {}
+        if bool(face_cfg.get("enabled", True)):
+            try:
+                self.face = FaceExtractorV4(
+                    model=str(face_cfg.get("model", "buffalo_l")),
+                    det_size=tuple(face_cfg.get("det_size", [640, 640])),
+                    min_detection=float(face_cfg.get("min_detection", 0.55)),
+                    min_size=int(face_cfg.get("min_size", 32)),
+                    min_quality=float(face_cfg.get("min_quality", 0.50)),
+                    min_visibility=float(face_cfg.get("min_visibility", 0.60)),
+                    device=str(face_cfg.get("device", "cuda")),
+                )
+                print(f"[state-joint] FACE: {self.face.describe()} | visibility gate >= {self.face.min_visibility:.2f}")
+            except Exception as exc:
+                if bool(face_cfg.get("required", False)):
+                    raise
+                print(f"[state-joint] FACE: unavailable, body-only mode ({exc})")
 
     @staticmethod
     def _unit(value):
@@ -58,20 +87,116 @@ class BatchPipelineStateInvariantOverlapReid(BatchPipelineStateInvariantAccurate
         track.end = max(float(getattr(track, "end", stamp)), stamp)
         setattr(track, "trajectory", list(history))
 
-    def _save_clean_anchor(self, key: str) -> None:
+    def _overlaps(self, items):
+        blocked: set[str] = set()
+        partners: dict[str, list[str]] = {}
+        self._pair_metrics = {}
+        for i in range(len(items)):
+            for j in range(i + 1, len(items)):
+                left = items[i]
+                right = items[j]
+                metrics = bbox_overlap_metrics(left["bbox"], right["bbox"])
+                a = left["key"]
+                b = right["key"]
+                self._pair_metrics[tuple(sorted((a, b)))] = dict(metrics)
+                if not is_severe_overlap(metrics, self.overlap_iou, self.overlap_intersection):
+                    continue
+                blocked.add(a)
+                blocked.add(b)
+                partners.setdefault(a, []).append(b)
+                partners.setdefault(b, []).append(a)
+        return blocked, partners
+
+    def _anchor_for(self, key: str) -> bool:
+        return participant_anchor(self.tracks.get(key))
+
+    def _update_overlap_episode(self, camera: str, frame: int, fps: float, prepared, blocked) -> OverlapEpisode | None:
+        episodes = self._episodes.setdefault(camera, [])
+        active = self._episode_active.get(camera)
+        if blocked:
+            if active is None or active.closed:
+                active = OverlapEpisode(camera, frame, frame)
+                episodes.append(active)
+                self._episode_active[camera] = active
+            active.block(frame)
+            for item in prepared:
+                if item["key"] not in blocked:
+                    continue
+                key = item["key"]
+                active.touch(key, item["bbox"], frame, self._anchor_for(key))
+            return None
+
+        if active is not None and not active.closed:
+            if active.clear(frame, self.overlap_clear_grace):
+                self._episode_active[camera] = None
+                return active
+        return None
+
+    def _find_recovery_sources(self, camera: str, box, frame: int, fps: float) -> list[str]:
+        episodes = self._episodes.get(camera, [])
+        sources = recovery_sources(
+            box,
+            frame,
+            fps,
+            episodes,
+            self.recovery_spatial_scale,
+            self.recovery_search_sec,
+        )
+        cutoff = float(frame / max(fps, 1.0)) - max(self.recovery_search_sec, 0.5) * 2.0
+        self._episodes[camera] = [
+            episode for episode in episodes
+            if episode.exit_frame is None or episode.exit_frame / max(fps, 1.0) >= cutoff
+        ]
+        return sources
+
+    def _set_recovery_meta(self, key: str, sources: list[str], camera: str) -> None:
+        if not sources:
+            return
+        self._recovery_meta[key] = {
+            "camera": camera,
+            "sources": list(sources),
+            "recovery": True,
+        }
+        track = self.tracks.get(key)
+        if track is not None:
+            setattr(track, "overlap_recovery", True)
+            setattr(track, "recovery_sources", list(sources))
+
+    def _store_face(self, key: str, image) -> None:
+        if self.face is None:
+            return
+        observation = self.face.extract(image)
+        if observation is None:
+            return
         track = self.tracks.get(key)
         if track is None:
             return
-        bank = getattr(track, "state_bank", {})
-        refs = {"resnet": [], "swin": [], "solider": []}
-        for model in refs:
-            refs[model] = list(bank.get(model, {}).get("full", [])[-4:])
-        if all(refs[model] for model in refs):
-            self._overlap_refs[key] = refs
-            self._post_overlap_fails[key] = 0
+        bank = list(getattr(track, "face_bank", []) or [])
+        bank.append({
+            "vector": np.asarray(observation.vector, np.float32),
+            "quality": float(observation.quality),
+            "visibility": float(observation.visibility),
+            "detection": float(observation.detection),
+            "width": float(observation.width),
+            "height": float(observation.height),
+            "area": float(observation.area),
+            "roll": float(observation.roll),
+            "valid": bool(observation.valid),
+        })
+        setattr(track, "face_bank", bank[-32:])
 
-    def _extract_one(self, camera, frame, fps, image, item, key, seg, recovery, info, rows, active=False):
-        del active, rows
+    def add_body(self, key, camera, track_id, segment, bbox, stamp, score, image, feats, multi):
+        measured = float(quality(image))
+        super().add_body(key, camera, track_id, segment, bbox, stamp, measured, image, feats, multi)
+        self._store_face(key, image)
+        meta = self._recovery_meta.get(key)
+        track = self.tracks.get(key)
+        if track is not None and meta:
+            setattr(track, "overlap_recovery", True)
+            setattr(track, "recovery_sources", list(meta["sources"]))
+            setattr(track, "recovery_camera", meta["camera"])
+
+    def _extract_one(self, camera, frame, fps, image, item, key, seg, recovery, info, rows):
         box = item["bbox"]
         detection = item["item"]
         person = crop(image, box)
@@ -101,12 +226,22 @@ class BatchPipelineStateInvariantOverlapReid(BatchPipelineStateInvariantAccurate
         swin_map = {name: value for name, value in zip(ordered, swin)}
         solider_map = {name: value for name, value in zip(ordered, solider)}
         self._frame_image = image
-        stamp = frame / fps
         multi = {
             "swin": {name: [value] for name, value in swin_map.items()},
             "solider": {name: [value] for name, value in solider_map.items()},
         }
-        self.add_body(key, camera, item["tid"], seg, box, stamp, float(detection.confidence), person, resnet_map, multi)
+        self.add_body(
+            key,
+            camera,
+            item["tid"],
+            seg,
+            box,
+            frame / fps,
+            float(detection.confidence),
+            person,
+            resnet_map,
+            multi,
+        )
         self._attach_position_history(key)
         info["samples"] += 1
         info["feature_batches"] += 1
@@ -115,144 +250,77 @@ class BatchPipelineStateInvariantOverlapReid(BatchPipelineStateInvariantAccurate
             info["recovery_samples"] += 1
         return True
 
-    def _check_anchor(self, key: str):
-        track = self.tracks.get(key)
-        anchor = self._overlap_refs.get(key)
-        if track is None or not anchor:
-            return None
-        scores = {}
-        for model in ("resnet", "swin", "solider"):
-            values = getattr(track, "state_bank", {}).get(model, {}).get("full", [])
-            query = self._unit(values[-1]) if values else None
-            refs = []
-            for value in anchor.get(model, []):
-                ref = self._unit(value)
-                if query is not None and ref is not None and query.shape == ref.shape:
-                    refs.append(float(np.dot(query, ref)))
-            refs.sort(reverse=True)
-            scores[model] = float(np.mean(refs[:3])) if refs else 0.0
-        ordered = sorted(scores.values(), reverse=True)
-        fused = float(np.mean(ordered[:2])) if len(ordered) >= 2 else 0.0
-        support = sum(scores[model] >= self.recovery_min[model] for model in scores)
-        return {
-            "scores": scores,
-            "fused": fused,
-            "support": support,
-            "match": bool(support >= self.recovery_models and fused >= self.recovery_fused),
-        }
-
     def _extract(self, camera, frame, fps, image, prepared, blocked, partners, info, rows):
+        self._update_overlap_episode(camera, frame, fps, prepared, blocked)
         for item in prepared:
             tid = item["tid"]
             old_key = item["key"]
-            old_seg = item["seg"]
             box = item["bbox"]
-            detection = item["item"]
-
+            seg = item["seg"]
             self._remember_position(old_key, frame, fps, box)
             self._touch_track(old_key, frame, fps)
 
             active = old_key in blocked
-            previous_active = bool(info["was_overlap"].get(tid, False))
-            key = old_key
-            seg = old_seg
-            boundary = False
             reason = "normal"
-
-            if active and not previous_active:
-                info["overlap_events"] += 1
-                info["overlap_tids"].add(tid)
-                info["recovery_left"][old_key] = 0
-                self._save_clean_anchor(old_key)
-                reason = "high_overlap_start_feature_pause"
-
-            elif previous_active and not active:
-                info["segments"][tid] = info["segments"].get(tid, old_seg) + 1
-                self._segments[camera][tid] = info["segments"][tid]
-                seg = info["segments"][tid]
-                key = f"{camera}:{tid}:{seg}"
-                self._trajectory[key] = []
-                self._remember_position(key, frame, fps, box)
-                info["recovery_left"][key] = max(4, self.recovery_samples)
-                info["last"][key] = -10**9
-                info["last"][key + ":parts"] = -10**9
-                info["last"][key + ":light"] = -10**9
-                info["last"][key + ":recovery"] = -10**9
-                anchor = self._overlap_refs.get(old_key)
-                if anchor:
-                    self._overlap_refs[key] = {model: list(values) for model, values in anchor.items()}
-                self._post_overlap_fails[key] = 0
-                info["overlap_tids"].discard(tid)
-                boundary = True
-                reason = "high_overlap_exit_dense_feature_reassignment"
-                info.setdefault("post_overlap_events", 0)
-                info["post_overlap_events"] += 1
+            sources: list[str] = []
+            if active:
+                reason = "severe_overlap_feature_pause"
+            else:
+                sources = self._find_recovery_sources(camera, box, frame, fps)
+                if sources:
+                    self._set_recovery_meta(old_key, sources, camera)
+                    info["recovery_left"][old_key] = max(
+                        info["recovery_left"].get(old_key, 0), self.recovery_samples
+                    )
+                    info["last"][old_key + ":recovery"] = -10**9
+                    reason = "post_overlap_feature_recovery"
 
             info["was_overlap"][tid] = active
-            self._remember_position(key, frame, fps, box)
-            self._touch_track(key, frame, fps)
-
             rows.write(json.dumps({
                 "camera": camera,
                 "frame": frame,
                 "timestamp": frame / fps,
                 "track_id": tid,
                 "segment": seg,
-                "tracklet_key": key,
+                "tracklet_key": old_key,
                 "bbox": list(box),
-                "detection_score": float(detection.confidence),
+                "detection_score": float(item["item"].confidence),
                 "overlap_blocked": bool(active),
                 "overlap_partners": partners.get(old_key, []) if active else [],
-                "overlap_boundary": bool(boundary),
+                "recovery_after_overlap": bool(sources),
+                "recovery_sources": list(sources),
                 "segment_reason": reason,
-                "recovery_after_overlap": bool((not active) and info["recovery_left"].get(key, 0) > 0),
                 "position_tracked_every_frame": True,
             }) + "\n")
 
+            # Severe overlap is a tracking-only period. No body, attribute or
+            # face features from the occluded mixture enter any identity bank.
             if active:
                 continue
 
-            recovery = info["recovery_left"].get(key, 0)
-            normal_due = frame - info["last"].get(key, -10**9) >= self.interval
-            recovery_due = recovery > 0 and frame - info["last"].get(key + ":recovery", -10**9) >= self.post_overlap_interval
+            recovery = info["recovery_left"].get(old_key, 0)
+            normal_due = frame - info["last"].get(old_key, -10**9) >= self.interval
+            recovery_due = recovery > 0 and frame - info["last"].get(old_key + ":recovery", -10**9) >= self.post_overlap_interval
             if not normal_due and not recovery_due:
                 continue
 
-            ok = self._extract_one(camera, frame, fps, image, item, key, seg, recovery_due, info, rows, active=False)
+            ok = self._extract_one(
+                camera,
+                frame,
+                fps,
+                image,
+                item,
+                old_key,
+                seg,
+                bool(recovery_due),
+                info,
+                rows,
+            )
             if not ok:
                 continue
-
             if recovery_due:
-                info["last"][key + ":recovery"] = frame
-                check = self._check_anchor(key)
-                if check is not None:
-                    rows.write(json.dumps({
-                        "camera": camera,
-                        "frame": frame,
-                        "timestamp": frame / fps,
-                        "track_id": tid,
-                        "segment": seg,
-                        "tracklet_key": key,
-                        "bbox": list(box),
-                        "post_overlap_feature_check": True,
-                        "post_overlap_reid_scores": check["scores"],
-                        "post_overlap_reid_fused": check["fused"],
-                        "post_overlap_model_support": check["support"],
-                        "post_overlap_same_pre_identity": check["match"],
-                        "post_overlap_reassignment_by_features": True,
-                        "post_overlap_position_tracked": True,
-                        "post_overlap_complete_body_checked": True,
-                    }) + "\n")
-                    info.setdefault("post_overlap_feature_checks", 0)
-                    info["post_overlap_feature_checks"] += 1
+                info["last"][old_key + ":recovery"] = frame
+                info["recovery_left"][old_key] = max(0, recovery - 1)
+            self._attach_position_history(old_key)
 
-            self._attach_position_history(key)
-            if recovery > 1:
-                info["recovery_left"][key] = recovery - 1
-            else:
-                info["recovery_left"][key] = 0
-                self._overlap_refs.pop(key, None)
-                self._post_overlap_fails.pop(key, None)
-
-
-__all__ = ["BatchPipelineStateInvariantOverlapReid"]
+    __all__ = ["BatchPipelineStateInvariantOverlapReid"]

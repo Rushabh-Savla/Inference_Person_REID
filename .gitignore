@@ -33,14 +33,6 @@ logs/
 *.mkv
 
 # ------------------------
-# Model weights
-# ------------------------
-*.pt
-*.pth
-*.onnx
-*.engine
-
-# ------------------------
 # Runtime data
 # ------------------------
 qdrant_storage/
@@ -88,4 +80,4 @@ run.pid
 rebuild_outputs_state_invariant/
 docs/
 
-weights/
+

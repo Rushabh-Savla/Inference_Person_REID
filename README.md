@@ -12,6 +12,9 @@ python rebuild/run.py batch_state_final \
 
 ---
 
+Link for Weights file : 
+https://drive.google.com/drive/folders/1jCESnjj5g2WsJRLTqaMuMi9vg2OghYdP?usp=sharing
+
 ## What the system actually does
 
 The active pipeline is not a simple `YOLO -> tracker -> cosine similarity -> ID` system. It combines multiple independent evidence sources and resolves identities after camera-local tracklets have been formed.

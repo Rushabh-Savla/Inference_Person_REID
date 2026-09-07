@@ -10,13 +10,7 @@ from src.live.qdrant_gallery import QdrantGallery
 
 
 class QdrantAuthoritativeResolver(AttributeAwareResolver):
-    """Conservative MTMC resolver using Qdrant for identity retrieval.
-
-    Qdrant finds likely existing identities. The final decision is reranked with
-    the three NVIDIA/SOLIDER body models plus lower-body clothing and optional
-    face support. Ambiguous matches stay UNKNOWN; overlap recovery never mints
-    a new identity.
-    """
+    """Conservative MTMC resolver using Qdrant for identity retrieval."""
 
     MODEL_WEIGHTS = {
         "resnet": 0.30,
@@ -44,13 +38,14 @@ class QdrantAuthoritativeResolver(AttributeAwareResolver):
 
     @staticmethod
     def _flat(component):
-        result = defaultdict(list)
+        result = defaultdict(dict)
         for group in component:
             for model in ("resnet", "swin", "solider"):
-                for view, values in (getattr(group, "state_bank", {}).get(model, {}) or {}).items():
+                banks = getattr(group, "state_bank", {}).get(model, {}) or {}
+                for view, values in banks.items():
                     if view in ("full", "upper", "torso", "lower"):
                         result[model].setdefault(view, []).extend(values)
-        return dict(result)
+        return {model: dict(views) for model, views in result.items()}
 
     @staticmethod
     def _attrs_flat(component):
@@ -261,32 +256,22 @@ class QdrantAuthoritativeResolver(AttributeAwareResolver):
                 obs=len({key for group in component for key in group.members}),
             )
 
-        self.qdrant.upsert_component(
-            int(gid),
-            component,
-        )
+        self.qdrant.upsert_component(int(gid), component)
 
     def _assign(self, components):
         result = {}
         self._decision_diagnostics = []
+        used = set()
 
         for component in components:
-            members = [
-                key
-                for group in component
-                for key in group.members
-            ]
-
+            members = [key for group in component for key in group.members]
             recovery = any(
                 bool(getattr(group, "overlap_recovery", False))
                 for group in component
             )
 
             ranked = sorted(
-                self._gallery_score(
-                    component,
-                    {},
-                ).items(),
+                self._gallery_score(component, {}).items(),
                 key=lambda item: item[1],
                 reverse=True,
             )
@@ -295,6 +280,12 @@ class QdrantAuthoritativeResolver(AttributeAwareResolver):
             best_score = float(ranked[0][1]) if ranked else 0.0
             second_score = float(ranked[1][1]) if len(ranked) > 1 else 0.0
             margin = best_score - second_score
+
+            if best in used:
+                best = None
+                best_score = 0.0
+                second_score = 0.0
+                margin = 0.0
 
             if recovery:
                 if best is not None and best_score >= self.exist and margin >= self.margin:
@@ -305,11 +296,7 @@ class QdrantAuthoritativeResolver(AttributeAwareResolver):
                     gid = None
                     decision = "PENDING"
                     reason = "overlap_recovery_not_authoritatively_confirmed"
-            elif (
-                best is not None
-                and best_score >= self.exist
-                and margin >= self.margin
-            ):
+            elif best is not None and best_score >= self.exist and margin >= self.margin:
                 gid = int(best)
                 decision = "ASSIGN_EXISTING"
                 reason = "strong_qdrant_gallery_match"
@@ -347,15 +334,13 @@ class QdrantAuthoritativeResolver(AttributeAwareResolver):
                 "reason": reason,
             })
 
-            label = f"G{gid:06d}" if gid is not None else (
-                "PENDING" if recovery else "UNKNOWN"
-            )
-
+            label = f"G{gid:06d}" if gid is not None else ("PENDING" if recovery else "UNKNOWN")
             for key in members:
                 result[key] = label
 
             if gid is not None and decision != "CREATE_NEW":
                 self._save(gid, component)
+                used.add(gid)
 
         return result
 

@@ -16,10 +16,7 @@ from rebuild.batch_v5 import BatchPipelineV5  # noqa: E402
 from rebuild.batch_v6 import BatchPipelineV6  # noqa: E402
 from rebuild.batch_v6_local_global import BatchPipelineV6LocalGlobal  # noqa: E402
 from rebuild import batch_state_invariant as state_pipeline  # noqa: E402
-from rebuild.multimodel_state_invariant_overlap_reid import OverlapReidResolver  # noqa: E402
-from rebuild.batch_state_invariant_overlap_reid import BatchPipelineStateInvariantOverlapReid  # noqa: E402
-
-state_pipeline.StateInvariantFinalResolver = OverlapReidResolver
+from rebuild.batch_state_authoritative import BatchPipelineStateAuthoritative  # noqa: E402
 from rebuild.live_state_invariant_accurate import run_live_state  # noqa: E402
 from rebuild.live_v4 import run_live_v4  # noqa: E402
 from rebuild.live_v2 import run_live_v2  # noqa: E402
@@ -56,7 +53,7 @@ def main():
 
     state_final = sub.add_parser(
         "batch_state_final",
-        help="Joint multi-camera state-invariant V6 with hard-overlap pause and post-overlap reassignment",
+        help="Authoritative state-invariant MTMC with Qdrant retrieval and overlap hysteresis",
     )
     state_final.add_argument("--config", default="rebuild/config_state_invariant.yaml")
     state_final.add_argument("--videos", nargs="*", default=[])
@@ -105,7 +102,7 @@ def main():
     elif args.mode == "batch_final":
         BatchPipelineV6(args.config).run(args.videos)
     elif args.mode == "batch_state_final":
-        BatchPipelineStateInvariantOverlapReid(args.config).run(args.videos)
+        BatchPipelineStateAuthoritative(args.config).run(args.videos)
     elif args.mode == "batch_local_global":
         BatchPipelineV6LocalGlobal(args.config).run(args.videos)
     elif args.mode == "batch_v5":

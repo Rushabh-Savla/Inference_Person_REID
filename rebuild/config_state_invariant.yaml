@@ -48,7 +48,6 @@ identity_v6:
   state_cross_partial_fused_min: 0.47
   state_cross_strong: 0.80
   state_cross_margin: 0.0
-  state_cross_partial_margin: 0.0
   state_cross_resnet_min: 0.44
   state_cross_swin_min: 0.44
   state_cross_solider_min: 0.42
@@ -71,21 +70,18 @@ identity_v6:
   attribute_color_min: 0.84
   attribute_pattern_min: 0.64
   attribute_detail_min: 0.72
-  clothing_match_weight: 0.18
-  lower_match_weight: 0.12
-  lower_conflict_penalty: 0.20
-  lower_conflict_floor: 0.38
+  clothing_match_weight: 0.30
+  lower_match_weight: 0.20
+  lower_conflict_penalty: 0.25
+  lower_conflict_floor: 0.52
   face_match_weight: 0.06
   face_match_min: 0.72
   face_strong: 0.82
 
-  # Authoritative identity lifecycle.
   authoritative_existing_min: 0.72
   authoritative_margin: 0.06
   authoritative_novel_max: 0.55
   authoritative_clean_required: 4
-
-  # Qdrant is the vector retrieval layer.
   qdrant_path: qdrant_storage
   qdrant_prefix: person_reid
   qdrant_limit: 24
@@ -97,6 +93,8 @@ overlap_guard:
   enabled: true
   iou_min: 0.70
   intersection_min: 0.70
+  occlusion_iou_min: 0.45
+  occlusion_intersection_min: 0.60
   authoritative_overlap_exit: 0.58
   clear_grace_frames: 2
   recovery_samples: 6

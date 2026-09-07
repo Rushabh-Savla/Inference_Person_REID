@@ -20,7 +20,9 @@ class BatchPipelineStateAuthoritative(BatchPipelineStateInvariantJointAttributes
         guard = self.cfg.get("overlap_guard", {}) or {}
         self.overlap_enter = float(guard.get("iou_min", 0.70))
         self.overlap_intersection_enter = float(guard.get("intersection_min", 0.70))
-        self.overlap_exit = float(self.cfg.get("authoritative_overlap_exit", 0.58))
+        self.occlusion_iou = float(guard.get("occlusion_iou_min", 0.45))
+        self.occlusion_intersection = float(guard.get("occlusion_intersection_min", 0.60))
+        self.overlap_exit = float(self.cfg.get("authoritative_overlap_exit", guard.get("authoritative_overlap_exit", 0.58)))
         self.overlap_grace = max(1, int(guard.get("clear_grace_frames", 2)))
         self._overlap_pairs: Dict[tuple[str, str], Dict[str, float]] = {}
         state_pipeline.StateInvariantFinalResolver = QdrantAuthoritativeResolver
@@ -57,18 +59,14 @@ class BatchPipelineStateAuthoritative(BatchPipelineStateInvariantJointAttributes
                 pair = tuple(sorted((a, b)))
                 seen_pairs.add(pair)
                 iou, iom = self._metrics(left["bbox"], right["bbox"])
+                strong = bool(iou >= self.overlap_enter or iom >= self.overlap_intersection_enter)
+                meaningful = bool(iou >= self.occlusion_iou and iom >= self.occlusion_intersection)
                 signal = max(iou, iom)
                 state = self._overlap_pairs.get(pair)
 
                 if state is None:
-                    active = bool(
-                        iou >= self.overlap_enter
-                        or iom >= self.overlap_intersection_enter
-                    )
-                    self._overlap_pairs[pair] = {
-                        "active": float(active),
-                        "clear": 0.0,
-                    }
+                    active = strong or meaningful
+                    self._overlap_pairs[pair] = {"active": float(active), "clear": 0.0}
                 elif bool(state["active"]):
                     if signal <= self.overlap_exit:
                         state["clear"] += 1.0
@@ -79,10 +77,7 @@ class BatchPipelineStateAuthoritative(BatchPipelineStateInvariantJointAttributes
                         state["clear"] = 0.0
                     active = bool(state["active"])
                 else:
-                    active = bool(
-                        iou >= self.overlap_enter
-                        or iom >= self.overlap_intersection_enter
-                    )
+                    active = strong or meaningful
                     if active:
                         state["active"] = 1.0
                         state["clear"] = 0.0
@@ -96,11 +91,10 @@ class BatchPipelineStateAuthoritative(BatchPipelineStateInvariantJointAttributes
         for pair in list(self._overlap_pairs):
             if pair not in seen_pairs:
                 self._overlap_pairs.pop(pair, None)
-
         return blocked, partners
 
     def _extract(self, camera, frame, fps, image, prepared, blocked, partners, info, rows):
-        """Authoritative extraction: hard-freeze identity during severe overlap."""
+        """Hard-freeze identity learning during overlap; recover only after separation."""
         for item in prepared:
             tid = item["tid"]
             box = item["bbox"]
@@ -118,7 +112,7 @@ class BatchPipelineStateAuthoritative(BatchPipelineStateInvariantJointAttributes
                 track = self.tracks.get(key)
                 refs = {"resnet": [], "swin": [], "solider": []}
                 if track is not None:
-                    bank = getattr(track, "state_bank", {})
+                    bank = getattr(track, "state_bank", {}) or {}
                     for model in refs:
                         refs[model] = list(bank.get(model, {}).get("full", [])[-6:])
                     setattr(track, "overlap_recovery", True)
@@ -127,7 +121,6 @@ class BatchPipelineStateAuthoritative(BatchPipelineStateInvariantJointAttributes
                 self._fails[key] = 0
                 info["recovery_left"][key] = 0
                 reason = "authoritative_overlap_identity_frozen"
-
             elif previous and not active:
                 info["recovery_left"][key] = self.recovery_samples
                 info["last"][key] = -10**9
@@ -141,7 +134,6 @@ class BatchPipelineStateAuthoritative(BatchPipelineStateInvariantJointAttributes
                     setattr(track, "recovery_sources", [key])
 
             info["was_overlap"][tid] = active
-            partner_keys = partners.get(key, []) if active else []
             recovery_now = (not active) and info["recovery_left"].get(key, 0) > 0
             rows.write(json.dumps({
                 "camera": camera,
@@ -153,13 +145,12 @@ class BatchPipelineStateAuthoritative(BatchPipelineStateInvariantJointAttributes
                 "bbox": list(box),
                 "detection_score": float(detection.confidence),
                 "overlap_blocked": bool(active),
-                "overlap_partners": partner_keys,
+                "overlap_partners": partners.get(key, []) if active else [],
                 "overlap_boundary": bool(boundary),
                 "segment_reason": reason,
                 "recovery_after_overlap": bool(recovery_now),
             }) + "\n")
 
-            # NEVER extract identity features while the overlap guard is active.
             if active:
                 continue
 
@@ -233,10 +224,6 @@ class BatchPipelineStateAuthoritative(BatchPipelineStateInvariantJointAttributes
 
             self._frame_image = image
             info["last"][key] = frame
-            multi = {
-                "swin": {name: [value] for name, value in swin_map.items()},
-                "solider": {name: [value] for name, value in solider_map.items()},
-            }
             self.add_body(
                 key,
                 camera,
@@ -247,7 +234,7 @@ class BatchPipelineStateAuthoritative(BatchPipelineStateInvariantJointAttributes
                 float(detection.confidence),
                 person,
                 resnet_map,
-                multi,
+                {"swin": {name: [value] for name, value in swin_map.items()}, "solider": {name: [value] for name, value in solider_map.items()}},
             )
             info["samples"] += 1
             info["feature_batches"] += 1
@@ -259,18 +246,14 @@ class BatchPipelineStateAuthoritative(BatchPipelineStateInvariantJointAttributes
                     self._fails.pop(key, None)
 
     def render(self, mapping):
-        """Render PENDING during overlap/recovery; never expose an identity there."""
+        """Never expose an identity during overlap or post-overlap recovery."""
         for camera, meta in self.meta.items():
             cap = cv2.VideoCapture(meta["source"])
             out = self.out / f"{camera}_v6.mp4"
             writer = cv2.VideoWriter(
-                str(out),
-                cv2.VideoWriter_fourcc(*"mp4v"),
-                meta["fps"],
-                (meta["width"], meta["height"]),
+                str(out), cv2.VideoWriter_fourcc(*"mp4v"), meta["fps"], (meta["width"], meta["height"])
             )
             rows = {}
-            priority = {}
             with (self.cache / f"{camera}.detections.jsonl").open("r", encoding="utf-8") as handle:
                 for line in handle:
                     item = json.loads(line)
@@ -279,10 +262,9 @@ class BatchPipelineStateAuthoritative(BatchPipelineStateInvariantJointAttributes
                     frame = int(item["frame"])
                     key = str(item["tracklet_key"])
                     rank = 3 if item.get("overlap_blocked") else (2 if item.get("recovery_after_overlap") else 1)
-                    old = priority.get((frame, key), 0)
-                    if rank >= old:
-                        rows.setdefault(frame, {})[key] = item
-                        priority[(frame, key)] = rank
+                    if rank >= rows.setdefault(frame, {}).get(key, {}).get("_rank", 0):
+                        item["_rank"] = rank
+                        rows[frame][key] = item
 
             frame = 0
             try:
@@ -293,20 +275,17 @@ class BatchPipelineStateAuthoritative(BatchPipelineStateInvariantJointAttributes
                     frame += 1
                     for item in rows.get(frame, {}).values():
                         x1, y1, x2, y2 = [int(v) for v in item["bbox"]]
-                        overlap = bool(item.get("overlap_blocked"))
-                        recovery = bool(item.get("recovery_after_overlap"))
-
-                        if overlap or recovery:
-                            label = "PENDING"
-                            colour = (70, 70, 210) if overlap else (80, 150, 210)
+                        pending = bool(item.get("overlap_blocked") or item.get("recovery_after_overlap"))
+                        gid = "PENDING" if pending else self.label(mapping, item["tracklet_key"])
+                        if not str(gid).startswith("G"):
+                            colour = (145, 145, 145)
+                            label = str(gid)
                         else:
-                            gid = self.label(mapping, item["tracklet_key"])
-                            if gid == "UNKNOWN" or not str(gid).startswith("G"):
-                                colour = (145, 145, 145)
-                                label = str(gid)
-                            else:
-                                colour = self.gid_colour(gid)
-                                label = self.short_gid(gid)
+                            colour = self.gid_colour(gid)
+                            label = self.short_gid(gid)
+                        if pending:
+                            colour = (70, 70, 210) if item.get("overlap_blocked") else (80, 150, 210)
+                            label = "PENDING"
 
                         cv2.rectangle(image, (x1, y1), (x2, y2), colour, 2)
                         scale, thickness = 0.68, 2
@@ -317,16 +296,7 @@ class BatchPipelineStateAuthoritative(BatchPipelineStateInvariantJointAttributes
                         by1 = max(0, by2 - th - base - pad_y * 2)
                         bx2 = min(image.shape[1] - 1, bx1 + tw + pad_x * 2)
                         cv2.rectangle(image, (bx1, by1), (bx2, by2), colour, -1)
-                        cv2.putText(
-                            image,
-                            label,
-                            (bx1 + pad_x, by2 - base - pad_y),
-                            cv2.FONT_HERSHEY_SIMPLEX,
-                            scale,
-                            (255, 255, 255),
-                            thickness,
-                            cv2.LINE_AA,
-                        )
+                        cv2.putText(image, label, (bx1 + pad_x, by2 - base - pad_y), cv2.FONT_HERSHEY_SIMPLEX, scale, (255, 255, 255), thickness, cv2.LINE_AA)
                     writer.write(image)
             finally:
                 cap.release()
@@ -340,10 +310,8 @@ class BatchPipelineStateAuthoritative(BatchPipelineStateInvariantJointAttributes
         if value is None:
             return "UNKNOWN"
         text = str(value)
-        if text == "PENDING":
-            return "PENDING"
-        if text == "UNKNOWN":
-            return "UNKNOWN"
+        if text in ("UNKNOWN", "PENDING"):
+            return text
         if text.startswith("G") and text[1:].isdigit():
             return text
         return "UNKNOWN"

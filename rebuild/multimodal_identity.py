@@ -1,31 +1,30 @@
-
 from __future__ import annotations
 
-import json
-from pathlib import Path
 from types import SimpleNamespace
 
-import cv2
 import numpy as np
 from scipy.optimize import linear_sum_assignment
 
 from rebuild.face_v4 import FaceExtractorV4
 from rebuild.identity_v2 import crop, quality
 from rebuild.person_attributes import pack
-from src.live.persistent_multimodel import PersistentMultimodelRegistry
-from src.live.qdrant_gallery import QdrantGallery
 from reid.nvidia_reid import NVIDIAReIDExtractor
 from reid.nvidia_swin import NVIDIASwinReIDExtractor
 from reid.solider_reid import SOLIDERReIDExtractor
+from src.live.persistent_multimodel import PersistentMultimodelRegistry
+from src.live.qdrant_gallery import QdrantGallery
 from ultralytics import YOLO
 
 
 class MultiModal:
-    """Feature-first global identity resolver.
+    """Strict multimodal identity resolver for the NVIDIA NvDCF pipeline.
 
-    Global IDs come only from multimodal evidence. Tracker IDs are temporal
-    bookkeeping and are never used as identity keys after overlap.
+    Tracker IDs are temporal bookkeeping only. Global IDs are selected from
+    persistent feature evidence. Every frame is solved as a one-to-one
+    assignment, so two detections can never leave this class with the same GID.
     """
+
+    MODELS = ("resnet", "swin", "solider")
 
     def __init__(self, cfg):
         self.cfg = cfg
@@ -50,20 +49,25 @@ class MultiModal:
             device="cuda",
             max_batch=int(self.mod.get("solider_batch", 16)),
         )
-        self.face = None
-        if bool(self.facecfg.get("enabled", True)):
-            self.face = FaceExtractorV4(
-                model=str(self.facecfg.get("model", "buffalo_l")),
-                det_size=tuple(self.facecfg.get("det_size", [640, 640])),
-                min_detection=float(self.facecfg.get("min_detection", 0.55)),
-                min_size=int(self.facecfg.get("min_size", 32)),
-                min_quality=float(self.facecfg.get("min_quality", 0.50)),
-                min_visibility=float(self.facecfg.get("min_visibility", 0.68)),
-                device=str(self.facecfg.get("device", "cuda")),
-            )
-        self.pose = None
-        if bool(self.posecfg.get("enabled", True)):
-            self.pose = YOLO(str(self.posecfg.get("model", "yolo11n-pose.pt")))
+
+        self.face_threshold = float(self.facecfg.get("min_visibility", 0.68))
+        self.face_quality = float(self.facecfg.get("min_quality", 0.50))
+        if not bool(self.facecfg.get("enabled", True)):
+            raise RuntimeError("Face matching is mandatory for the strict NvDCF ReID pipeline")
+        self.face = FaceExtractorV4(
+            model=str(self.facecfg.get("model", "buffalo_l")),
+            det_size=tuple(self.facecfg.get("det_size", [640, 640])),
+            min_detection=float(self.facecfg.get("min_detection", 0.55)),
+            min_size=int(self.facecfg.get("min_size", 32)),
+            min_quality=self.face_quality,
+            min_visibility=self.face_threshold,
+            device=str(self.facecfg.get("device", "cuda")),
+        )
+
+        if not bool(self.posecfg.get("enabled", True)):
+            raise RuntimeError("Pose matching is mandatory for the strict NvDCF ReID pipeline")
+        self.pose = YOLO(str(self.posecfg.get("model", "yolo11n-pose.pt")))
+
         state = cfg["identity_state"]
         self.registry = PersistentMultimodelRegistry(
             state["path"],
@@ -75,10 +79,9 @@ class MultiModal:
             str(state.get("qdrant_prefix", "person_reid")),
             int(state.get("qdrant_limit", 32)),
         )
+
         self.profiles = self._load()
-        self.trackmap = {}
-        self.recovery = {}
-        self.overlap = {}
+        self.trackmap: dict[tuple[str, int], int] = {}
         self.stats = {
             "frames": 0,
             "feature_frames": 0,
@@ -96,7 +99,7 @@ class MultiModal:
     def _unit(value):
         arr = np.asarray(value, np.float32).reshape(-1)
         norm = float(np.linalg.norm(arr))
-        if arr.size == 0 or not np.isfinite(norm) or norm <= 0:
+        if arr.size == 0 or not np.isfinite(norm) or norm <= 0.0:
             return None
         return arr / norm
 
@@ -110,61 +113,116 @@ class MultiModal:
 
     @classmethod
     def _best(cls, left, right):
-        vals = []
+        values = []
         for a in left or []:
             for b in right or []:
-                value = cls._sim(a, b)
-                if value:
-                    vals.append(value)
-        if not vals:
+                values.append(cls._sim(a, b))
+        if not values:
             return 0.0
-        vals.sort(reverse=True)
-        return float(np.mean(vals[: min(3, len(vals))]))
+        values.sort(reverse=True)
+        return float(np.mean(values[: min(3, len(values))]))
 
     @classmethod
     def _attrscores(cls, current, stored):
-        q = np.asarray(current, np.float32).reshape(-1)
-        bank = [
-            np.asarray(x, np.float32).reshape(-1)
-            for x in stored
-        ]
-        bank = [
-            x for x in bank
-            if x.size == 112 and np.isfinite(x).all()
-        ]
-        if q.size != 112 or not bank:
+        query = np.asarray(current, np.float32).reshape(-1)
+        bank = [np.asarray(value, np.float32).reshape(-1) for value in stored or []]
+        bank = [value for value in bank if value.size == 112 and np.isfinite(value).all()]
+        if query.size != 112 or not bank:
             return None
-        top = cls._best([q[:20]], [x[:20] for x in bank])
-        bottom = cls._best([q[20:40]], [x[20:40] for x in bank])
-        uppat = cls._best([q[40:54]], [x[40:54] for x in bank])
-        lowpat = cls._best([q[54:68]], [x[54:68] for x in bank])
+
+        top = cls._best([query[:20]], [value[:20] for value in bank])
+        bottom = cls._best([query[20:40]], [value[20:40] for value in bank])
+        upper_pattern = cls._best([query[40:54]], [value[40:54] for value in bank])
+        lower_pattern = cls._best([query[54:68]], [value[54:68] for value in bank])
         return {
             "top": float(top),
             "bottom": float(bottom),
-            "upper_pattern": float(uppat),
-            "lower_pattern": float(lowpat),
-            "pattern": float(0.50 * uppat + 0.50 * lowpat),
+            "upper_pattern": float(upper_pattern),
+            "lower_pattern": float(lower_pattern),
+            "pattern": float(0.50 * upper_pattern + 0.50 * lower_pattern),
+            "top_visible": bool(query[108] > 0.0),
+            "bottom_visible": bool(query[109] > 0.0),
         }
 
-    @staticmethod
-    def _pose(value):
-        arr = np.asarray(value, np.float32).reshape(-1)
-        return arr if arr.size == 51 and np.isfinite(arr).all() else None
+    @classmethod
+    def _face_score(cls, current, stored):
+        if not current:
+            return {"used": False, "score": 0.0}
+        vector = cls._unit(current.get("vector"))
+        if vector is None:
+            return {"used": False, "score": 0.0}
+        values = []
+        for value in stored or []:
+            if isinstance(value, dict):
+                if not value.get("valid", True):
+                    continue
+                value = value.get("vector")
+            other = cls._unit(value)
+            if other is not None and other.shape == vector.shape:
+                values.append(float(np.dot(vector, other)))
+        if not values:
+            return {"used": False, "score": 0.0}
+        values.sort(reverse=True)
+        return {"used": True, "score": float(np.mean(values[: min(3, len(values))]))}
 
     @staticmethod
-    def _face(item):
-        if not item:
+    def _pose_vector(value):
+        if value is None:
             return None
-        if not item.get("valid"):
+        arr = np.asarray(value, np.float32).reshape(-1)
+        if arr.size != 51 or not np.isfinite(arr).all():
             return None
-        if float(item.get("visibility", 0.0)) < 0.68:
-            return None
-        if float(item.get("quality", 0.0)) < 0.50:
-            return None
-        vec = np.asarray(item.get("vector"), np.float32).reshape(-1)
-        if vec.size != 512 or not np.isfinite(vec).all():
-            return None
-        return vec
+        return MultiModal._unit(arr)
+
+    @classmethod
+    def _poses(cls, model, frame):
+        result = model(frame, classes=[0], conf=0.20, iou=0.65, verbose=False)
+        if not result or result[0].boxes is None:
+            return []
+        keypoints = getattr(result[0], "keypoints", None)
+        if keypoints is None or getattr(keypoints, "data", None) is None:
+            return []
+        data = keypoints.data.cpu().numpy()
+        output = []
+        for index, box in enumerate(result[0].boxes):
+            if index >= len(data):
+                continue
+            raw = np.asarray(data[index], np.float32)
+            if raw.shape != (17, 3) or not np.isfinite(raw).all():
+                continue
+            bbox = np.asarray(box.xyxy[0].tolist(), np.float32)
+            output.append((bbox, raw))
+        return output
+
+    @classmethod
+    def _posevec(cls, poses, box):
+        target = np.asarray(box, np.float32)
+        best = None
+        best_iou = 0.0
+        for pose_box, raw in poses:
+            ix1 = max(target[0], pose_box[0])
+            iy1 = max(target[1], pose_box[1])
+            ix2 = min(target[2], pose_box[2])
+            iy2 = min(target[3], pose_box[3])
+            inter = max(0.0, ix2 - ix1) * max(0.0, iy2 - iy1)
+            ta = max(1.0, (target[2] - target[0]) * (target[3] - target[1]))
+            pa = max(1.0, (pose_box[2] - pose_box[0]) * (pose_box[3] - pose_box[1]))
+            iou = inter / max(1.0, ta + pa - inter)
+            if iou <= best_iou:
+                continue
+
+            width = max(1.0, target[2] - target[0])
+            height = max(1.0, target[3] - target[1])
+            vector = raw.copy()
+            vector[:, 0] = (raw[:, 0] - target[0]) / width
+            vector[:, 1] = (raw[:, 1] - target[1]) / height
+            vector[:, 2] = np.clip(raw[:, 2], 0.0, 1.0)
+            vector = cls._pose_vector(vector)
+            if vector is None:
+                continue
+            best = vector
+            best_iou = float(iou)
+        return best, float(best_iou)
 
     def _load(self):
         gallery = self.registry.load_gallery()
@@ -181,123 +239,31 @@ class MultiModal:
             }
         return profiles
 
-    @classmethod
-    def _poses(cls, model, frame):
-        if model is None:
-            return []
-        result = model(frame, conf=0.20, iou=0.65, verbose=False)
-        if not result or result[0].boxes is None:
-            return []
-        kp = getattr(result[0], "keypoints", None)
-        if kp is None or getattr(kp, "data", None) is None:
-            return []
-        data = kp.data.cpu().numpy()
-        out = []
-        for index, item in enumerate(result[0].boxes):
-            if index >= len(data):
-                continue
-            raw = np.asarray(data[index], np.float32)
-            if raw.ndim != 2 or raw.shape[1] < 3 or len(raw) != 17:
-                continue
-            box = np.asarray(item.xyxy[0].tolist(), np.float32)
-            out.append((box, raw))
-        return out
-
-    @classmethod
-    def _posevec(cls, poses, box):
-        if not poses:
-            return None, 0.0
-        target = np.asarray(box, np.float32)
-        best = None
-        score = 0.0
-        for posebox, raw in poses:
-            ix1 = max(target[0], posebox[0])
-            iy1 = max(target[1], posebox[1])
-            ix2 = min(target[2], posebox[2])
-            iy2 = min(target[3], posebox[3])
-            inter = max(0.0, ix2 - ix1) * max(0.0, iy2 - iy1)
-            ta = max(1.0, (target[2] - target[0]) * (target[3] - target[1]))
-            pa = max(1.0, (posebox[2] - posebox[0]) * (posebox[3] - posebox[1]))
-            iou = inter / max(1.0, ta + pa - inter)
-            if iou <= score:
-                continue
-            width = max(1.0, target[2] - target[0])
-            height = max(1.0, target[3] - target[1])
-            vec = raw.copy()
-            vec[:, 0] = (vec[:, 0] - target[0]) / width
-            vec[:, 1] = (vec[:, 1] - target[1]) / height
-            vec[:, 2] = np.clip(vec[:, 2], 0.0, 1.0)
-            vec = vec.reshape(-1)
-            norm = float(np.linalg.norm(vec))
-            if norm <= 0 or not np.isfinite(norm):
-                continue
-            best = vec / norm
-            score = float(iou)
-        if best is None:
-            return None, 0.0
-        return best, float(score)
-
-    def _probe(self, gid):
-        profile = self.profiles.get(int(gid), {})
-        return SimpleNamespace(
-            state_bank={
-                "resnet": {"full": profile.get("resnet", [])[-64:]},
-                "swin": {"full": profile.get("swin", [])[-64:]},
-                "solider": {"full": profile.get("solider", [])[-64:]},
-                "pose": {"pose": profile.get("pose", [])[-64:]},
-            },
-            attribute_bank=profile.get("attributes", [])[-64:],
-            face_bank=[
-                {
-                    "vector": x,
-                    "valid": True,
-                    "quality": 1.0,
-                    "visibility": 1.0,
-                }
-                for x in profile.get("face", [])[-32:]
-            ],
-        )
-
     def _candidates(self, obs):
         group = SimpleNamespace(
             state_bank={
                 "resnet": {"full": [obs["resnet"]]},
                 "swin": {"full": [obs["swin"]]},
                 "solider": {"full": [obs["solider"]]},
-                "pose": {"pose": [obs["pose"]]}
-                if obs.get("pose") is not None else {},
+                "pose": {"pose": [obs["pose"]]} if obs.get("pose") is not None else {},
             },
             attribute_bank=[obs["attributes"]],
-            face_bank=(
-                [
-                    {
-                        "vector": obs["face"]["vector"],
-                        "valid": True,
-                        "quality": obs["face"]["quality"],
-                        "visibility": obs["face"]["visibility"],
-                    }
-                ]
-                if obs.get("face") else []
-            ),
+            face_bank=[obs["face"]] if obs.get("face") else [],
         )
-        hits, got = self.qdrant.search_component([group])
-        ids = set(int(x) for x in hits)
-        ids.update(int(x) for x in self.profiles)
-        return ids, got
+        hits, retrieved = self.qdrant.search_component([group])
+        ids = {int(gid) for gid in self.profiles}
+        ids.update(int(gid) for gid in hits)
+        return ids, retrieved
 
-    def _score(self, obs, gid, got):
+    def _score(self, obs, gid, retrieved):
         profile = self.profiles.get(int(gid), {})
-        remote = got.get(int(gid), {})
+        remote = retrieved.get(int(gid), {})
         values = {}
-        for model in ("resnet", "swin", "solider"):
-            remotevals = []
+        for model in self.MODELS:
+            remote_values = []
             for view in remote.get(model, {}).values():
-                remotevals.extend(view)
-            localvals = profile.get(model, [])
-            values[model] = self._best(
-                [obs[model]],
-                remotevals or localvals,
-            )
+                remote_values.extend(view)
+            values[model] = self._best([obs[model]], remote_values or profile.get(model, []))
 
         deep = (
             0.30 * values["resnet"]
@@ -305,146 +271,102 @@ class MultiModal:
             + 0.33 * values["solider"]
         )
 
-        stored_attrs = (
-            remote.get("attributes", {}).get("attributes", [])
-            or profile.get("attributes", [])
-        )
-        attr = self._attrscores(
-            obs["attributes"],
-            stored_attrs,
-        )
-        if attr is None:
+        stored_attrs = remote.get("attributes", {}).get("attributes", []) or profile.get("attributes", [])
+        attrs = self._attrscores(obs["attributes"], stored_attrs)
+        if attrs is None:
             return None
 
-        top = attr["top"]
-        bottom = attr["bottom"]
-        uppat = attr["upper_pattern"]
-        lowpat = attr["lower_pattern"]
-        pattern = attr["pattern"]
+        pose_values = remote.get("pose", {}).get("pose", []) or profile.get("pose", [])
+        pose = self._best([obs["pose"]], pose_values) if obs.get("pose") is not None and pose_values else 0.0
 
-        posevals = (
-            remote.get("pose", {}).get("pose", [])
-            or profile.get("pose", [])
-        )
-        pose = (
-            self._best([obs["pose"]], posevals)
-            if obs.get("pose") is not None and posevals
-            else 0.0
+        face = self._face_score(
+            obs.get("face"),
+            remote.get("face", {}).get("face", []) or profile.get("face", []),
         )
 
-        face = 0.0
-        faceused = False
-        if obs.get("face"):
-            faces = (
-                remote.get("face", {}).get("face", [])
-                or profile.get("face", [])
-            )
-            face = self._best(
-                [obs["face"]["vector"]],
-                faces,
-            )
-            faceused = bool(faces)
+        top = attrs["top"]
+        bottom = attrs["bottom"]
+        pattern = attrs["pattern"]
 
-        if faceused:
-            total = (
-                0.55 * face
-                + 0.20 * deep
-                + 0.10 * top
-                + 0.10 * bottom
-                + 0.05 * pose
+        if face["used"] and face["score"] >= self.face_threshold:
+            score = (
+                0.62 * face["score"]
+                + 0.17 * deep
+                + 0.09 * top
+                + 0.09 * bottom
+                + 0.03 * pose
             )
         else:
-            total = (
-                0.45 * deep
-                + 0.20 * top
-                + 0.20 * bottom
-                + 0.10 * pose
-                + 0.05 * pattern
+            score = (
+                0.46 * deep
+                + 0.22 * top
+                + 0.22 * bottom
+                + 0.07 * pose
+                + 0.03 * pattern
             )
 
-        contradiction = bool(
-            top >= 0.70 and bottom < 0.34
-        )
-        if contradiction and not (
-            faceused and face >= 0.88
-        ):
-            total -= 0.12
+        lower_conflict = bool(top >= 0.70 and bottom < 0.34)
+        if lower_conflict and not (face["used"] and face["score"] >= 0.88):
+            score -= 0.12
 
         return {
-            "score": float(np.clip(total, 0.0, 0.99)),
+            "score": float(np.clip(score, 0.0, 0.995)),
             "deep": float(deep),
             "resnet": float(values["resnet"]),
             "swin": float(values["swin"]),
             "solider": float(values["solider"]),
             "top": float(top),
             "bottom": float(bottom),
-            "upper_pattern": float(uppat),
-            "lower_pattern": float(lowpat),
+            "upper_pattern": float(attrs["upper_pattern"]),
+            "lower_pattern": float(attrs["lower_pattern"]),
             "pose": float(pose),
-            "face": float(face),
-            "faceused": faceused,
+            "face": float(face["score"]),
+            "faceused": bool(face["used"] and face["score"] >= self.face_threshold),
         }
 
     def _accept(self, row, second, recovery=False):
         margin = float(row["score"] - second)
-        if row["faceused"] and row["face"] >= 0.86:
+        models = sum(row[name] >= 0.48 for name in self.MODELS)
+
+        if row["faceused"] and row["face"] >= 0.82:
             return bool(
-                row["score"] >= 0.72
-                and margin >= 0.025
+                row["score"] >= float(self.idcfg.get("face_existing_min", 0.70))
+                and margin >= float(self.idcfg.get("face_margin", 0.015))
+                and row["top"] >= 0.40
+                and row["bottom"] >= 0.40
             )
+
         if recovery:
             return bool(
-                row["score"] >= float(
-                    self.idcfg["recovery_min"]
-                )
-                and margin >= float(
-                    self.idcfg["recovery_margin"]
-                )
-                and row["deep"] >= 0.52
-                and row["top"] >= 0.48
-                and row["bottom"] >= 0.46
-                and sum(
-                    row[x] >= 0.50
-                    for x in ("resnet", "swin", "solider")
-                ) >= 2
+                row["score"] >= float(self.idcfg.get("recovery_min", 0.60))
+                and margin >= float(self.idcfg.get("recovery_margin", 0.012))
+                and row["deep"] >= 0.48
+                and row["top"] >= 0.45
+                and row["bottom"] >= 0.45
+                and models >= 2
             )
+
         return bool(
-            row["score"] >= float(
-                self.idcfg["existing_min"]
-            )
-            and margin >= float(self.idcfg["margin"])
-            and row["deep"] >= 0.54
-            and row["top"] >= 0.48
-            and row["bottom"] >= 0.46
-            and sum(
-                row[x] >= 0.50
-                for x in ("resnet", "swin", "solider")
-            ) >= 2
+            row["score"] >= float(self.idcfg.get("existing_min", 0.62))
+            and margin >= float(self.idcfg.get("margin", 0.015))
+            and row["deep"] >= 0.48
+            and row["top"] >= 0.45
+            and row["bottom"] >= 0.45
+            and models >= 2
         )
 
     def _save(self, gid, obs):
         profile = self.profiles[int(gid)]
-        for model in ("resnet", "swin", "solider"):
-            profile[model].append(
-                np.asarray(obs[model], np.float32)
-            )
+        for model in self.MODELS:
+            profile[model].append(np.asarray(obs[model], np.float32))
             profile[model] = profile[model][-96:]
-        profile["attributes"].append(
-            np.asarray(obs["attributes"], np.float32)
-        )
+        profile["attributes"].append(np.asarray(obs["attributes"], np.float32))
         profile["attributes"] = profile["attributes"][-64:]
         if obs.get("face"):
-            profile["face"].append(
-                np.asarray(
-                    obs["face"]["vector"],
-                    np.float32,
-                )
-            )
+            profile["face"].append(np.asarray(obs["face"]["vector"], np.float32))
             profile["face"] = profile["face"][-32:]
         if obs.get("pose") is not None:
-            profile["pose"].append(
-                np.asarray(obs["pose"], np.float32)
-            )
+            profile["pose"].append(np.asarray(obs["pose"], np.float32))
             profile["pose"] = profile["pose"][-64:]
         profile["camera"].add(str(obs["camera"]))
 
@@ -452,37 +374,33 @@ class MultiModal:
             key=f"G{int(gid):06d}",
             members=[f"G{int(gid):06d}"],
             state_bank={
-                "resnet": {"full": profile["resnet"][-8:]},
-                "swin": {"full": profile["swin"][-8:]},
-                "solider": {"full": profile["solider"][-8:]},
-                "pose": {"pose": profile["pose"][-8:]},
+                "resnet": {"full": profile["resnet"][-12:]},
+                "swin": {"full": profile["swin"][-12:]},
+                "solider": {"full": profile["solider"][-12:]},
+                "pose": {"pose": profile["pose"][-12:]},
             },
-            attribute_bank=profile["attributes"][-8:],
+            attribute_bank=profile["attributes"][-12:],
             face_bank=[
                 {
-                    "vector": x,
+                    "vector": value,
                     "valid": True,
                     "quality": 1.0,
                     "visibility": 1.0,
                 }
-                for x in profile["face"][-8:]
+                for value in profile["face"][-12:]
             ],
         )
-        self.qdrant.upsert_component(
-            int(gid),
-            [group],
-        )
-        banks = {
-            "resnet": profile["resnet"][-32:],
-            "swin": profile["swin"][-32:],
-            "solider": profile["solider"][-32:],
-            "attributes": profile["attributes"][-32:],
-            "face": profile["face"][-16:],
-            "pose": profile["pose"][-32:],
-        }
+        self.qdrant.upsert_component(int(gid), [group])
         self.registry.save_component(
             int(gid),
-            model_banks=banks,
+            model_banks={
+                "resnet": profile["resnet"][-48:],
+                "swin": profile["swin"][-48:],
+                "solider": profile["solider"][-48:],
+                "attributes": profile["attributes"][-48:],
+                "face": profile["face"][-24:],
+                "pose": profile["pose"][-48:],
+            },
             cameras=profile["camera"],
             last_ts=float(obs["time"]),
             obs=len(profile["resnet"]),
@@ -503,201 +421,148 @@ class MultiModal:
         self.stats["new_gids"] += 1
         return gid
 
-    def observe(self, frame, rows, commit=True):
-        """Extract mandatory features and solve a one-to-one GID assignment."""
-        poses = self._poses(self.pose, frame)
-        base = []
-        images = []
-        for item in rows:
-            person = crop(frame, item["bbox"])
-            q = float(quality(person)) if person is not None else 0.0
-            if (
-                person is None
-                or q < float(
-                    self.reidcfg.get("min_quality", 0.20)
-                )
-            ):
-                continue
-            base.append((item, person, q))
-            images.append(person)
-        if not base:
-            return {}
-        self.stats["feature_frames"] += 1
-
-        resnet = self.resnet.extract_batch(images)
-        swin = self.swin.extract_batch(images)
-        solider = self.solider.extract_batch(images)
-        if not (
-            len(resnet)
-            == len(base)
-            == len(swin)
-            == len(solider)
-        ):
-            raise RuntimeError(
-                "Multimodal extractors returned mismatched batch sizes"
-            )
-
-        observations = []
-        for index, (item, person, q) in enumerate(base):
-            attrs = pack(
-                person,
-                frame,
-                item["bbox"],
-            )
-            face = None
-            if self.face is not None:
-                faceobj = self.face.extract(
-                    frame,
-                    item["bbox"],
-                )
-                if faceobj is not None and faceobj.valid:
-                    face = {
-                        "vector": faceobj.vector,
-                        "quality": float(faceobj.quality),
-                        "visibility": float(
-                            faceobj.visibility
-                        ),
-                    }
-                    self.stats["face_frames"] += 1
-            pose, posescore = self._posevec(
-                poses,
-                item["bbox"],
-            )
-            observations.append(
-                {
-                    "row": item,
-                    "camera": item["camera"],
-                    "time": float(item["timestamp"]),
-                    "resnet": np.asarray(
-                        resnet[index],
-                        np.float32,
-                    ),
-                    "swin": np.asarray(
-                        swin[index],
-                        np.float32,
-                    ),
-                    "solider": np.asarray(
-                        solider[index],
-                        np.float32,
-                    ),
-                    "attributes": np.asarray(
-                        attrs,
-                        np.float32,
-                    ),
-                    "face": face,
-                    "pose": pose,
-                    "pose_score": float(posescore),
-                }
-            )
-
+    def assign_rows(self, observations, scoresets, commit=True, recovery=False):
+        """Strict one-to-one assignment for a single frame."""
+        count = len(observations)
         gids = sorted(self.profiles)
-        matrix = np.full(
-            (
-                len(observations),
-                len(gids) + len(observations),
-            ),
-            float(self.idcfg["new_floor"]),
-            np.float32,
-        )
-        scoreset = []
-        gets = []
-        for index, obs in enumerate(observations):
-            ids, got = self._candidates(obs)
-            gets.append(got)
-            scores = {}
-            for gid in ids:
-                value = self._score(obs, int(gid), got)
-                if value is not None:
-                    scores[int(gid)] = value
-            scoreset.append(scores)
-            for col, gid in enumerate(gids):
-                if gid in scores:
-                    matrix[index, col] = scores[gid]["score"]
+        if count == 0:
+            return {}
 
-        rr, cc = linear_sum_assignment(-matrix)
+        floor = float(self.idcfg.get("new_floor", 0.50))
+        matrix = np.full((count, len(gids) + count), floor, np.float32)
+        for row, scores in enumerate(scoresets):
+            for column, gid in enumerate(gids):
+                if gid in scores:
+                    matrix[row, column] = float(scores[gid]["score"])
+
+        _, columns = linear_sum_assignment(-matrix)
         chosen = {}
-        for row, col in zip(rr, cc):
-            if row >= len(observations):
-                continue
-            obs = observations[row]
-            scores = scoreset[row]
-            ranked = sorted(
-                scores.items(),
-                key=lambda x: x[1]["score"],
-                reverse=True,
-            )
-            best = ranked[0][1] if ranked else None
-            second = (
-                ranked[1][1]["score"]
-                if len(ranked) > 1
-                else 0.0
-            )
-            key = (
-                str(obs["row"]["camera"]),
-                int(obs["row"]["track_id"]),
-            )
-            recovery = bool(
-                self.recovery.get(key, False)
-            )
+        for row in range(count):
+            column = int(columns[row]) if row < len(columns) else len(gids) + row
+            scores = scoresets[row]
+            ranked = sorted(scores.items(), key=lambda item: item[1]["score"], reverse=True)
+            best_score = float(ranked[0][1]["score"]) if ranked else 0.0
+            second = float(ranked[1][1]["score"]) if len(ranked) > 1 else 0.0
+
             selected = None
-            if col < len(gids):
-                gid = gids[col]
-                if gid in scores and self._accept(
-                    scores[gid],
-                    second,
-                    recovery,
-                ):
+            if column < len(gids):
+                gid = gids[column]
+                candidate = scores.get(gid)
+                if candidate is not None and self._accept(candidate, second, recovery=recovery):
                     selected = int(gid)
 
             if selected is None:
-                # Never create a new identity during an overlap recovery
-                # window. A failed recovery remains pending until a later
-                # feature observation can match an established profile.
-                if recovery:
+                if recovery or not commit:
                     self.stats["pending_frames"] += 1
                     continue
-                if best is not None and best["score"] >= 0.55:
+                known_floor = float(self.idcfg.get("known_floor", 0.58))
+                if best_score >= known_floor:
                     self.stats["pending_frames"] += 1
                     continue
-                if not commit:
-                    self.stats["pending_frames"] += 1
-                    continue
-                selected = self._new(obs)
+                selected = self._new(observations[row])
 
             chosen[row] = selected
 
-        # This is intentionally redundant with Hungarian assignment. It is a
-        # hard invariant: at most one person row can leave this function with
-        # a given GID.
-        seen = set()
+        # The assignment matrix is already injective. This second gate protects
+        # against future changes that might introduce an alternate fallback.
+        used = set()
         for row in list(chosen):
             gid = chosen[row]
-            if gid in seen:
+            if gid in used:
                 chosen.pop(row)
-            else:
-                seen.add(gid)
+                self.stats["duplicate_frames"] += 1
+                continue
+            used.add(gid)
 
         for row, gid in chosen.items():
             obs = observations[row]
-            key = (
-                str(obs["row"]["camera"]),
-                int(obs["row"]["track_id"]),
-            )
-            if commit:
-                self.trackmap[key] = gid
-                self._save(gid, obs)
-                if bool(self.recovery.get(key, False)):
-                    self.stats["recovery_matches"] += 1
-                if obs.get("face") is not None:
-                    self.stats["face_matches"] += 1
-                if len(self.profiles[gid]["camera"]) > 1:
-                    self.stats["cross_camera_matches"] += 1
+            if not commit:
+                continue
+            self.trackmap[(str(obs["row"]["camera"]), int(obs["row"]["track_id"]))] = int(gid)
+            self._save(gid, obs)
+            if recovery:
+                self.stats["recovery_matches"] += 1
+            if obs.get("face"):
+                self.stats["face_matches"] += 1
+            if len(self.profiles[gid]["camera"]) > 1:
+                self.stats["cross_camera_matches"] += 1
 
         return {
             int(observations[row]["row"]["track_id"]): f"G{int(gid):06d}"
             for row, gid in chosen.items()
         }
 
+    def observe(self, frame, rows, commit=True, recovery=False):
+        """Extract face + clothing + ReID + pose and solve one-to-one."""
+        poses = self._poses(self.pose, frame)
+        observations = []
+        images = []
+        for item in rows:
+            person = crop(frame, item["bbox"])
+            if person is None or person.size == 0:
+                continue
+            images.append(person)
+            observations.append(
+                {
+                    "row": item,
+                    "camera": str(item["camera"]),
+                    "time": float(item["timestamp"]),
+                    "crop_quality": float(quality(person)),
+                    "person": person,
+                }
+            )
+
+        if not observations:
+            return {}
+
+        self.stats["feature_frames"] += 1
+        if recovery:
+            self.stats["recovery_frames"] += 1
+
+        resnet = self.resnet.extract_batch(images)
+        swin = self.swin.extract_batch(images)
+        solider = self.solider.extract_batch(images)
+        if not (len(resnet) == len(observations) == len(swin) == len(solider)):
+            raise RuntimeError("Multimodal extractors returned mismatched batch lengths")
+
+        for index, obs in enumerate(observations):
+            obs["resnet"] = np.asarray(resnet[index], np.float32)
+            obs["swin"] = np.asarray(swin[index], np.float32)
+            obs["solider"] = np.asarray(solider[index], np.float32)
+            obs["attributes"] = np.asarray(pack(obs["person"], frame, obs["row"]["bbox"]), np.float32)
+
+            face = self.face.extract(frame, obs["row"]["bbox"])
+            if face is not None and face.valid and face.visibility >= self.face_threshold:
+                obs["face"] = {
+                    "vector": np.asarray(face.vector, np.float32),
+                    "quality": float(face.quality),
+                    "visibility": float(face.visibility),
+                }
+                self.stats["face_frames"] += 1
+            else:
+                obs["face"] = None
+
+            obs["pose"], obs["pose_overlap"] = self._posevec(poses, obs["row"]["bbox"])
+
+        scoresets = []
+        for obs in observations:
+            ids, retrieved = self._candidates(obs)
+            scores = {}
+            for gid in ids:
+                value = self._score(obs, int(gid), retrieved)
+                if value is not None:
+                    scores[int(gid)] = value
+            scoresets.append(scores)
+
+        return self.assign_rows(
+            observations,
+            scoresets,
+            commit=commit,
+            recovery=recovery,
+        )
+
     def close(self):
         self.registry.close()
-''
+
+
+__all__ = ["MultiModal"]

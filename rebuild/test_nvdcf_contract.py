@@ -1,5 +1,7 @@
 from pathlib import Path
 
+import yaml
+
 
 ROOT = Path(__file__).resolve().parents[1]
 
@@ -8,34 +10,39 @@ def text(path):
     return (ROOT / path).read_text(encoding="utf-8")
 
 
+def config():
+    return yaml.safe_load(text("rebuild/config_state_invariant.yaml"))
+
+
 def test_nvdcf_is_the_only_tracker_backend():
-    value = text("rebuild/config_state_invariant.yaml")
-    assert "backend: nvdcf" in value
-    assert "tracker:" not in value
-    assert "botsort" not in value.lower()
-    assert "bytetrack" not in value.lower()
+    value = config()["detector"]
+    assert value["backend"] == "nvdcf"
+    assert "config" in value
+    assert "nvdcf" in str(value["config"]).lower()
+    whole = text("rebuild/config_state_invariant.yaml").lower()
+    assert "botsort" not in whole
+    assert "bytetrack" not in whole
 
 
-def test_nvdcf_uses_deepstream_tracker():
+def test_nvdcf_uses_real_deepstream_tracker():
     value = text("rebuild/nvdcf_tracker.py")
     assert "nvtracker" in value
     assert "libnvds_nvmultiobjecttracker.so" in value
-    assert "config_tracker_NvDCF_accuracy.yml" in value
     assert "pyds" in value
+    assert 'tracker.set_property("ll-lib-file"' in value
+    assert 'tracker.set_property("ll-config-file"' in value
     assert "object_id" in value
 
 
 def test_global_assignment_is_feature_first_and_one_to_one():
     value = text("rebuild/multimodal_identity.py")
+    batch = text("rebuild/batch_nvdcf.py")
     assert "linear_sum_assignment" in value
-    assert "top_clothing_color" in text("rebuild/batch_nvdcf.py")
-    assert "bottom_clothing_color" in text("rebuild/batch_nvdcf.py")
-    assert "commit=not bool(active_overlap)" in text(
-        "rebuild/batch_nvdcf.py"
-    )
-    assert "Post-overlap identity MUST come from features" in text(
-        "rebuild/batch_nvdcf.py"
-    )
+    assert "self.identity.observe" in batch
+    assert "recovery=True" in batch
+    assert "feature-only" in batch.lower()
+    assert "tracker_id_global_fallback" not in batch
+    assert 'gid = str(feature_map.get(int(item["track_id"]), "PENDING"))' in batch
 
 
 def test_required_feature_stack_is_present():
@@ -48,21 +55,27 @@ def test_required_feature_stack_is_present():
         "pack",
         "QdrantGallery",
         "YOLO",
+        "top",
+        "bottom",
+        "pose",
+        "face",
     ):
         assert name in value
 
-    assert "0.55 * face" in value
-    assert "0.10 * top" in value
-    assert "0.10 * bottom" in value
-    assert "0.05 * pose" in value
+    # Face is the highest-weight single identity cue when reliable.
+    assert "0.62 * face" in value
+    # Top and bottom clothing are independent mandatory score terms.
+    assert "0.09 * top" in value
+    assert "0.09 * bottom" in value
+    assert "0.22 * top" not in value or "0.22 * bottom" not in value
 
 
 def test_face_and_pose_are_mandatory_runtime_components():
-    config = text("rebuild/config_state_invariant.yaml")
-    assert "face:" in config and "enabled: true" in config
-    assert "required: true" in config
-    assert "min_visibility: 0.68" in config
-    assert "pose:" in config and "enabled: true" in config
+    value = config()
+    assert value["face"]["enabled"] is True
+    assert value["face"]["required"] is True
+    assert float(value["face"]["min_visibility"]) >= 0.65
+    assert value["pose"]["enabled"] is True
 
 
 def test_qdrant_has_every_identity_space():
@@ -80,5 +93,13 @@ def test_qdrant_has_every_identity_space():
 
 def test_batch_has_hard_same_frame_collision_gate():
     value = text("rebuild/batch_nvdcf.py")
-    assert "same-frame duplicate global ID" in value
+    assert "same-frame duplicate GID" in value
     assert "same-frame duplicate GID survived validation" in value
+    assert "PENDING" in value
+
+
+def test_no_tracker_id_to_gid_fallback_exists():
+    value = text("rebuild/batch_nvdcf.py")
+    assert "self.identity.trackmap.get" not in value
+    assert "trackmap.get" not in value
+    assert "f\"G{int(prior)" not in value

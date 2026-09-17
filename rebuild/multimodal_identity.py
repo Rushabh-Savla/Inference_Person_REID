@@ -17,12 +17,7 @@ from ultralytics import YOLO
 
 
 class MultiModal:
-    """Strict multimodal identity resolver for the NVIDIA NvDCF pipeline.
-
-    Tracker IDs are temporal bookkeeping only. Global IDs are selected from
-    persistent feature evidence. Every frame is solved as a one-to-one
-    assignment, so two detections can never leave this class with the same GID.
-    """
+    """Strict multimodal identity resolver for the NVIDIA NvDCF pipeline."""
 
     MODELS = ("resnet", "swin", "solider")
 
@@ -79,9 +74,8 @@ class MultiModal:
             str(state.get("qdrant_prefix", "person_reid")),
             int(state.get("qdrant_limit", 32)),
         )
-
         self.profiles = self._load()
-        self.trackmap: dict[tuple[str, int], int] = {}
+        self.trackmap = {}
         self.stats = {
             "frames": 0,
             "feature_frames": 0,
@@ -129,7 +123,6 @@ class MultiModal:
         bank = [value for value in bank if value.size == 112 and np.isfinite(value).all()]
         if query.size != 112 or not bank:
             return None
-
         top = cls._best([query[:20]], [value[:20] for value in bank])
         bottom = cls._best([query[20:40]], [value[20:40] for value in bank])
         upper_pattern = cls._best([query[40:54]], [value[40:54] for value in bank])
@@ -140,8 +133,6 @@ class MultiModal:
             "upper_pattern": float(upper_pattern),
             "lower_pattern": float(lower_pattern),
             "pattern": float(0.50 * upper_pattern + 0.50 * lower_pattern),
-            "top_visible": bool(query[108] > 0.0),
-            "bottom_visible": bool(query[109] > 0.0),
         }
 
     @classmethod
@@ -165,14 +156,14 @@ class MultiModal:
         values.sort(reverse=True)
         return {"used": True, "score": float(np.mean(values[: min(3, len(values))]))}
 
-    @staticmethod
-    def _pose_vector(value):
+    @classmethod
+    def _pose_vector(cls, value):
         if value is None:
             return None
         arr = np.asarray(value, np.float32).reshape(-1)
         if arr.size != 51 or not np.isfinite(arr).all():
             return None
-        return MultiModal._unit(arr)
+        return cls._unit(arr)
 
     @classmethod
     def _poses(cls, model, frame):
@@ -210,7 +201,6 @@ class MultiModal:
             iou = inter / max(1.0, ta + pa - inter)
             if iou <= best_iou:
                 continue
-
             width = max(1.0, target[2] - target[0])
             height = max(1.0, target[3] - target[1])
             vector = raw.copy()
@@ -258,6 +248,7 @@ class MultiModal:
     def _score(self, obs, gid, retrieved):
         profile = self.profiles.get(int(gid), {})
         remote = retrieved.get(int(gid), {})
+
         values = {}
         for model in self.MODELS:
             remote_values = []
@@ -265,11 +256,7 @@ class MultiModal:
                 remote_values.extend(view)
             values[model] = self._best([obs[model]], remote_values or profile.get(model, []))
 
-        deep = (
-            0.30 * values["resnet"]
-            + 0.37 * values["swin"]
-            + 0.33 * values["solider"]
-        )
+        deep = 0.30 * values["resnet"] + 0.37 * values["swin"] + 0.33 * values["solider"]
 
         stored_attrs = remote.get("attributes", {}).get("attributes", []) or profile.get("attributes", [])
         attrs = self._attrscores(obs["attributes"], stored_attrs)
@@ -279,6 +266,7 @@ class MultiModal:
         pose_values = remote.get("pose", {}).get("pose", []) or profile.get("pose", [])
         pose = self._best([obs["pose"]], pose_values) if obs.get("pose") is not None and pose_values else 0.0
 
+        face_visible = obs.get("face") is not None
         face = self._face_score(
             obs.get("face"),
             remote.get("face", {}).get("face", []) or profile.get("face", []),
@@ -288,7 +276,10 @@ class MultiModal:
         bottom = attrs["bottom"]
         pattern = attrs["pattern"]
 
-        if face["used"] and face["score"] >= self.face_threshold:
+        # A reliable detected face is the strongest cue. A low face similarity
+        # remains a strong negative signal; it never silently falls back to
+        # clothing/ReID for a candidate when a face gallery exists.
+        if face_visible and face["used"]:
             score = (
                 0.62 * face["score"]
                 + 0.17 * deep
@@ -296,6 +287,7 @@ class MultiModal:
                 + 0.09 * bottom
                 + 0.03 * pose
             )
+            faceused = True
         else:
             score = (
                 0.46 * deep
@@ -304,9 +296,10 @@ class MultiModal:
                 + 0.07 * pose
                 + 0.03 * pattern
             )
+            faceused = False
 
         lower_conflict = bool(top >= 0.70 and bottom < 0.34)
-        if lower_conflict and not (face["used"] and face["score"] >= 0.88):
+        if lower_conflict and not (faceused and face["score"] >= 0.88):
             score -= 0.12
 
         return {
@@ -321,16 +314,17 @@ class MultiModal:
             "lower_pattern": float(attrs["lower_pattern"]),
             "pose": float(pose),
             "face": float(face["score"]),
-            "faceused": bool(face["used"] and face["score"] >= self.face_threshold),
+            "faceused": faceused,
         }
 
     def _accept(self, row, second, recovery=False):
         margin = float(row["score"] - second)
         models = sum(row[name] >= 0.48 for name in self.MODELS)
 
-        if row["faceused"] and row["face"] >= 0.82:
+        if row["faceused"]:
             return bool(
-                row["score"] >= float(self.idcfg.get("face_existing_min", 0.70))
+                row["face"] >= self.face_threshold
+                and row["score"] >= float(self.idcfg.get("face_existing_min", 0.70))
                 and margin >= float(self.idcfg.get("face_margin", 0.015))
                 and row["top"] >= 0.40
                 and row["bottom"] >= 0.40
@@ -381,12 +375,7 @@ class MultiModal:
             },
             attribute_bank=profile["attributes"][-12:],
             face_bank=[
-                {
-                    "vector": value,
-                    "valid": True,
-                    "quality": 1.0,
-                    "visibility": 1.0,
-                }
+                {"vector": value, "valid": True, "quality": 1.0, "visibility": 1.0}
                 for value in profile["face"][-12:]
             ],
         )
@@ -463,8 +452,6 @@ class MultiModal:
 
             chosen[row] = selected
 
-        # The assignment matrix is already injective. This second gate protects
-        # against future changes that might introduce an alternate fallback.
         used = set()
         for row in list(chosen):
             gid = chosen[row]
@@ -493,7 +480,7 @@ class MultiModal:
         }
 
     def observe(self, frame, rows, commit=True, recovery=False):
-        """Extract face + clothing + ReID + pose and solve one-to-one."""
+        """Extract face + top/bottom clothing + ReID + pose and solve one-to-one."""
         poses = self._poses(self.pose, frame)
         observations = []
         images = []
@@ -502,15 +489,13 @@ class MultiModal:
             if person is None or person.size == 0:
                 continue
             images.append(person)
-            observations.append(
-                {
-                    "row": item,
-                    "camera": str(item["camera"]),
-                    "time": float(item["timestamp"]),
-                    "crop_quality": float(quality(person)),
-                    "person": person,
-                }
-            )
+            observations.append({
+                "row": item,
+                "camera": str(item["camera"]),
+                "time": float(item["timestamp"]),
+                "crop_quality": float(quality(person)),
+                "person": person,
+            })
 
         if not observations:
             return {}
@@ -554,12 +539,7 @@ class MultiModal:
                     scores[int(gid)] = value
             scoresets.append(scores)
 
-        return self.assign_rows(
-            observations,
-            scoresets,
-            commit=commit,
-            recovery=recovery,
-        )
+        return self.assign_rows(observations, scoresets, commit=commit, recovery=recovery)
 
     def close(self):
         self.registry.close()

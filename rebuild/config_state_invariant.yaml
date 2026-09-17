@@ -2,7 +2,7 @@ detector:
   model: weights/yolo11m.pt
   conf: 0.55
   iou: 0.60
-  tracker: bytetrack.yaml
+  tracker: trackers/botsort_reid.yaml
 
 reid:
   model: nvidia_reidentificationnet

@@ -1,4 +1,3 @@
-
 from __future__ import annotations
 
 import json
@@ -11,7 +10,7 @@ from rebuild.nvdcf_tracker import NvDCF
 
 
 class BatchNvDCF:
-    """NvDCF tracking with feature-first, one-to-one multimodal GID assignment."""
+    """NvDCF video pipeline with strict feature-first global identity assignment."""
 
     def __init__(self, config_path):
         import yaml
@@ -21,21 +20,27 @@ class BatchNvDCF:
 
         self.out = Path(
             self.cfg.get("input", {}).get(
-                "output_dir", "rebuild_outputs_nvdcf"
+                "output_dir",
+                "rebuild_outputs_nvdcf_strict",
             )
         )
         self.out.mkdir(parents=True, exist_ok=True)
         self.cache = self.out / "cache_nvdcf"
         self.cache.mkdir(parents=True, exist_ok=True)
+
         self.det = NvDCF(self.cfg["detector"])
         self.identity = MultiModal(self.cfg)
+        if self.identity.face is None:
+            raise RuntimeError("Face extractor is required")
+        if self.identity.pose is None:
+            raise RuntimeError("Pose extractor is required")
 
     @staticmethod
     def _source(value):
         path = Path(str(value)).expanduser()
         if path.is_file():
             return str(path)
-        matches = list(Path.cwd().rglob(path.name))
+        matches = [item for item in Path.cwd().rglob(path.name) if item.is_file()]
         if len(matches) == 1:
             return str(matches[0])
         raise RuntimeError(f"Input video not found: {value}")
@@ -46,67 +51,51 @@ class BatchNvDCF:
 
     @staticmethod
     def _load(path):
-        data = []
+        rows = []
         with path.open("r", encoding="utf-8") as handle:
             for line in handle:
                 if line.strip():
-                    data.append(json.loads(line))
-        return data
+                    rows.append(json.loads(line))
+        return rows
 
     def sources(self, values):
         if values:
-            return [
-                (self._name(value), self._source(value))
-                for value in values
-            ]
+            return [(self._name(value), self._source(value)) for value in values]
         configured = self.cfg.get("input", {}).get("videos", [])
-        out = []
+        output = []
         for item in configured:
             if isinstance(item, dict):
                 path = item["path"]
-                out.append(
-                    (
-                        str(item.get("name") or self._name(path)),
-                        self._source(path),
-                    )
-                )
+                output.append((str(item.get("name") or self._name(path)), self._source(path)))
             else:
-                out.append((self._name(item), self._source(item)))
-        return out
+                output.append((self._name(item), self._source(item)))
+        return output
 
     @staticmethod
     def _metrics(left, right):
         ax1, ay1, ax2, ay2 = [float(x) for x in left]
         bx1, by1, bx2, by2 = [float(x) for x in right]
-        iw = max(0.0, min(ax2, bx2) - max(ax1, bx1))
-        ih = max(0.0, min(ay2, by2) - max(ay1, by1))
-        inter = iw * ih
+        ix1 = max(ax1, bx1)
+        iy1 = max(ay1, by1)
+        ix2 = min(ax2, bx2)
+        iy2 = min(ay2, by2)
+        inter = max(0.0, ix2 - ix1) * max(0.0, iy2 - iy1)
         aa = max(1.0, (ax2 - ax1) * (ay2 - ay1))
         ab = max(1.0, (bx2 - bx1) * (by2 - by1))
         union = max(1.0, aa + ab - inter)
-        iou = inter / union
-        iom = inter / min(aa, ab)
-        return float(iou), float(iom)
+        return float(inter / union), float(inter / min(aa, ab))
 
     def _overlap_ids(self, current):
-        overlap_iou = float(
-            (self.cfg.get("overlap", {}) or {}).get("iou", 0.45)
-        )
-        overlap_iom = float(
-            (self.cfg.get("overlap", {}) or {}).get(
-                "intersection", 0.60
-            )
-        )
+        overlap = self.cfg.get("overlap", {}) or {}
+        iou_min = float(overlap.get("iou", 0.35))
+        iom_min = float(overlap.get("intersection", 0.50))
         active = set()
-        for index in range(len(current)):
-            for other in range(index + 1, len(current)):
-                iou, iom = self._metrics(
-                    current[index]["bbox"],
-                    current[other]["bbox"],
-                )
-                if iou >= overlap_iou and iom >= overlap_iom:
-                    active.add(int(current[index]["track_id"]))
-                    active.add(int(current[other]["track_id"]))
+        for first in range(len(current)):
+            for second in range(first + 1, len(current)):
+                iou, iom = self._metrics(current[first]["bbox"], current[second]["bbox"])
+                if iou >= iou_min or iom >= iom_min:
+                    active.add(int(current[first]["track_id"]))
+                    active.add(int(current[second]["track_id"]))
         return active
 
     def _render(self, camera, path, labels):
@@ -116,9 +105,9 @@ class BatchNvDCF:
         fps = float(cap.get(cv2.CAP_PROP_FPS)) or 20.0
         width = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
         height = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
-        out = self.out / f"{camera}_nvdcf.mp4"
+        output = self.out / f"{camera}_nvdcf.mp4"
         writer = cv2.VideoWriter(
-            str(out),
+            str(output),
             cv2.VideoWriter_fourcc(*"mp4v"),
             fps,
             (width, height),
@@ -139,40 +128,27 @@ class BatchNvDCF:
                 for item in grouped.get(frame, []):
                     gid = str(item["gid"])
                     if gid.startswith("G") and gid in used:
-                        raise RuntimeError(
-                            f"same-frame duplicate global ID {gid} "
-                            f"in {camera} frame {frame}"
-                        )
+                        raise RuntimeError(f"same-frame duplicate GID {gid} in {camera} frame {frame}")
                     if gid.startswith("G"):
                         used.add(gid)
 
-                    x1, y1, x2, y2 = [
-                        int(round(float(value)))
-                        for value in item["bbox"]
-                    ]
+                    x1, y1, x2, y2 = [int(round(float(value))) for value in item["bbox"]]
                     if gid == "PENDING":
                         draw = (40, 80, 220)
                     else:
-                        number = int(gid[1:]) if gid.startswith("G") else 0
+                        number = int(gid[1:])
                         draw = (
                             40 + (number * 67) % 180,
                             90 + (number * 43) % 150,
                             70 + (number * 29) % 170,
                         )
-
                     label = gid
                     if item.get("overlap"):
                         label = f"{label} OV"
                     elif item.get("recovery"):
                         label = f"{label} REC"
 
-                    cv2.rectangle(
-                        image,
-                        (x1, y1),
-                        (x2, y2),
-                        draw,
-                        3,
-                    )
+                    cv2.rectangle(image, (x1, y1), (x2, y2), draw, 3)
                     cv2.putText(
                         image,
                         label,
@@ -183,10 +159,9 @@ class BatchNvDCF:
                         2,
                         cv2.LINE_AA,
                     )
-
                 cv2.putText(
                     image,
-                    f"{camera} | NvDCF | multimodal feature-first ReID",
+                    f"{camera} | NVIDIA NvDCF | multimodal ReID",
                     (20, 34),
                     cv2.FONT_HERSHEY_SIMPLEX,
                     0.82,
@@ -198,7 +173,7 @@ class BatchNvDCF:
         finally:
             cap.release()
             writer.release()
-        print(f"[nvdcf] wrote {out}")
+        return output
 
     def _solve_camera(self, camera, path, tracker_rows):
         byframe = {}
@@ -209,19 +184,14 @@ class BatchNvDCF:
         if not cap.isOpened():
             raise RuntimeError(f"Cannot open video: {path}")
 
-        interval = int(
-            self.cfg.get("identity", {}).get("interval", 2)
-        )
-        recovery_frames = int(
-            self.cfg.get("identity", {}).get(
-                "recovery_frames", 8
-            )
-        )
+        identity_cfg = self.cfg["identity"]
+        interval = max(1, int(identity_cfg.get("interval", 2)))
+        recovery_frames = max(interval, int(identity_cfg.get("recovery_frames", 10)))
 
         labels = []
         last = {}
         previous_overlap = set()
-        recovery_left = {}
+        recovery_until = -1
         frame = 0
 
         try:
@@ -238,136 +208,74 @@ class BatchNvDCF:
                 active_overlap = self._overlap_ids(current)
                 entered = active_overlap - previous_overlap
                 exited = previous_overlap - active_overlap
+                if exited:
+                    recovery_until = max(recovery_until, frame + recovery_frames)
 
-                for tid in exited:
-                    recovery_left[(str(camera), int(tid))] = recovery_frames
-
-                current_ids = {
-                    int(item["track_id"])
-                    for item in current
-                }
-                for key in list(recovery_left):
-                    if key[0] == str(camera) and key[1] not in current_ids:
-                        recovery_left.pop(key, None)
-
-                recovering_now = {
-                    int(tid)
-                    for (cam, tid), remaining in recovery_left.items()
-                    if cam == str(camera) and remaining > 0
-                }
-
-                force = bool(
-                    active_overlap
-                    or entered
-                    or exited
-                    or recovering_now
-                )
+                recovery_mode = frame <= recovery_until
+                force = bool(active_overlap or entered or exited or recovery_mode)
                 need = force or any(
-                    frame - int(
-                        last.get(
-                            int(item["track_id"]),
-                            -10**9,
-                        )
-                    ) >= interval
+                    frame - int(last.get(int(item["track_id"]), -10**9)) >= interval
                     for item in current
                 )
 
                 feature_map = {}
                 if need:
-                    # Active overlap is resolved from features but is
-                    # quarantined: these blended crops cannot alter memory.
                     feature_map = self.identity.observe(
                         image,
                         current,
                         commit=not bool(active_overlap),
+                        recovery=recovery_mode,
                     )
 
                 gids = {}
+                used = set()
                 for item in current:
                     tid = int(item["track_id"])
                     key = (str(camera), tid)
-                    recovering = (
-                        key in recovery_left
-                        and recovery_left[key] > 0
-                    )
-
                     if tid in feature_map:
                         gid = str(feature_map[tid])
-                    elif active_overlap and key in self.identity.trackmap:
-                        # Temporal continuity during overlap only. This does
-                        # not assign or create a global identity.
-                        gid = f"G{int(self.identity.trackmap[key]):06d}"
-                    elif recovering:
-                        # After overlap, the tracker ID is explicitly forbidden
-                        # as a GID fallback. Wait for feature confirmation.
+                    elif active_overlap:
+                        prior = self.identity.trackmap.get(key)
+                        if prior is not None:
+                            candidate = f"G{int(prior):06d}"
+                            gid = candidate if candidate not in used else "PENDING"
+                        else:
+                            gid = "PENDING"
+                    elif recovery_mode:
                         gid = "PENDING"
                     else:
                         prior = self.identity.trackmap.get(key)
-                        gid = (
-                            f"G{int(prior):06d}"
-                            if prior is not None
-                            else "PENDING"
-                        )
+                        if prior is not None:
+                            candidate = f"G{int(prior):06d}"
+                            gid = candidate if candidate not in used else "PENDING"
+                        else:
+                            gid = "PENDING"
+                    if gid.startswith("G"):
+                        used.add(gid)
                     gids[tid] = gid
 
-                duplicates = {}
-                for tid, gid in gids.items():
-                    if gid.startswith("G"):
-                        duplicates.setdefault(gid, []).append(tid)
-                bad = {
-                    gid: tids
-                    for gid, tids in duplicates.items()
-                    if len(tids) > 1
-                }
-
-                if bad:
-                    # Re-run all people in this frame with multimodal
-                    # one-to-one assignment before accepting any duplicate.
+                if len([gid for gid in gids.values() if gid.startswith("G")]) != len({gid for gid in gids.values() if gid.startswith("G")}):
+                    self.identity.stats["duplicate_frames"] += 1
                     feature_map = self.identity.observe(
                         image,
                         current,
-                        commit=not bool(active_overlap),
+                        commit=False,
+                        recovery=True,
                     )
                     gids = {}
+                    used = set()
                     for item in current:
                         tid = int(item["track_id"])
-                        key = (str(camera), tid)
-                        recovering = (
-                            key in recovery_left
-                            and recovery_left[key] > 0
-                        )
-                        if tid in feature_map:
-                            gids[tid] = str(feature_map[tid])
-                        elif active_overlap and key in self.identity.trackmap:
-                            gids[tid] = (
-                                f"G{int(self.identity.trackmap[key]):06d}"
-                            )
-                        elif recovering:
-                            gids[tid] = "PENDING"
-                        else:
-                            gids[tid] = self.identity.trackmap.get(
-                                key,
-                                "PENDING",
-                            )
-                    self.identity.stats["duplicate_frames"] += 1
-
-                # Final hard collision gate. A duplicated GID is never rendered.
-                used = set()
-                for tid in list(gids):
-                    gid = str(gids[tid])
-                    if gid.startswith("G") and gid in used:
-                        gids[tid] = "PENDING"
-                    elif gid.startswith("G"):
-                        used.add(gid)
+                        gid = str(feature_map.get(tid, "PENDING"))
+                        if gid.startswith("G") and gid in used:
+                            gid = "PENDING"
+                        if gid.startswith("G"):
+                            used.add(gid)
+                        gids[tid] = gid
 
                 for item in current:
                     tid = int(item["track_id"])
-                    key = (str(camera), tid)
                     gid = str(gids[tid])
-                    recovering = (
-                        key in recovery_left
-                        and recovery_left[key] > 0
-                    )
                     labels.append(
                         {
                             "camera": camera,
@@ -376,57 +284,30 @@ class BatchNvDCF:
                             "bbox": item["bbox"],
                             "gid": gid,
                             "overlap": tid in active_overlap,
-                            "recovery": bool(recovering),
+                            "recovery": bool(recovery_mode),
                         }
                     )
-
-                    if gid.startswith("G") and not recovering:
-                        self.identity.trackmap[key] = int(gid[1:])
+                    if gid.startswith("G") and not recovery_mode and not active_overlap:
                         last[tid] = frame
 
-                for tid in list(recovering_now):
-                    key = (str(camera), int(tid))
-                    gid = str(gids.get(int(tid), "PENDING"))
-                    if gid.startswith("G"):
-                        recovery_left.pop(key, None)
-                    else:
-                        recovery_left[key] = max(
-                            0,
-                            recovery_left[key] - 1,
-                        )
-                        if recovery_left[key] <= 0:
-                            recovery_left.pop(key, None)
-
-                # New overlap starts replace any stale post-overlap recovery state.
-                for tid in entered:
-                    recovery_left.pop(
-                        (str(camera), int(tid)),
-                        None,
-                    )
+                if recovery_mode and all(
+                    str(gids[int(item["track_id"])]).startswith("G")
+                    for item in current
+                ):
+                    recovery_until = frame
 
                 previous_overlap = set(active_overlap)
         finally:
             cap.release()
 
-        # Independent full-output validation.
-        checks = {}
+        by_frame = {}
         for item in labels:
-            gid = str(item["gid"])
-            if gid.startswith("G"):
-                checks.setdefault(
-                    int(item["frame"]), set()
-                ).add(gid)
-        for frameid, gids in checks.items():
-            total = sum(
-                1
-                for item in labels
-                if int(item["frame"]) == frameid
-                and str(item["gid"]).startswith("G")
-            )
-            if len(gids) != total:
+            by_frame.setdefault(int(item["frame"]), []).append(item)
+        for frame_id, items in by_frame.items():
+            gids = [str(item["gid"]) for item in items if str(item["gid"]).startswith("G")]
+            if len(gids) != len(set(gids)):
                 raise RuntimeError(
-                    "same-frame duplicate GID survived validation: "
-                    f"{camera}:{frameid}"
+                    f"same-frame duplicate GID survived validation: {camera}:{frame_id}"
                 )
 
         target = self.cache / f"{camera}.labels.jsonl"
@@ -434,7 +315,8 @@ class BatchNvDCF:
             for item in labels:
                 handle.write(json.dumps(item) + "\n")
 
-        self._render(camera, path, labels)
+        output = self._render(camera, path, labels)
+        print(f"[nvdcf] wrote {output}")
         return labels
 
     def run(self, values):
@@ -442,91 +324,50 @@ class BatchNvDCF:
         if not sources:
             raise SystemExit("No videos supplied")
 
-        metas = []
         print("[nvdcf] PRIMARY TRACKER: NVIDIA NvDCF")
         print(f"[nvdcf] ResNet: {self.identity.resnet.describe()}")
         print(f"[nvdcf] Swin: {self.identity.swin.describe()}")
         print(f"[nvdcf] SOLIDER: {self.identity.solider.describe()}")
-        if self.identity.face is None:
-            raise RuntimeError(
-                "Face extractor is mandatory in the final multimodal pipeline"
-            )
         print(f"[nvdcf] FACE: {self.identity.face.describe()}")
-        print(
-            f"[nvdcf] POSE: "
-            f"{'ON' if self.identity.pose is not None else 'OFF'}"
-        )
-        print("[nvdcf] Qdrant: ENABLED")
-        print(
-            "[nvdcf] GID source: multimodal features; "
-            "tracker ID is temporal bookkeeping only"
-        )
-
-        for camera, path in sources:
-            target = self.cache / f"{camera}.tracker.jsonl"
-            fps, width, height = self.det.track(
-                camera,
-                path,
-                target,
-            )
-            metas.append(
-                (
-                    camera,
-                    path,
-                    fps,
-                    width,
-                    height,
-                    target,
-                )
-            )
+        print(f"[nvdcf] POSE: {self.cfg['pose']['model']}")
+        print("[nvdcf] QDRANT: ENABLED")
+        print("[nvdcf] GLOBAL ID: multimodal features only after overlap")
 
         all_labels = []
-        for camera, path, _fps, _width, _height, target in metas:
-            labels = self._solve_camera(
-                camera,
-                path,
-                self._load(target),
+        try:
+            for camera, path in sources:
+                target = self.cache / f"{camera}.tracker.jsonl"
+                fps, width, height = self.det.track(camera, path, target)
+                del fps, width, height
+                labels = self._solve_camera(camera, path, self._load(target))
+                all_labels.extend(labels)
+
+            debug = {
+                "tracker": "NVIDIA NvDCF",
+                "identity": "Qdrant + face + top_clothing + bottom_clothing + ReID + pose",
+                "post_overlap_identity": "feature_only",
+                "same_frame_gid_invariant": True,
+                "new_gids": int(self.identity.stats["new_gids"]),
+                "duplicate_frames": int(self.identity.stats["duplicate_frames"]),
+                "pending_frames": int(self.identity.stats["pending_frames"]),
+                "recovery_matches": int(self.identity.stats["recovery_matches"]),
+                "cross_camera_matches": int(self.identity.stats["cross_camera_matches"]),
+            }
+            (self.out / "nvdcf_identity_debug.json").write_text(
+                json.dumps(debug, indent=2),
+                encoding="utf-8",
             )
-            all_labels.extend(labels)
+            print(
+                "[nvdcf] result: "
+                f"new_gids={self.identity.stats['new_gids']} "
+                f"recovery_matches={self.identity.stats['recovery_matches']} "
+                f"cross_camera_matches={self.identity.stats['cross_camera_matches']} "
+                f"duplicate_frames={self.identity.stats['duplicate_frames']} "
+                f"pending_frames={self.identity.stats['pending_frames']}"
+            )
+            return all_labels
+        finally:
+            self.identity.close()
 
-        debug = {
-            "tracker": "NVIDIA NvDCF",
-            "global_assignment": "multimodal_feature_matching",
-            "required_features": [
-                "face_when_visibility_at_least_0.68",
-                "top_clothing_color",
-                "bottom_clothing_color",
-                "top_clothing_pattern",
-                "bottom_clothing_pattern",
-                "nvidia_resnet",
-                "nvidia_swin",
-                "solider",
-                "pose",
-                "qdrant",
-            ],
-            "same_frame_duplicate_gids": int(
-                self.identity.stats["duplicate_frames"]
-            ),
-            "stats": self.identity.stats,
-            "gids": sorted(self.identity.profiles),
-            "labels": len(all_labels),
-        }
-        (self.out / "identity_debug_nvdcf.json").write_text(
-            json.dumps(debug, indent=2),
-            encoding="utf-8",
-        )
 
-        count = len(self.identity.profiles)
-        duplicates = int(
-            self.identity.stats["duplicate_frames"]
-        )
-        self.identity.close()
-        print(f"[nvdcf] FINAL GLOBAL IDS: {count}")
-        print(
-            f"[nvdcf] SAME-FRAME DUPLICATE GIDS: {duplicates}"
-        )
-        print(f"[nvdcf] OUTPUTS: {self.out}")
-        return {
-            "labels": all_labels,
-            "gids": sorted(self.identity.profiles),
-        }
+__all__ = ["BatchNvDCF"]

@@ -1,8 +1,15 @@
 detector:
+  backend: nvdcf
   model: weights/yolo11m.pt
   conf: 0.55
   iou: 0.60
-  tracker: trackers/botsort_reid.yaml
+  library: /opt/nvidia/deepstream/deepstream/lib/libnvds_nvmultiobjecttracker.so
+  config: /opt/nvidia/deepstream/deepstream/samples/configs/deepstream-app/config_tracker_NvDCF_accuracy.yml
+  width: 0
+  height: 0
+  pose:
+    enabled: true
+    model: yolo11n-pose.pt
 
 reid:
   model: nvidia_reidentificationnet
@@ -10,7 +17,7 @@ reid:
   device: cuda
   max_batch: 32
   interval: 2
-  part_interval: 4
+  part_interval: 2
   illumination_variant: true
   min_quality: 0.20
 
@@ -21,113 +28,41 @@ cross_camera_models:
   solider_batch: 16
 
 identity_state:
-  path: identity_state/reid_state_invariant_v4.sqlite3
-  model_id: final-state-invariant-v4
+  path: identity_state/reid_nvdcf_multimodal_v1.sqlite3
+  model_id: nvdcf-multimodal-v1
   bank_size: 96
+  qdrant_path: qdrant_storage_nvdcf
+  qdrant_prefix: person_reid_nvdcf
+  qdrant_limit: 32
 
-identity_v6:
-  match_threshold: 0.60
-  match_margin: 0.035
-  strong_threshold: 0.72
-  support_required: 2
-  accumulated_body: 0.56
-  accumulated_support: 3
-  partial_threshold: 0.58
-  partial_support: 2
-  gallery: 64
-  candidate_gallery: 24
-  promote_quality: 0.68
-  novelty: 0.985
-  same_camera_gap_sec: 15.0
-  same_camera_distance: 5.0
-  same_camera_min_continuity: 0.35
-  merge_body: 0.82
-  merge_support: 3
-  seed_count: 3
-  state_cross_fused_min: 0.50
-  state_cross_partial_fused_min: 0.47
-  state_cross_strong: 0.80
-  state_cross_margin: 0.0
-  state_cross_resnet_min: 0.44
-  state_cross_swin_min: 0.44
-  state_cross_solider_min: 0.42
-  state_cross_required_models: 2
-  state_cross_required_mutual_models: 0
-  state_cross_required_views: 1
-  state_cross_max_gap_sec: 30.0
-  state_same_fused_min: 0.48
-  state_same_model_min: 0.42
-  state_same_margin: 0.0
-  state_same_max_gap_sec: 30.0
-  state_same_camera_continuity_min: 0.22
-  state_same_chain_min: 0.53
-  state_same_chain_support: 2
-  state_same_chain_continuity_min: 0.28
-  state_same_trajectory_min: 0.35
-  state_gallery_match_min: 0.62
-  state_gallery_margin: 0.02
-  camera_time_offsets_sec: {}
-  attribute_color_min: 0.84
-  attribute_pattern_min: 0.64
-  attribute_detail_min: 0.72
-  clothing_match_weight: 0.30
-  lower_match_weight: 0.20
-  lower_conflict_penalty: 0.25
-  lower_conflict_floor: 0.52
-  face_match_weight: 0.06
-  face_match_min: 0.72
-  face_strong: 0.82
-
-  authoritative_existing_min: 0.72
-  authoritative_margin: 0.06
-  authoritative_novel_max: 0.55
-  authoritative_clean_required: 4
-  qdrant_path: qdrant_storage
-  qdrant_prefix: person_reid
-  qdrant_limit: 24
-
-tracking:
-  fragment_gap_sec: 2.0
-
-overlap_guard:
-  enabled: true
-  iou_min: 0.70
-  intersection_min: 0.70
-  occlusion_iou_min: 0.45
-  occlusion_intersection_min: 0.60
-  authoritative_overlap_exit: 0.58
-  clear_grace_frames: 2
-  recovery_samples: 6
-  recovery_search_sec: 1.75
-  recovery_spatial_scale: 4.5
-
-recovery_guard:
-  enabled: true
-  required_models: 2
-  fused_min: 0.56
-  resnet_min: 0.52
-  swin_min: 0.52
-  solider_min: 0.50
-  relaxed_fused_min: 0.50
-  relaxed_resnet_min: 0.48
-  relaxed_swin_min: 0.48
-  relaxed_solider_min: 0.46
-  fail_limit: 4
-
-post_overlap_interval_frames: 1
-trajectory_history_frames: 30
+identity:
+  interval: 2
+  recovery_frames: 8
+  existing_min: 0.68
+  margin: 0.035
+  recovery_min: 0.66
+  recovery_margin: 0.05
+  new_floor: 0.55
 
 face:
   enabled: true
-  required: false
+  required: true
   model: buffalo_l
   det_size: [640, 640]
   min_detection: 0.55
   min_size: 32
   min_quality: 0.50
-  min_visibility: 0.60
+  min_visibility: 0.68
   device: cuda
+
+pose:
+  enabled: true
+  model: yolo11n-pose.pt
+
+overlap:
+  iou: 0.45
+  intersection: 0.60
 
 input:
   videos: []
-  output_dir: rebuild_outputs_state_invariant
+  output_dir: rebuild_outputs_nvdcf

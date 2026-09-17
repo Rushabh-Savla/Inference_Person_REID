@@ -16,8 +16,8 @@ reid:
   weights: weights/reid/resnet50_market1501_aicity156.onnx
   device: cuda
   max_batch: 32
-  interval: 2
-  part_interval: 2
+  interval: 1
+  part_interval: 1
   illumination_variant: true
   min_quality: 0.20
 
@@ -36,7 +36,7 @@ identity_state:
   qdrant_limit: 32
 
 identity:
-  interval: 2
+  interval: 1
   recovery_frames: 10
   existing_min: 0.62
   face_existing_min: 0.70

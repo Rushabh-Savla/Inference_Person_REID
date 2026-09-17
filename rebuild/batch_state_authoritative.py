@@ -154,8 +154,6 @@ class BatchPipelineStateAuthoritative(BatchPipelineStateInvariantJointAttributes
                     bank = getattr(track, "state_bank", {}) or {}
                     for model in refs:
                         refs[model] = list(bank.get(model, {}).get("full", [])[-6:])
-                    setattr(track, "overlap_recovery", True)
-                    setattr(track, "recovery_sources", [old_key])
                 self._refs[old_key] = refs
                 self._fails[old_key] = 0
                 info["recovery_left"][old_key] = 0
@@ -317,8 +315,12 @@ class BatchPipelineStateAuthoritative(BatchPipelineStateInvariantJointAttributes
                     self._refs.pop(key, None)
                     self._fails.pop(key, None)
 
+    def run(self, values):
+        """Use the shared joint collector so overlap hooks are actually executed."""
+        return super().run(values)
+
     def render(self, mapping):
-        """Render final GIDs while preserving PENDING during unresolved recovery."""
+        """Render GIDs while keeping active/recovering observations PENDING."""
         for camera, meta in self.meta.items():
             cap = cv2.VideoCapture(meta["source"])
             out = self.out / f"{camera}_v6.mp4"

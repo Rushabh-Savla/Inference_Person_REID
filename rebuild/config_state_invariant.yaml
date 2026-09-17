@@ -4,7 +4,7 @@ detector:
   conf: 0.55
   iou: 0.60
   library: /opt/nvidia/deepstream/deepstream/lib/libnvds_nvmultiobjecttracker.so
-  config: /opt/nvidia/deepstream/deepstream/samples/configs/deepstream-app/config_tracker_NvDCF_accuracy.yml
+  config: trackers/nvdcf_accuracy.yml
   width: 0
   height: 0
   pose:
@@ -28,21 +28,24 @@ cross_camera_models:
   solider_batch: 16
 
 identity_state:
-  path: identity_state/reid_nvdcf_multimodal_v1.sqlite3
-  model_id: nvdcf-multimodal-v1
+  path: identity_state/reid_nvdcf_strict.sqlite3
+  model_id: nvdcf-strict-multimodal-v1
   bank_size: 96
-  qdrant_path: qdrant_storage_nvdcf
-  qdrant_prefix: person_reid_nvdcf
+  qdrant_path: qdrant_storage_nvdcf_strict
+  qdrant_prefix: person_reid_nvdcf_strict
   qdrant_limit: 32
 
 identity:
   interval: 2
-  recovery_frames: 8
-  existing_min: 0.68
-  margin: 0.035
-  recovery_min: 0.66
-  recovery_margin: 0.05
-  new_floor: 0.55
+  recovery_frames: 10
+  existing_min: 0.62
+  face_existing_min: 0.70
+  margin: 0.015
+  face_margin: 0.015
+  recovery_min: 0.60
+  recovery_margin: 0.012
+  new_floor: 0.50
+  known_floor: 0.58
 
 face:
   enabled: true
@@ -60,9 +63,9 @@ pose:
   model: yolo11n-pose.pt
 
 overlap:
-  iou: 0.45
-  intersection: 0.60
+  iou: 0.35
+  intersection: 0.50
 
 input:
   videos: []
-  output_dir: rebuild_outputs_nvdcf
+  output_dir: rebuild_outputs_nvdcf_strict

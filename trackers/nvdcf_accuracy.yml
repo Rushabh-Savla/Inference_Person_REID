@@ -1,0 +1,51 @@
+%YAML:1.0
+
+BaseConfig:
+  minDetectorConfidence: 0.20
+
+TargetManagement:
+  enableBboxUnClipping: 1
+  preserveStreamUpdateOrder: 1
+  maxTargetsPerStream: 80
+  minIouDiff4NewTarget: 0.85
+  minTrackerConfidence: 0.25
+  probationAge: 2
+  maxShadowTrackingAge: 30
+  earlyTerminationAge: 1
+  searchRegionPaddingScale: 3.0
+
+TrajectoryManagement:
+  useUniqueID: 1
+
+DataAssociator:
+  dataAssociatorType: 0
+  associationMatcherType: 1
+  checkClassMatch: 1
+  minMatchingScore4Overall: 0.30
+  minMatchingScore4SizeSimilarity: 0.20
+  minMatchingScore4Iou: 0.10
+  minMatchingScore4VisualSimilarity: 0.40
+  matchingScoreWeight4VisualSimilarity: 0.55
+  matchingScoreWeight4SizeSimilarity: 0.10
+  matchingScoreWeight4Iou: 0.35
+  tentativeDetectorConfidence: 0.20
+  minMatchingScore4TentativeIou: 0.10
+
+StateEstimator:
+  stateEstimatorType: 1
+  processNoiseVar4Loc: 1.5
+  processNoiseVar4Size: 1.2
+  processNoiseVar4Vel: 0.03
+  measurementNoiseVar4Detector: 3.0
+  measurementNoiseVar4Tracker: 8.0
+
+VisualTracker:
+  visualTrackerType: 1
+  useColorNames: 1
+  useHog: 1
+  featureImgSizeLevel: 4
+  featureFocusOffsetFactor_y: -0.15
+  useHighPrecisionFeature: 1
+  filterLr: 0.075
+  filterChannelWeightsLr: 0.10
+  gaussianSigma: 0.75

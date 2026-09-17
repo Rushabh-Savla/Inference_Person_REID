@@ -1,0 +1,490 @@
+from __future__ import annotations
+
+from types import SimpleNamespace
+
+import numpy as np
+from scipy.optimize import linear_sum_assignment
+
+from rebuild.face_v4 import FaceExtractorV4
+from rebuild.identity_v2 import crop, quality
+from rebuild.person_attributes import pack
+from reid.nvidia_reid import NVIDIAReIDExtractor
+from reid.nvidia_swin import NVIDIASwinReIDExtractor
+from reid.solider_reid import SOLIDERReIDExtractor
+from src.live.persistent_multimodel import PersistentMultimodelRegistry
+from src.live.qdrant_gallery import QdrantGallery
+from ultralytics import YOLO
+
+
+class MultiModalStrict:
+    """Feature-first identity resolver for the real NvDCF pipeline."""
+
+    models = ("resnet", "swin", "solider")
+
+    def __init__(self, cfg):
+        self.cfg = cfg
+        self.rcfg = cfg["reid"]
+        self.mcfg = cfg["cross_camera_models"]
+        self.icfg = cfg["identity"]
+        self.fcfg = cfg["face"]
+        self.pcfg = cfg["pose"]
+        self.resnet = NVIDIAReIDExtractor(
+            weights=self.rcfg["weights"],
+            device=str(self.rcfg.get("device", "cuda")),
+            max_batch=int(self.rcfg.get("max_batch", 32)),
+        )
+        self.swin = NVIDIASwinReIDExtractor(
+            self.mcfg["swin_weights"],
+            device="cuda",
+            max_batch=int(self.mcfg.get("swin_batch", 16)),
+        )
+        self.solider = SOLIDERReIDExtractor(
+            self.mcfg["solider_weights"],
+            device="cuda",
+            max_batch=int(self.mcfg.get("solider_batch", 16)),
+        )
+        if not bool(self.fcfg.get("enabled", True)):
+            raise RuntimeError("Face matching is mandatory")
+        self.fth = float(self.fcfg.get("min_visibility", 0.68))
+        self.fqu = float(self.fcfg.get("min_quality", 0.50))
+        self.face = FaceExtractorV4(
+            model=str(self.fcfg.get("model", "buffalo_l")),
+            det_size=tuple(self.fcfg.get("det_size", [640, 640])),
+            min_detection=float(self.fcfg.get("min_detection", 0.55)),
+            min_size=int(self.fcfg.get("min_size", 32)),
+            min_quality=self.fqu,
+            min_visibility=self.fth,
+            device=str(self.fcfg.get("device", "cuda")),
+        )
+        if not bool(self.pcfg.get("enabled", True)):
+            raise RuntimeError("Pose matching is mandatory")
+        self.pose = YOLO(str(self.pcfg.get("model", "yolo11n-pose.pt")))
+        state = cfg["identity_state"]
+        self.reg = PersistentMultimodelRegistry(
+            state["path"],
+            model_id=str(state["model_id"]),
+            bank_size=int(state.get("bank_size", 96)),
+        )
+        self.q = QdrantGallery(
+            str(state["qdrant_path"]),
+            str(state.get("qdrant_prefix", "person_reid")),
+            int(state.get("qdrant_limit", 32)),
+        )
+        self.pro = self.load()
+        self.stats = {
+            "feature": 0,
+            "recovery": 0,
+            "recovery_match": 0,
+            "face": 0,
+            "face_match": 0,
+            "new": 0,
+            "pending": 0,
+            "cross": 0,
+            "duplicate": 0,
+        }
+
+    @staticmethod
+    def unit(value):
+        arr = np.asarray(value, np.float32).reshape(-1)
+        norm = float(np.linalg.norm(arr))
+        if arr.size == 0 or not np.isfinite(norm) or norm <= 0.0:
+            return None
+        return arr / norm
+
+    @classmethod
+    def sim(cls, left, right):
+        a = cls.unit(left)
+        b = cls.unit(right)
+        if a is None or b is None or a.shape != b.shape:
+            return 0.0
+        return float(np.dot(a, b))
+
+    @classmethod
+    def best(cls, left, right):
+        vals = []
+        for a in left or []:
+            for b in right or []:
+                value = cls.sim(a, b)
+                if np.isfinite(value):
+                    vals.append(value)
+        if not vals:
+            return 0.0
+        vals.sort(reverse=True)
+        return float(np.mean(vals[: min(3, len(vals))]))
+
+    @classmethod
+    def attr(cls, cur, old):
+        query = np.asarray(cur, np.float32).reshape(-1)
+        bank = [np.asarray(x, np.float32).reshape(-1) for x in old or []]
+        bank = [x for x in bank if x.size == 112 and np.isfinite(x).all()]
+        if query.size != 112 or not bank:
+            return None
+        top = cls.best([query[:20]], [x[:20] for x in bank])
+        bot = cls.best([query[20:40]], [x[20:40] for x in bank])
+        upp = cls.best([query[40:54]], [x[40:54] for x in bank])
+        low = cls.best([query[54:68]], [x[54:68] for x in bank])
+        return {
+            "top": float(top),
+            "bottom": float(bot),
+            "upper_pattern": float(upp),
+            "lower_pattern": float(low),
+            "pattern": float((upp + low) * 0.50),
+        }
+
+    @classmethod
+    def faceval(cls, cur, old):
+        if not cur:
+            return {"used": False, "score": 0.0}
+        vec = cls.unit(cur.get("vector"))
+        if vec is None:
+            return {"used": False, "score": 0.0}
+        vals = []
+        for item in old or []:
+            if isinstance(item, dict):
+                if not item.get("valid", True):
+                    continue
+                item = item.get("vector")
+            other = cls.unit(item)
+            if other is not None and other.shape == vec.shape:
+                vals.append(float(np.dot(vec, other)))
+        if not vals:
+            return {"used": False, "score": 0.0}
+        vals.sort(reverse=True)
+        return {"used": True, "score": float(np.mean(vals[: min(3, len(vals))]))}
+
+    @classmethod
+    def poses(cls, model, frame):
+        result = model(frame, classes=[0], conf=0.20, iou=0.65, verbose=False)
+        if not result or result[0].boxes is None:
+            return []
+        kp = getattr(result[0], "keypoints", None)
+        if kp is None or getattr(kp, "data", None) is None:
+            return []
+        data = kp.data.cpu().numpy()
+        out = []
+        for i, box in enumerate(result[0].boxes):
+            if i >= len(data):
+                continue
+            raw = np.asarray(data[i], np.float32)
+            if raw.shape != (17, 3) or not np.isfinite(raw).all():
+                continue
+            b = np.asarray(box.xyxy[0].tolist(), np.float32)
+            out.append((b, raw))
+        return out
+
+    @classmethod
+    def poseval(cls, poses, box):
+        target = np.asarray(box, np.float32)
+        best = None
+        score = 0.0
+        for pbox, raw in poses:
+            x1 = max(target[0], pbox[0])
+            y1 = max(target[1], pbox[1])
+            x2 = min(target[2], pbox[2])
+            y2 = min(target[3], pbox[3])
+            inter = max(0.0, x2 - x1) * max(0.0, y2 - y1)
+            ta = max(1.0, (target[2] - target[0]) * (target[3] - target[1]))
+            pa = max(1.0, (pbox[2] - pbox[0]) * (pbox[3] - pbox[1]))
+            iou = inter / max(1.0, ta + pa - inter)
+            if iou <= score:
+                continue
+            w = max(1.0, target[2] - target[0])
+            h = max(1.0, target[3] - target[1])
+            vec = raw.copy()
+            vec[:, 0] = (raw[:, 0] - target[0]) / w
+            vec[:, 1] = (raw[:, 1] - target[1]) / h
+            vec[:, 2] = np.clip(raw[:, 2], 0.0, 1.0)
+            vec = cls.unit(vec)
+            if vec is None or vec.size != 51:
+                continue
+            best = vec
+            score = float(iou)
+        return best, float(score)
+
+    def load(self):
+        data = self.reg.load_gallery()
+        out = {}
+        for gid, bank in data.items():
+            out[int(gid)] = {
+                "resnet": list(bank.get("resnet", [])),
+                "swin": list(bank.get("swin", [])),
+                "solider": list(bank.get("solider", [])),
+                "attributes": list(bank.get("attributes", [])),
+                "face": list(bank.get("face", [])),
+                "pose": list(bank.get("pose", [])),
+                "camera": set(),
+            }
+        return out
+
+    def group(self, obs):
+        return SimpleNamespace(
+            state_bank={
+                "resnet": {"full": [obs["resnet"]]},
+                "swin": {"full": [obs["swin"]]},
+                "solider": {"full": [obs["solider"]]},
+                "pose": {"pose": [obs["pose"]]} if obs.get("pose") is not None else {},
+            },
+            attribute_bank=[obs["attributes"]],
+            face_bank=[obs["face"]] if obs.get("face") else [],
+        )
+
+    def cand(self, obs):
+        hits, got = self.q.search_component([self.group(obs)])
+        ids = set(int(x) for x in hits)
+        ids.update(int(x) for x in self.pro)
+        return sorted(ids), got
+
+    def score(self, obs, gid, got):
+        prof = self.pro.get(int(gid), {})
+        rem = got.get(int(gid), {})
+        vals = {}
+        for model in self.models:
+            src = []
+            for view in rem.get(model, {}).values():
+                src.extend(view)
+            vals[model] = self.best([obs[model]], src or prof.get(model, []))
+        deep = 0.25 * vals["resnet"] + 0.40 * vals["swin"] + 0.35 * vals["solider"]
+        attrs = self.attr(obs["attributes"], rem.get("attributes", {}).get("attributes", []) or prof.get("attributes", []))
+        if attrs is None:
+            return None
+        pose = 0.0
+        pbank = rem.get("pose", {}).get("pose", []) or prof.get("pose", [])
+        if obs.get("pose") is not None and pbank:
+            pose = self.best([obs["pose"]], pbank)
+        face = self.faceval(obs.get("face"), rem.get("face", {}).get("face", []) or prof.get("face", []))
+        top = attrs["top"]
+        bot = attrs["bottom"]
+        pattern = attrs["pattern"]
+        ready = bool(face["used"])
+        if ready:
+            value = 0.60 * face["score"] + 0.20 * deep + 0.09 * top + 0.09 * bot + 0.02 * pose
+        else:
+            value = 0.44 * deep + 0.24 * top + 0.24 * bot + 0.05 * pose + 0.03 * pattern
+        return {
+            "score": float(np.clip(value, 0.0, 0.995)),
+            "deep": float(deep),
+            "resnet": float(vals["resnet"]),
+            "swin": float(vals["swin"]),
+            "solider": float(vals["solider"]),
+            "top": float(top),
+            "bottom": float(bot),
+            "upper_pattern": float(attrs["upper_pattern"]),
+            "lower_pattern": float(attrs["lower_pattern"]),
+            "pose": float(pose),
+            "face": float(face["score"]),
+            "faceused": ready,
+        }
+
+    def accept(self, row, second, recovery=False):
+        if row is None:
+            return False
+        margin = float(row["score"] - second)
+        mins = self.models
+        support = sum(float(row[name]) >= float(self.icfg.get("model_min", 0.46)) for name in mins)
+        top = float(row["top"])
+        bot = float(row["bottom"])
+        if top < float(self.icfg.get("top_min", 0.42)) or bot < float(self.icfg.get("bottom_min", 0.42)):
+            return False
+        if row["faceused"]:
+            return bool(
+                row["face"] >= float(self.icfg.get("face_min", 0.68))
+                and row["score"] >= float(self.icfg.get("face_score_min", 0.68))
+                and margin >= float(self.icfg.get("face_margin", 0.02))
+            )
+        if support < 2:
+            return False
+        floor = float(self.icfg.get("recovery_min", 0.58) if recovery else self.icfg.get("existing_min", 0.61))
+        gap = float(self.icfg.get("recovery_margin", 0.018) if recovery else self.icfg.get("margin", 0.025))
+        return bool(row["score"] >= floor and row["deep"] >= float(self.icfg.get("deep_min", 0.48)) and margin >= gap)
+
+    def save(self, gid, obs):
+        gid = int(gid)
+        prof = self.pro[gid]
+        for model in self.models:
+            prof[model].append(np.asarray(obs[model], np.float32))
+            prof[model] = prof[model][-96:]
+        prof["attributes"].append(np.asarray(obs["attributes"], np.float32))
+        prof["attributes"] = prof["attributes"][-64:]
+        if obs.get("face"):
+            prof["face"].append(np.asarray(obs["face"]["vector"], np.float32))
+            prof["face"] = prof["face"][-32:]
+        if obs.get("pose") is not None:
+            prof["pose"].append(np.asarray(obs["pose"], np.float32))
+            prof["pose"] = prof["pose"][-64:]
+        prof["camera"].add(str(obs["camera"]))
+        node = SimpleNamespace(
+            key=f"G{gid:06d}",
+            members=[f"G{gid:06d}"],
+            state_bank={
+                "resnet": {"full": prof["resnet"][-16:]},
+                "swin": {"full": prof["swin"][-16:]},
+                "solider": {"full": prof["solider"][-16:]},
+                "pose": {"pose": prof["pose"][-16:]},
+            },
+            attribute_bank=prof["attributes"][-16:],
+            face_bank=[
+                {"vector": x, "valid": True, "quality": 1.0, "visibility": 1.0}
+                for x in prof["face"][-16:]
+            ],
+        )
+        self.q.upsert_component(gid, [node])
+        self.reg.save_component(
+            gid,
+            model_banks={
+                "resnet": prof["resnet"][-64:],
+                "swin": prof["swin"][-64:],
+                "solider": prof["solider"][-64:],
+                "attributes": prof["attributes"][-64:],
+                "face": prof["face"][-32:],
+                "pose": prof["pose"][-64:],
+            },
+            cameras=prof["camera"],
+            last_ts=float(obs["time"]),
+            obs=len(prof["resnet"]),
+        )
+
+    def new(self, obs):
+        gid = int(self.reg.allocate_gid())
+        self.pro[gid] = {
+            "resnet": [], "swin": [], "solider": [],
+            "attributes": [], "face": [], "pose": [], "camera": set(),
+        }
+        self.save(gid, obs)
+        self.stats["new"] += 1
+        return gid
+
+    def assign(self, obs, sets, commit=True, recovery=False):
+        count = len(obs)
+        gids = sorted(self.pro)
+        if count == 0:
+            return []
+        floor = float(self.icfg.get("dummy_floor", 0.35))
+        cols = len(gids) + count
+        mat = np.full((count, cols), floor, np.float32)
+        for i, rows in enumerate(sets):
+            for j, gid in enumerate(gids):
+                item = rows.get(gid)
+                if item is not None:
+                    mat[i, j] = float(item["score"])
+        rr, cc = linear_sum_assignment(-mat)
+        take = {}
+        for i, j in zip(rr.tolist(), cc.tolist()):
+            rows = sets[i]
+            ranked = sorted(rows.items(), key=lambda x: x[1]["score"], reverse=True)
+            second = float(ranked[1][1]["score"]) if len(ranked) > 1 else 0.0
+            item = rows.get(gids[j]) if j < len(gids) else None
+            gid = None
+            if item is not None and self.accept(item, second, recovery=recovery):
+                gid = int(gids[j])
+            if gid is None and not recovery and commit:
+                best = float(ranked[0][1]["score"]) if ranked else 0.0
+                deep = float(ranked[0][1]["deep"]) if ranked else 0.0
+                if best < float(self.icfg.get("new_max", 0.48)) and deep < float(self.icfg.get("new_deep_max", 0.54)):
+                    gid = self.new(obs[i])
+            if gid is not None:
+                take[i] = gid
+        used = set()
+        out = ["PENDING"] * count
+        for i in range(count):
+            gid = take.get(i)
+            if gid is None:
+                self.stats["pending"] += 1
+                continue
+            if gid in used:
+                self.stats["duplicate"] += 1
+                continue
+            used.add(gid)
+            out[i] = f"G{gid:06d}"
+        for i, gid in take.items():
+            if out[i] == "PENDING" or not commit:
+                continue
+            item = obs[i]
+            self.save(gid, item)
+            if recovery:
+                self.stats["recovery_match"] += 1
+            if item.get("face"):
+                self.stats["face_match"] += 1
+            if len(self.pro[gid]["camera"]) > 1:
+                self.stats["cross"] += 1
+        return out
+
+    def observe(self, frame, rows, commit=True, recovery=False):
+        poses = self.poses(self.pose, frame)
+        obs = []
+        self.stats["feature"] += 1
+        if recovery:
+            self.stats["recovery"] += 1
+        for row in rows:
+            person = crop(frame, row["bbox"])
+            if person is None or person.size == 0:
+                obs.append(None)
+                continue
+            item = {
+                "row": row,
+                "camera": str(row["camera"]),
+                "time": float(row["timestamp"]),
+                "person": person,
+                "quality": float(quality(person)),
+            }
+            obs.append(item)
+        valid = [x for x in obs if x is not None]
+        if not valid:
+            return ["PENDING"] * len(rows)
+        imgs = [x["person"] for x in valid]
+        resnet = self.resnet.extract_batch(imgs)
+        swin = self.swin.extract_batch(imgs)
+        solider = self.solider.extract_batch(imgs)
+        if not (len(resnet) == len(swin) == len(solider) == len(valid)):
+            raise RuntimeError("ReID extractors returned mismatched batch lengths")
+        vi = 0
+        for item in obs:
+            if item is None:
+                continue
+            item["resnet"] = np.asarray(resnet[vi], np.float32)
+            item["swin"] = np.asarray(swin[vi], np.float32)
+            item["solider"] = np.asarray(solider[vi], np.float32)
+            item["attributes"] = np.asarray(pack(item["person"], frame, item["row"]["bbox"]), np.float32)
+            face = self.face.extract(frame, item["row"]["bbox"])
+            if face is not None and face.valid and face.visibility >= self.fth:
+                item["face"] = {
+                    "vector": np.asarray(face.vector, np.float32),
+                    "quality": float(face.quality),
+                    "visibility": float(face.visibility),
+                    "valid": True,
+                }
+                self.stats["face"] += 1
+            else:
+                item["face"] = None
+            item["pose"], item["posscore"] = self.poseval(poses, item["row"]["bbox"])
+            vi += 1
+        sets = []
+        for item in obs:
+            if item is None:
+                sets.append({})
+                continue
+            ids, got = self.cand(item)
+            rows = {}
+            for gid in ids:
+                value = self.score(item, gid, got)
+                if value is not None:
+                    rows[int(gid)] = value
+            sets.append(rows)
+        good = [x for x in obs if x is not None]
+        scores = [x for x in sets if x]
+        # Keep row alignment by assigning only valid observations, then restore PENDING gaps.
+        amap = self.assign(good, scores, commit=commit, recovery=recovery)
+        out = []
+        vi = 0
+        for item in obs:
+            if item is None:
+                out.append("PENDING")
+            else:
+                out.append(amap[vi])
+                vi += 1
+        return out
+
+    def close(self):
+        self.reg.close()
+
+
+__all__ = ["MultiModalStrict"]

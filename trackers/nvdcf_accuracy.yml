@@ -5,17 +5,34 @@ BaseConfig:
 
 TargetManagement:
   enableBboxUnClipping: 1
-  preserveStreamUpdateOrder: 1
+  preserveStreamUpdateOrder: 0
   maxTargetsPerStream: 80
   minIouDiff4NewTarget: 0.85
   minTrackerConfidence: 0.25
-  probationAge: 2
-  maxShadowTrackingAge: 30
+  probationAge: 1
+  maxShadowTrackingAge: 49
   earlyTerminationAge: 1
-  searchRegionPaddingScale: 3.0
 
 TrajectoryManagement:
   useUniqueID: 1
+  enableReAssoc: 1
+  minMatchingScore4Overall: 0.30
+  minTrackletMatchingScore: 0.30
+  minTrajectoryLength4Projection: 14
+  prepLength4TrajectoryProjection: 50
+  trajectoryProjectionLength: 116
+  maxAngle4TrackletMatching: 180
+  minSpeedSimilarity4TrackletMatching: 0.0
+  minBboxSizeSimilarity4TrackletMatching: 0.215
+  maxTrackletMatchingTimeSearchRange: 16
+  trajectoryProjectionProcessNoiseScale: 0.010
+  trajectoryProjectionMeasurementNoiseScale: 100
+  trackletSpacialSearchRegionScale: 0.075
+  reidExtractionInterval: 0
+  enableVanishingTrackletReconstruction: 0
+  minInclusionRatio4DuplicateTrackletRemoval: 0.57
+  minIou4DuplicateTrackletRemoval: 0.53
+  minMatchRatio4ValidTrackletDetermination: 0.44
 
 DataAssociator:
   dataAssociatorType: 0
@@ -33,19 +50,18 @@ DataAssociator:
 
 StateEstimator:
   stateEstimatorType: 1
-  processNoiseVar4Loc: 1.5
-  processNoiseVar4Size: 1.2
-  processNoiseVar4Vel: 0.03
-  measurementNoiseVar4Detector: 3.0
-  measurementNoiseVar4Tracker: 8.0
+  processNoiseVar4Loc: 374.6508
+  processNoiseVar4Size: 3364.1350
+  processNoiseVar4Vel: 3.6082
+  measurementNoiseVar4Detector: 164.4517
+  measurementNoiseVar4Tracker: 3439.5683
 
 VisualTracker:
   visualTrackerType: 1
   useColorNames: 1
   useHog: 1
-  featureImgSizeLevel: 4
-  featureFocusOffsetFactor_y: -0.15
-  useHighPrecisionFeature: 1
-  filterLr: 0.075
-  filterChannelWeightsLr: 0.10
-  gaussianSigma: 0.75
+  featureImgSizeLevel: 5
+  featureFocusOffsetFactor_y: 0.0652
+  filterLr: 0.0993
+  filterChannelWeightsLr: 0.0549
+  gaussianSigma: 0.9047

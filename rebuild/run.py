@@ -15,8 +15,7 @@ from rebuild.batch_v4 import BatchPipelineV4  # noqa: E402
 from rebuild.batch_v5 import BatchPipelineV5  # noqa: E402
 from rebuild.batch_v6 import BatchPipelineV6  # noqa: E402
 from rebuild.batch_v6_local_global import BatchPipelineV6LocalGlobal  # noqa: E402
-from rebuild import batch_state_invariant as state_pipeline  # noqa: E402
-from rebuild.batch_state_authoritative import BatchPipelineStateAuthoritative  # noqa: E402
+from rebuild.batch_nvdcf import BatchNvDCF  # noqa: E402
 from rebuild.live_state_invariant_accurate import run_live_state  # noqa: E402
 from rebuild.live_v4 import run_live_v4  # noqa: E402
 from rebuild.live_v2 import run_live_v2  # noqa: E402
@@ -26,7 +25,9 @@ def parse_source(values):
     sources = {}
     for value in values:
         if "=" not in value:
-            raise SystemExit("Live sources must use CAMERA=SOURCE, e.g. cam_a=rtsp://...")
+            raise SystemExit(
+                "Live sources must use CAMERA=SOURCE, e.g. cam_a=rtsp://..."
+            )
         camera, source = value.split("=", 1)
         if not camera or not source:
             raise SystemExit(f"Invalid live source: {value}")
@@ -36,7 +37,10 @@ def parse_source(values):
 
 def main():
     parser = argparse.ArgumentParser(
-        description="Same-camera + cross-camera person ReID with persistent track-state and global identity memory"
+        description=(
+            "Same-camera + cross-camera person ReID with persistent "
+            "multimodal identity memory"
+        )
     )
     sub = parser.add_subparsers(dest="mode", required=True)
 
@@ -46,34 +50,58 @@ def main():
 
     final_batch = sub.add_parser(
         "batch_final",
-        help="Final multimodel cross-camera pipeline: NVIDIA ResNet50 + NVIDIA Swin Base + SOLIDER",
+        help="Final multimodel cross-camera pipeline",
     )
-    final_batch.add_argument("--config", default="rebuild/config_final_multimodel.yaml")
+    final_batch.add_argument(
+        "--config",
+        default="rebuild/config_final_multimodel.yaml",
+    )
     final_batch.add_argument("--videos", nargs="*", default=[])
 
     state_final = sub.add_parser(
         "batch_state_final",
-        help="Authoritative state-invariant MTMC with Qdrant retrieval and overlap hysteresis",
+        help=(
+            "NVIDIA NvDCF + multimodal feature-first identity pipeline "
+            "with Qdrant, face, pose, and one-to-one collision protection"
+        ),
     )
-    state_final.add_argument("--config", default="rebuild/config_state_invariant.yaml")
+    state_final.add_argument(
+        "--config",
+        default="rebuild/config_state_invariant.yaml",
+    )
     state_final.add_argument("--videos", nargs="*", default=[])
 
     local_global = sub.add_parser(
         "batch_local_global",
-        help="V6: independent camera-local identity solving followed by global cross-camera reconciliation",
+        help=(
+            "V6: independent camera-local identity solving followed by "
+            "global cross-camera reconciliation"
+        ),
     )
-    local_global.add_argument("--config", default="rebuild/config_v6_local_global.yaml")
+    local_global.add_argument(
+        "--config",
+        default="rebuild/config_v6_local_global.yaml",
+    )
     local_global.add_argument("--videos", nargs="*", default=[])
 
-    old5 = sub.add_parser("batch_v5", help="V5 adaptive recorded-video pipeline")
+    old5 = sub.add_parser(
+        "batch_v5",
+        help="V5 adaptive recorded-video pipeline",
+    )
     old5.add_argument("--config", default="rebuild/config_v5.yaml")
     old5.add_argument("--videos", nargs="*", default=[])
 
-    old4 = sub.add_parser("batch_v4", help="V4 multimodal baseline pipeline")
+    old4 = sub.add_parser(
+        "batch_v4",
+        help="V4 multimodal baseline pipeline",
+    )
     old4.add_argument("--config", default="rebuild/config_v4.yaml")
     old4.add_argument("--videos", nargs="*", default=[])
 
-    old3 = sub.add_parser("batch_v3", help="V3 body baseline pipeline")
+    old3 = sub.add_parser(
+        "batch_v3",
+        help="V3 body baseline pipeline",
+    )
     old3.add_argument("--config", default="rebuild/config_v3.yaml")
     old3.add_argument("--videos", nargs="*", default=[])
 
@@ -83,14 +111,23 @@ def main():
 
     live = sub.add_parser(
         "live",
-        help="Safe055/V6 live capture: record all RTSP sources, then run the joint video ReID pipeline",
+        help=(
+            "Safe live capture: record all RTSP sources, then run the "
+            "joint video ReID pipeline"
+        ),
     )
-    live.add_argument("--config", default="rebuild/config_state_invariant.yaml")
+    live.add_argument(
+        "--config",
+        default="rebuild/config_state_invariant.yaml",
+    )
     live.add_argument("--sources", nargs="+", required=True)
     live.add_argument("--output-dir", default=None)
     live.add_argument("--show", action="store_true")
 
-    oldlive = sub.add_parser("live_v2", help="V2 live/RTSP baseline")
+    oldlive = sub.add_parser(
+        "live_v2",
+        help="V2 live/RTSP baseline",
+    )
     oldlive.add_argument("--config", default="rebuild/config.yaml")
     oldlive.add_argument("--sources", nargs="+", required=True)
     oldlive.add_argument("--output-dir", default=None)
@@ -102,7 +139,7 @@ def main():
     elif args.mode == "batch_final":
         BatchPipelineV6(args.config).run(args.videos)
     elif args.mode == "batch_state_final":
-        BatchPipelineStateAuthoritative(args.config).run(args.videos)
+        BatchNvDCF(args.config).run(args.videos)
     elif args.mode == "batch_local_global":
         BatchPipelineV6LocalGlobal(args.config).run(args.videos)
     elif args.mode == "batch_v5":
@@ -114,9 +151,19 @@ def main():
     elif args.mode == "batch_v2":
         BatchPipelineV2(args.config).run(args.videos)
     elif args.mode == "live":
-        run_live_state(args.config, parse_source(args.sources), args.output_dir, args.show)
+        run_live_state(
+            args.config,
+            parse_source(args.sources),
+            args.output_dir,
+            args.show,
+        )
     else:
-        run_live_v2(args.config, parse_source(args.sources), args.output_dir, args.show)
+        run_live_v2(
+            args.config,
+            parse_source(args.sources),
+            args.output_dir,
+            args.show,
+        )
 
 
 if __name__ == "__main__":

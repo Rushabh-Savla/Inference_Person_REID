@@ -253,6 +253,9 @@ class MultiModalStrict:
                 src.extend(view)
             vals[model] = self.best([obs[model]], src or prof.get(model, []))
         deep = 0.25 * vals["resnet"] + 0.40 * vals["swin"] + 0.35 * vals["solider"]
+        crop_quality = float(np.clip(obs.get("quality", 1.0), 0.0, 1.0))
+        qweight = 0.75 + 0.25 * crop_quality
+        deep *= qweight
         attrs = self.attr(obs["attributes"], rem.get("attributes", {}).get("attributes", []) or prof.get("attributes", []))
         if attrs is None:
             return None
@@ -261,9 +264,9 @@ class MultiModalStrict:
         if obs.get("pose") is not None and pbank:
             pose = self.best([obs["pose"]], pbank)
         face = self.faceval(obs.get("face"), rem.get("face", {}).get("face", []) or prof.get("face", []))
-        top = attrs["top"]
-        bot = attrs["bottom"]
-        pattern = attrs["pattern"]
+        top = float(attrs["top"]) * qweight
+        bot = float(attrs["bottom"]) * qweight
+        pattern = float(attrs["pattern"]) * qweight
         ready = bool(face["used"])
         if ready:
             value = 0.60 * face["score"] + 0.20 * deep + 0.09 * top + 0.09 * bot + 0.02 * pose
@@ -282,6 +285,7 @@ class MultiModalStrict:
             "pose": float(pose),
             "face": float(face["score"]),
             "faceused": ready,
+            "quality": crop_quality,
         }
 
     def accept(self, row, second, recovery=False):
@@ -362,11 +366,14 @@ class MultiModalStrict:
             + 0.40 * values["swin"]
             + 0.35 * values["solider"]
         )
+        crop_quality = float(np.clip(obs.get("quality", 1.0), 0.0, 1.0))
+        qweight = 0.75 + 0.25 * crop_quality
+        deep *= qweight
         attrs = self.attr(obs["attributes"], item.get("attributes", []))
         if attrs is None:
             return None
-        top = float(attrs["top"])
-        bottom = float(attrs["bottom"])
+        top = float(attrs["top"]) * qweight
+        bottom = float(attrs["bottom"]) * qweight
         pose = 0.0
         if obs.get("pose") is not None and item.get("pose"):
             pose = self.best([obs["pose"]], item["pose"])
@@ -401,6 +408,7 @@ class MultiModalStrict:
             "face": float(face["score"]),
             "faceused": bool(face["used"]),
             "support": int(support),
+            "quality": crop_quality,
         }
 
     def stage_new(self, obs):

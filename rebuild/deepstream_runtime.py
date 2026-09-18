@@ -7,6 +7,9 @@ import subprocess
 from pathlib import Path
 
 
+REPO = Path(__file__).resolve().parents[1]
+
+
 class DeepStreamRuntime:
     """Discover and validate the installed DeepStream/NvDCF runtime."""
 
@@ -124,6 +127,9 @@ class DeepStreamRuntime:
         )
         if matches:
             return matches[0]
+        repo_cfg = REPO / "trackers/nvdcf_accuracy.yml"
+        if repo_cfg.is_file():
+            return str(repo_cfg)
         return None
 
     @staticmethod

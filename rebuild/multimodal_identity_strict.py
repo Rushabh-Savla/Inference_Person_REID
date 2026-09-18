@@ -5,7 +5,6 @@ from types import SimpleNamespace
 import numpy as np
 from scipy.optimize import linear_sum_assignment
 
-from rebuild.face_v4 import FaceExtractorV4
 from rebuild.identity_v2 import crop, quality
 from rebuild.person_attributes import pack
 from reid.nvidia_reid import NVIDIAReIDExtractor
@@ -26,7 +25,6 @@ class MultiModalStrict:
         self.rcfg = cfg["reid"]
         self.mcfg = cfg["cross_camera_models"]
         self.icfg = cfg["identity"]
-        self.fcfg = cfg["face"]
         self.pcfg = cfg["pose"]
         self.resnet = NVIDIAReIDExtractor(
             weights=self.rcfg["weights"],
@@ -42,19 +40,6 @@ class MultiModalStrict:
             self.mcfg["solider_weights"],
             device="cuda",
             max_batch=int(self.mcfg.get("solider_batch", 16)),
-        )
-        if not bool(self.fcfg.get("enabled", True)):
-            raise RuntimeError("Face matching is mandatory")
-        self.fth = float(self.fcfg.get("min_visibility", 0.68))
-        self.fqu = float(self.fcfg.get("min_quality", 0.50))
-        self.face = FaceExtractorV4(
-            model=str(self.fcfg.get("model", "buffalo_l")),
-            det_size=tuple(self.fcfg.get("det_size", [640, 640])),
-            min_detection=float(self.fcfg.get("min_detection", 0.55)),
-            min_size=int(self.fcfg.get("min_size", 32)),
-            min_quality=self.fqu,
-            min_visibility=self.fth,
-            device=str(self.fcfg.get("device", "cuda")),
         )
         if not bool(self.pcfg.get("enabled", True)):
             raise RuntimeError("Pose matching is mandatory")
@@ -82,8 +67,6 @@ class MultiModalStrict:
             "feature": 0,
             "recovery": 0,
             "recovery_match": 0,
-            "face": 0,
-            "face_match": 0,
             "new": 0,
             "pending": 0,
             "cross": 0,
@@ -234,7 +217,7 @@ class MultiModalStrict:
                 "pose": {"pose": [obs["pose"]]} if obs.get("pose") is not None else {},
             },
             attribute_bank=[obs["attributes"]],
-            face_bank=[obs["face"]] if obs.get("face") else [],
+            face_bank=[],
         )
 
     def cand(self, obs):
@@ -263,15 +246,10 @@ class MultiModalStrict:
         pbank = rem.get("pose", {}).get("pose", []) or prof.get("pose", [])
         if obs.get("pose") is not None and pbank:
             pose = self.best([obs["pose"]], pbank)
-        face = self.faceval(obs.get("face"), rem.get("face", {}).get("face", []) or prof.get("face", []))
         top = float(attrs["top"]) * qweight
         bot = float(attrs["bottom"]) * qweight
         pattern = float(attrs["pattern"]) * qweight
-        ready = bool(face["used"])
-        if ready:
-            value = 0.60 * face["score"] + 0.20 * deep + 0.09 * top + 0.09 * bot + 0.02 * pose
-        else:
-            value = 0.44 * deep + 0.24 * top + 0.24 * bot + 0.05 * pose + 0.03 * pattern
+        value = 0.44 * deep + 0.24 * top + 0.24 * bot + 0.05 * pose + 0.03 * pattern
         return {
             "score": float(np.clip(value, 0.0, 0.995)),
             "deep": float(deep),
@@ -283,8 +261,6 @@ class MultiModalStrict:
             "upper_pattern": float(attrs["upper_pattern"]),
             "lower_pattern": float(attrs["lower_pattern"]),
             "pose": float(pose),
-            "face": float(face["score"]),
-            "faceused": ready,
             "quality": crop_quality,
         }
 
@@ -298,12 +274,6 @@ class MultiModalStrict:
         bot = float(row["bottom"])
         if top < float(self.icfg.get("top_min", 0.42)) or bot < float(self.icfg.get("bottom_min", 0.42)):
             return False
-        if row["faceused"]:
-            return bool(
-                row["face"] >= float(self.icfg.get("face_min", 0.68))
-                and row["score"] >= float(self.icfg.get("face_score_min", 0.68))
-                and margin >= float(self.icfg.get("face_margin", 0.02))
-            )
         if support < 2:
             return False
         floor = float(self.icfg.get("recovery_min", 0.58) if recovery else self.icfg.get("existing_min", 0.61))
@@ -318,9 +288,6 @@ class MultiModalStrict:
             prof[model] = prof[model][-96:]
         prof["attributes"].append(np.asarray(obs["attributes"], np.float32))
         prof["attributes"] = prof["attributes"][-64:]
-        if obs.get("face"):
-            prof["face"].append(np.asarray(obs["face"]["vector"], np.float32))
-            prof["face"] = prof["face"][-32:]
         if obs.get("pose") is not None:
             prof["pose"].append(np.asarray(obs["pose"], np.float32))
             prof["pose"] = prof["pose"][-64:]
@@ -335,10 +302,7 @@ class MultiModalStrict:
                 "pose": {"pose": prof["pose"][-16:]},
             },
             attribute_bank=prof["attributes"][-16:],
-            face_bank=[
-                {"vector": x, "valid": True, "quality": 1.0, "visibility": 1.0}
-                for x in prof["face"][-16:]
-            ],
+            face_bank=[],
         )
         self.q.upsert_component(gid, [node])
         self.reg.save_component(
@@ -348,7 +312,7 @@ class MultiModalStrict:
                 "swin": prof["swin"][-64:],
                 "solider": prof["solider"][-64:],
                 "attributes": prof["attributes"][-64:],
-                "face": prof["face"][-32:],
+                "face": [],
                 "pose": prof["pose"][-64:],
             },
             cameras=prof["camera"],
@@ -377,22 +341,12 @@ class MultiModalStrict:
         pose = 0.0
         if obs.get("pose") is not None and item.get("pose"):
             pose = self.best([obs["pose"]], item["pose"])
-        face = self.faceval(obs.get("face"), item.get("face", []))
-        if face["used"]:
-            score = (
-                0.64 * float(face["score"])
-                + 0.18 * deep
-                + 0.09 * top
-                + 0.08 * bottom
-                + 0.01 * pose
-            )
-        else:
-            score = (
-                0.46 * deep
-                + 0.26 * top
-                + 0.26 * bottom
-                + 0.02 * pose
-            )
+        score = (
+            0.46 * deep
+            + 0.26 * top
+            + 0.26 * bottom
+            + 0.02 * pose
+        )
         support = sum(
             values[name] >= self.pending_model_min
             for name in self.models
@@ -405,8 +359,6 @@ class MultiModalStrict:
             "top": top,
             "bottom": bottom,
             "pose": float(pose),
-            "face": float(face["score"]),
-            "faceused": bool(face["used"]),
             "support": int(support),
             "quality": crop_quality,
         }
@@ -444,8 +396,6 @@ class MultiModalStrict:
                 item["attributes"].append(np.asarray(obs["attributes"], np.float32))
                 if obs.get("pose") is not None:
                     item["pose"].append(np.asarray(obs["pose"], np.float32))
-                if obs.get("face"):
-                    item["face"].append(dict(obs["face"]))
                 item["observations"].append(obs)
                 item["count"] += 1
                 item["last_camera"] = camera
@@ -470,7 +420,7 @@ class MultiModalStrict:
                 [np.asarray(obs["pose"], np.float32)]
                 if obs.get("pose") is not None else []
             ),
-            "face": [dict(obs["face"])] if obs.get("face") else [],
+            "face": [],
             "observations": [obs],
             "count": 1,
             "last_camera": camera,
@@ -559,8 +509,6 @@ class MultiModalStrict:
             self.save(gid, item)
             if recovery:
                 self.stats["recovery_match"] += 1
-            if item.get("face"):
-                self.stats["face_match"] += 1
             if len(self.pro[gid]["camera"]) > 1:
                 self.stats["cross"] += 1
         return out
@@ -601,17 +549,7 @@ class MultiModalStrict:
             item["swin"] = np.asarray(swin[vi], np.float32)
             item["solider"] = np.asarray(solider[vi], np.float32)
             item["attributes"] = np.asarray(pack(item["person"], frame, item["row"]["bbox"]), np.float32)
-            face = self.face.extract(frame, item["row"]["bbox"])
-            if face is not None and face.valid and face.visibility >= self.fth:
-                item["face"] = {
-                    "vector": np.asarray(face.vector, np.float32),
-                    "quality": float(face.quality),
-                    "visibility": float(face.visibility),
-                    "valid": True,
-                }
-                self.stats["face"] += 1
-            else:
-                item["face"] = None
+            item["face"] = None
             item["pose"], item["posscore"] = self.poseval(poses, item["row"]["bbox"])
             vi += 1
         sets = []

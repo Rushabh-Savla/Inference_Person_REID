@@ -291,25 +291,55 @@ class DeepStreamRuntime:
                     continue
         return None
 
-    @staticmethod
-    def version(root):
-        if root is None:
-            return "unknown"
-        header = root / "sources/includes/nvds_version.h"
-        values = {}
-        if header.is_file():
-            text = header.read_text(encoding="utf-8", errors="ignore")
-            for key in ("MAJOR", "MINOR", "MICRO"):
-                match = re.search(rf"NVDS_VERSION_{key}\s+([0-9]+)", text)
+    @classmethod
+    def version(cls, root, library=None):
+        if root is not None:
+            header = root / "sources/includes/nvds_version.h"
+            values = {}
+            if header.is_file():
+                text = header.read_text(encoding="utf-8", errors="ignore")
+                for key in ("MAJOR", "MINOR", "MICRO"):
+                    match = re.search(rf"NVDS_VERSION_{key}\\s+([0-9]+)", text)
+                    if match:
+                        values[key] = match.group(1)
+            if len(values) == 3:
+                return f'{values["MAJOR"]}.{values["MINOR"]}.{values["MICRO"]}'
+            match = re.search(r"deepstream[-_]?([0-9]+(?:\\.[0-9]+){1,2})", str(root).lower())
+            if match:
+                return match.group(1)
+        if library:
+            paths = [str(library)]
+            try:
+                result = subprocess.run(
+                    ["ldd", str(library)],
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.STDOUT,
+                    text=True,
+                    timeout=15,
+                    check=False,
+                )
+                paths.extend(result.stdout.splitlines())
+            except (OSError, subprocess.SubprocessError):
+                pass
+            for value in paths:
+                match = re.search(r"deepstream[-_]?([0-9]+(?:\\.[0-9]+){1,2})", value.lower())
                 if match:
-                    values[key] = match.group(1)
-        if len(values) == 3:
-            return f'{values["MAJOR"]}.{values["MINOR"]}.{values["MICRO"]}'
-        match = re.search(r"deepstream[-_]?([0-9]+(?:\.[0-9]+){1,2})", str(root).lower())
-        if match:
-            return match.group(1)
+                    return match.group(1)
+            try:
+                result = subprocess.run(
+                    ["strings", str(library)],
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.STDOUT,
+                    text=True,
+                    timeout=15,
+                    check=False,
+                )
+                match = re.search(r"deepstream[^0-9]*([0-9]+\\.[0-9]+(?:\\.[0-9]+)?)", result.stdout.lower())
+                if match:
+                    return match.group(1)
+            except (OSError, subprocess.SubprocessError):
+                pass
         return "unknown"
-
     @staticmethod
     def command(name):
         try:
@@ -330,7 +360,7 @@ class DeepStreamRuntime:
         root, library = cls.find()
         result = {
             "root": str(root) if root else None,
-            "version": cls.version(root),
+            "version": cls.version(root, library),
             "nvdcf_library": library,
             "nvdcf_config": cls.config(root),
             "gpu": cls.command(["nvidia-smi", "--query-gpu=name,driver_version,compute_cap", "--format=csv,noheader"]),

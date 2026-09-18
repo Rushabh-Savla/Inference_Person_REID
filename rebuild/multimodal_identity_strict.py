@@ -71,6 +71,13 @@ class MultiModalStrict:
             int(state.get("qdrant_limit", 32)),
         )
         self.pro = self.load()
+        self.pending = []
+        self.pending_min = max(3, int(self.icfg.get("new_confirm_frames", 4)))
+        self.pending_match = float(self.icfg.get("new_pending_match_min", 0.82))
+        self.pending_margin = float(self.icfg.get("new_pending_margin", 0.08))
+        self.pending_model_min = float(self.icfg.get("new_pending_model_min", 0.55))
+        self.pending_clothing_min = float(self.icfg.get("new_pending_clothing_min", 0.58))
+        self.pending_required_models = 3
         self.stats = {
             "feature": 0,
             "recovery": 0,
@@ -81,6 +88,8 @@ class MultiModalStrict:
             "pending": 0,
             "cross": 0,
             "duplicate": 0,
+            "pending_new_observations": 0,
+            "pending_new_confirmed": 0,
         }
 
     @staticmethod
@@ -343,6 +352,125 @@ class MultiModalStrict:
             obs=len(prof["resnet"]),
         )
 
+    def pending_score(self, obs, item):
+        values = {
+            model: self.best([obs[model]], item.get(model, []))
+            for model in self.models
+        }
+        deep = (
+            0.25 * values["resnet"]
+            + 0.40 * values["swin"]
+            + 0.35 * values["solider"]
+        )
+        attrs = self.attr(obs["attributes"], item.get("attributes", []))
+        if attrs is None:
+            return None
+        top = float(attrs["top"])
+        bottom = float(attrs["bottom"])
+        pose = 0.0
+        if obs.get("pose") is not None and item.get("pose"):
+            pose = self.best([obs["pose"]], item["pose"])
+        face = self.faceval(obs.get("face"), item.get("face", []))
+        if face["used"]:
+            score = (
+                0.64 * float(face["score"])
+                + 0.18 * deep
+                + 0.09 * top
+                + 0.08 * bottom
+                + 0.01 * pose
+            )
+        else:
+            score = (
+                0.46 * deep
+                + 0.26 * top
+                + 0.26 * bottom
+                + 0.02 * pose
+            )
+        support = sum(
+            values[name] >= self.pending_model_min
+            for name in self.models
+        )
+        return {
+            "score": float(np.clip(score, 0.0, 0.995)),
+            "resnet": float(values["resnet"]),
+            "swin": float(values["swin"]),
+            "solider": float(values["solider"]),
+            "top": top,
+            "bottom": bottom,
+            "pose": float(pose),
+            "face": float(face["score"]),
+            "faceused": bool(face["used"]),
+            "support": int(support),
+        }
+
+    def stage_new(self, obs):
+        frame = int(obs["row"].get("frame", -1))
+        camera = str(obs["camera"])
+        ranked = []
+        for index, item in enumerate(self.pending):
+            if (
+                item.get("last_camera") == camera
+                and int(item.get("last_frame", -2)) == frame
+            ):
+                continue
+            score = self.pending_score(obs, item)
+            if score is None:
+                continue
+            if (
+                score["top"] < self.pending_clothing_min
+                or score["bottom"] < self.pending_clothing_min
+                or score["support"] < self.pending_required_models
+            ):
+                continue
+            ranked.append((float(score["score"]), index, score))
+        ranked.sort(reverse=True)
+        if ranked:
+            best, index, _ = ranked[0]
+            second = float(ranked[1][0]) if len(ranked) > 1 else 0.0
+            margin = best - second
+            if best >= self.pending_match and margin >= self.pending_margin:
+                item = self.pending[index]
+                item["resnet"].append(np.asarray(obs["resnet"], np.float32))
+                item["swin"].append(np.asarray(obs["swin"], np.float32))
+                item["solider"].append(np.asarray(obs["solider"], np.float32))
+                item["attributes"].append(np.asarray(obs["attributes"], np.float32))
+                if obs.get("pose") is not None:
+                    item["pose"].append(np.asarray(obs["pose"], np.float32))
+                if obs.get("face"):
+                    item["face"].append(dict(obs["face"]))
+                item["observations"].append(obs)
+                item["count"] += 1
+                item["last_camera"] = camera
+                item["last_frame"] = frame
+                self.stats["pending_new_observations"] += 1
+                if item["count"] >= self.pending_min:
+                    seed = item["observations"][0]
+                    gid = self.new(seed)
+                    for extra in item["observations"][1:]:
+                        self.save(gid, extra)
+                    self.pending.pop(index)
+                    self.stats["pending_new_confirmed"] += 1
+                    return gid
+                return None
+
+        self.pending.append({
+            "resnet": [np.asarray(obs["resnet"], np.float32)],
+            "swin": [np.asarray(obs["swin"], np.float32)],
+            "solider": [np.asarray(obs["solider"], np.float32)],
+            "attributes": [np.asarray(obs["attributes"], np.float32)],
+            "pose": (
+                [np.asarray(obs["pose"], np.float32)]
+                if obs.get("pose") is not None else []
+            ),
+            "face": [dict(obs["face"])] if obs.get("face") else [],
+            "observations": [obs],
+            "count": 1,
+            "last_camera": camera,
+            "last_frame": frame,
+        })
+        self.stats["pending_new_observations"] += 1
+        return None
+
     def new(self, obs):
         gid = int(self.reg.allocate_gid())
         self.pro[gid] = {
@@ -379,8 +507,11 @@ class MultiModalStrict:
             if gid is None and not recovery and commit:
                 best = float(ranked[0][1]["score"]) if ranked else 0.0
                 deep = float(ranked[0][1]["deep"]) if ranked else 0.0
-                if best < float(self.icfg.get("new_max", 0.48)) and deep < float(self.icfg.get("new_deep_max", 0.54)):
-                    gid = self.new(obs[i])
+                if (
+                    best < float(self.icfg.get("new_max", 0.48))
+                    and deep < float(self.icfg.get("new_deep_max", 0.54))
+                ):
+                    gid = self.stage_new(obs[i])
             if gid is not None:
                 take[i] = gid
         used = set()

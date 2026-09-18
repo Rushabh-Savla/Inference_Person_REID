@@ -7,6 +7,8 @@ import cv2
 import numpy as np
 from ultralytics import YOLO
 
+from rebuild.deepstream_runtime import DeepStreamRuntime
+
 
 class NvDCF:
     """NVIDIA DeepStream NvDCF tracker front-end.
@@ -25,22 +27,40 @@ class NvDCF:
         pose = self.cfg.get("pose", {}) or {}
         if bool(pose.get("enabled", True)):
             self.pose = YOLO(pose.get("model", "yolo11n-pose.pt"))
-        self.library = self._find(
-            self.cfg.get("library"),
-            (
-                "/opt/nvidia/deepstream/deepstream/lib/libnvds_nvmultiobjecttracker.so",
-                "/opt/nvidia/deepstream/deepstream/lib/gst-plugins/libnvds_nvmultiobjecttracker.so",
-            ),
-        )
-        self.tracker = self._find(
-            self.cfg.get("config"),
-            (
-                "/opt/nvidia/deepstream/deepstream/samples/configs/deepstream-app/config_tracker_NvDCF_accuracy.yml",
-                "/opt/nvidia/deepstream/deepstream/samples/configs/deepstream-app/config_tracker_NvDCF_perf.yml",
-            ),
-        )
+        self.dsroot, self.library, self.tracker = self._runtime()
         self.width = int(self.cfg.get("width", 0))
         self.height = int(self.cfg.get("height", 0))
+
+    def _runtime(self):
+        value = str(self.cfg.get("library", "")).strip().lower()
+        configured = self.cfg.get("library")
+        if value and value != "auto":
+            library = self._find(configured, ())
+            if library:
+                config = self._find(self.cfg.get("config"), ())
+                if config is None:
+                    raise RuntimeError(
+                        f"NvDCF library is configured at {library}, but the tracker config was not found."
+                    )
+                dsroot, discovered = DeepStreamRuntime.find()
+                root = dsroot if discovered and Path(discovered).resolve() == Path(library).resolve() else Path(library).resolve().parent.parent
+                DeepStreamRuntime.configure(root)
+                return root, library, config
+        dsroot, library = DeepStreamRuntime.find()
+        if dsroot is None or library is None:
+            raise RuntimeError(
+                "Installed DeepStream with libnvds_nvmultiobjecttracker.so was not found. "
+                "The NvDCF backend will not fall back to another tracker."
+            )
+        config = self._find(self.cfg.get("config"), ())
+        if config is None:
+            config = DeepStreamRuntime.config(dsroot)
+        if config is None:
+            raise RuntimeError(
+                f"NvDCF library found at {library}, but no NvDCF tracker config exists under {dsroot}."
+            )
+        DeepStreamRuntime.configure(dsroot)
+        return dsroot, library, config
 
     @staticmethod
     def _find(value, items):
@@ -65,16 +85,17 @@ class NvDCF:
         base = Path(os.environ.get("NVDCF_RUNTIME", "")).expanduser()
         if not base:
             base = Path(__file__).resolve().parents[1] / ".nvdcf_runtime"
+        dsroot, _, _ = DeepStreamRuntime.require()
         roots = [
             base / "usr/lib/python3/dist-packages",
             base / "usr/lib/python3.12/dist-packages",
             base / "usr/lib/x86_64-linux-gnu/girepository-1.0",
             Path("/usr/lib/python3/dist-packages"),
             Path("/usr/lib/python3.12/dist-packages"),
-            Path("/opt/nvidia/deepstream/deepstream/lib"),
-            Path("/opt/nvidia/deepstream/deepstream/lib/python"),
-            Path("/opt/nvidia/deepstream/deepstream/sources/deepstream_python_apps/bindings"),
-            Path("/opt/nvidia/deepstream/deepstream/sources/deepstream_python_apps/bindings/build"),
+            dsroot / "lib",
+            dsroot / "lib/python",
+            dsroot / "sources/deepstream_python_apps/bindings",
+            dsroot / "sources/deepstream_python_apps/bindings/build",
         ]
         for path in roots:
             if path.exists() and str(path) not in sys.path:
@@ -105,7 +126,7 @@ class NvDCF:
                 )
 
         for pattern in (
-            "/opt/nvidia/deepstream/deepstream/lib/pyds*.so",
+            str(dsroot / "lib/pyds*.so"),
             str(base / "opt/nvidia/deepstream/deepstream/lib/pyds*.so"),
         ):
             for path in glob.glob(pattern):

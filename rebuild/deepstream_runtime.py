@@ -28,6 +28,7 @@ class DeepStreamRuntime:
         values.extend(Path("/usr/local/nvidia/deepstream").glob("deepstream*"))
         values.extend(Path("/usr/local").glob("deepstream*"))
         values.extend(Path.home().glob("deepstream*"))
+        values.extend(Path.home().glob(".local/share/deepstream*"))
 
         unique = []
         seen = set()
@@ -51,7 +52,8 @@ class DeepStreamRuntime:
             Path("/opt/nvidia"),
             Path("/usr/local/nvidia"),
             Path("/usr/local"),
-            Path.home(),
+            Path.home() / "deepstream",
+            Path.home() / ".local/share",
         ):
             if not base.exists():
                 continue
@@ -59,7 +61,12 @@ class DeepStreamRuntime:
                 try:
                     for item in base.rglob(name):
                         parent = item.parent
-                        root = parent.parent if parent.name == "lib" else parent
+                        if parent.name == "gst-plugins":
+                            root = parent.parent.parent
+                        elif parent.name == "lib":
+                            root = parent.parent
+                        else:
+                            root = parent
                         unique.append(root)
                 except (OSError, PermissionError):
                     continue

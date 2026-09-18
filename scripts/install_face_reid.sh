@@ -1,51 +1,28 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-# InsightFace 0.7.3 declares the CPU `onnxruntime` package as a dependency.
-# Keep dependency resolution isolated so it cannot replace the project's
-# CUDA ONNX Runtime 1.28.x.
-python -m pip install --upgrade --no-deps "insightface==0.7.3"
-python -m pip install --upgrade --no-deps   "albumentations==1.3.1"   "qudida==0.0.4"   "easydict==1.13"   "prettytable==3.12.0"
-
-# These packages are imported by qudida/albumentations and are installed
-# without dependency resolution so the repository's pinned NumPy remains
-# authoritative.
-python -m pip install --upgrade --no-deps   "joblib==1.5.2"   "threadpoolctl==3.6.0"   "scikit-learn==1.6.1"   "scikit-image==0.25.2"
-
-# Restore the repository's numerics after any prior environment drift.
-python -m pip install --force-reinstall --no-deps   "numpy==2.2.6"   "scipy==1.15.3"
-
-# Explicitly keep CUDA ONNX Runtime as the only ORT distribution.
-python -m pip uninstall -y onnxruntime >/dev/null 2>&1 || true
-python -m pip install --force-reinstall --no-deps "onnxruntime-gpu==1.28.0"
-
+# The active pipeline no longer uses InsightFace, ArcFace or SCRFD.
+# This command is retained as a compatibility preflight for old workflows.
 python - <<'PY'
 import numpy as np
 import scipy
-import sklearn
-import skimage
-import joblib
-import threadpoolctl
 import onnxruntime as ort
-import albumentations as A
 
 print("numpy:", np.__version__)
 print("scipy:", scipy.__version__)
-print("scikit-learn:", sklearn.__version__)
-print("scikit-image:", skimage.__version__)
-print("joblib:", joblib.__version__)
-print("threadpoolctl:", threadpoolctl.__version__)
-print("albumentations:", A.__version__)
 print("onnxruntime:", ort.__version__)
 print("providers:", ort.get_available_providers())
+
+if np.__version__ != "2.2.6":
+    raise SystemExit("Expected numpy==2.2.6")
+if scipy.__version__ != "1.15.3":
+    raise SystemExit("Expected scipy==1.15.3")
+if ort.__version__ != "1.28.0":
+    raise SystemExit("Expected onnxruntime-gpu==1.28.0")
 if "CUDAExecutionProvider" not in ort.get_available_providers():
-    raise SystemExit(
-        "CUDAExecutionProvider is missing; keep onnxruntime-gpu 1.28.x installed."
-    )
+    raise SystemExit("CUDAExecutionProvider is missing")
 PY
 
-python - <<'PY'
-from insightface.app import FaceAnalysis
-print("InsightFace import: OK")
-print("FaceAnalysis buffalo_l: available")
-PY
+echo "Face runtime: DISABLED"
+echo "Identity runtime: NVIDIA ReID + NVIDIA Swin + SOLIDER + clothing + pose + Qdrant"
+echo "No InsightFace/ArcFace/SCRFD packages are required."

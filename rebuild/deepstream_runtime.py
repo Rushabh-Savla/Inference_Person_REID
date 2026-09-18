@@ -180,6 +180,41 @@ class DeepStreamRuntime:
         return None
 
     @classmethod
+    def runtime_lib_dirs(cls):
+        names = (
+            "libnvds_meta.so",
+            "libnvds_infer.so",
+            "libnvbufsurface.so",
+            "libnvdsgst_meta.so",
+            "libnvdsgst_helper.so",
+            "libnvdsgst_customhelper.so",
+        )
+        bases = (
+            Path("/opt/nvidia"),
+            Path("/usr/local/nvidia"),
+            Path("/usr/local"),
+            Path.home() / "face_recognition_system",
+            Path.home() / "deepstream",
+            Path.home() / ".local/share",
+        )
+        found = []
+        seen = set()
+        for base in bases:
+            if not base.exists():
+                continue
+            for name in names:
+                try:
+                    for item in base.rglob(name):
+                        if not item.is_file():
+                            continue
+                        key = str(item.parent.resolve())
+                        if key not in seen:
+                            seen.add(key)
+                            found.append(Path(key))
+                except (OSError, PermissionError):
+                    continue
+        return found
+    @classmethod
     def tracker_plugin(cls):
         names = ("libnvdsgst_tracker.so", "libnvdsgst_tracker.so.*")
         bases = (
@@ -298,6 +333,12 @@ class DeepStreamRuntime:
             os.environ["GST_PLUGIN_PATH"] = (
                 str(plugins) + (os.pathsep + current if current else "")
             )
+        for libdir in DeepStreamRuntime.runtime_lib_dirs():
+            current = os.environ.get("LD_LIBRARY_PATH", "")
+            os.environ["LD_LIBRARY_PATH"] = (
+                str(libdir) + (os.pathsep + current if current else "")
+            )
+
         plugin = DeepStreamRuntime.tracker_plugin()
         if plugin is not None:
             plugin_dir = plugin.parent

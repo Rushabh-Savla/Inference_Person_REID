@@ -50,6 +50,7 @@ identity:
   new_pending_match_min: 0.82
   new_pending_model_min: 0.55
   new_pending_clothing_min: 0.58
+  new_pending_required_models: 3
 
 face:
   enabled: true

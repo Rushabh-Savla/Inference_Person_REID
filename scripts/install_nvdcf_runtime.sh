@@ -15,6 +15,8 @@ trap 'rm -rf "$tmp"' EXIT
 
 echo "[nvdcf] Python: $VENV_PY"
 echo "[nvdcf] Rootless runtime: $ROOT"
+REPO_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+export PYTHONPATH="$REPO_DIR:${PYTHONPATH:-}"
 
 read -r DS_ROOT DS_LIB DS_CFG < <(
   "$VENV_PY" - <<'PY'
@@ -90,7 +92,7 @@ done
 
 export NVDCF_RUNTIME="$ROOT"
 export NVDCF_DEEPSTREAM_ROOT="$DS_ROOT"
-export PYTHONPATH="$ROOT/usr/lib/python3/dist-packages:$ROOT/usr/lib/python3.12/dist-packages:${PYTHONPATH:-}"
+export PYTHONPATH="$REPO_DIR:$ROOT/usr/lib/python3/dist-packages:$ROOT/usr/lib/python3.12/dist-packages:${PYTHONPATH:-}"
 DS_LIB_DIR="$("$VENV_PY" - "$DS_LIB" <<'PY'
 import sys
 from rebuild.deepstream_runtime import DeepStreamRuntime
@@ -106,6 +108,17 @@ fi
 wheel=""
 
 # Reuse an already-installed NVIDIA pyds binding when this host has one.
+PYDS_HOST="$("$VENV_PY" - <<'PY'
+import sys
+from rebuild.deepstream_runtime import DeepStreamRuntime
+item = DeepStreamRuntime.pyds()
+print(item if item is not None and item.suffix == ".so" else "")
+PY
+)"
+if [[ -n "$PYDS_HOST" ]]; then
+  PYDS_DIR="$(dirname "$PYDS_HOST")"
+  export PYTHONPATH="$PYDS_DIR:$PYTHONPATH"
+fi
 if "$VENV_PY" - <<'PY'
 import gi
 gi.require_version("Gst", "1.0")
@@ -147,7 +160,7 @@ fi
 
 if [[ "$wheel" == "EXISTING" ]]; then
   :
-elif [[ -z "$wheel" ]]; then
+elif [[ -z "$wheel" && -d "$DS_ROOT/sources/includes" ]]; then
   bind="$DS_ROOT/sources/deepstream_python_apps/bindings"
   if [[ ! -f "$bind/pyproject.toml" && ! -f "$bind/setup.py" ]]; then
     echo "[nvdcf] PyDS source not installed; cloning NVIDIA deepstream_python_apps rootlessly."
@@ -167,6 +180,13 @@ elif [[ -z "$wheel" ]]; then
   "$VENV_PY" -m build --wheel "$bind"
   wheel="$(find "$bind/dist" -maxdepth 1 -type f -name 'pyds-*.whl' -print -quit)"
   [[ -n "$wheel" ]] || { echo "[nvdcf] ERROR: PyDS wheel build produced no wheel."; exit 1; }
+fi
+
+if [[ -z "$wheel" ]]; then
+  echo "[nvdcf] ERROR: no usable NVIDIA PyDS binding was found, and the discovered NvDCF library directory is not a complete DeepStream SDK."
+  echo "[nvdcf] Found NvDCF: $DS_LIB"
+  echo "[nvdcf] Expected either an importable pyds binding or a DeepStream SDK containing sources/includes."
+  exit 1
 fi
 
 if [[ "$wheel" != "EXISTING" ]]; then

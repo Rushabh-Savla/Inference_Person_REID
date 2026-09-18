@@ -124,7 +124,9 @@ if [[ "$wheel" != "EXISTING" ]]; then
   done
 fi
 
-# NVIDIA official PyDS 1.2.2 targets DeepStream 8.0 / CPython 3.12 / x86_64.\n# For custom layouts with an unreported SDK version, install it and let the\n# final native-load probe prove whether the host runtime is compatible.
+# NVIDIA official PyDS 1.2.2 targets DeepStream 8.0 / CPython 3.12 / x86_64.
+# For custom layouts with an unreported SDK version, install it and let the
+# final native-load probe prove whether the host runtime is compatible.
 if [[ "$wheel" != "EXISTING" && -z "$wheel" && ( "$DS_VERSION" =~ ^8\.0(\.[0-9]+)?$ || "$DS_VERSION" == "unknown" ) && "$(uname -m)" == "x86_64" && "$PY_MINOR" == "12" ]]; then
   wheel="$tmp/pyds-1.2.2-cp312-cp312-linux_x86_64.whl"
   url="https://github.com/NVIDIA-AI-IOT/deepstream_python_apps/releases/download/v1.2.2/pyds-1.2.2-cp312-cp312-linux_x86_64.whl"

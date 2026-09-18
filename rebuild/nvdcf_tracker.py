@@ -55,6 +55,35 @@ class NvDCF:
 
     @staticmethod
     def _deps():
+        # The project venv owns the ML/ONNX stack, while DeepStream commonly
+        # installs PyGObject and PyDS into system/DeepStream locations. Make
+        # those bindings visible from the existing venv instead of forcing a
+        # second Python environment.
+        import sys
+        import glob
+
+        paths = [
+            "/usr/lib/python3/dist-packages",
+            "/usr/lib/python3.12/dist-packages",
+            "/opt/nvidia/deepstream/deepstream/lib",
+            "/opt/nvidia/deepstream/deepstream/lib/python",
+            "/opt/nvidia/deepstream/deepstream/sources/deepstream_python_apps/bindings",
+            "/opt/nvidia/deepstream/deepstream/sources/deepstream_python_apps/bindings/build",
+        ]
+        for path in paths:
+            if Path(path).exists() and path not in sys.path:
+                sys.path.insert(0, path)
+
+        # Some DeepStream installs expose a versioned PyDS shared object under
+        # the SDK lib directory. Python can import it directly once that
+        # directory is visible.
+        for path in glob.glob(
+            "/opt/nvidia/deepstream/deepstream/lib/pyds*.so"
+        ):
+            parent = str(Path(path).parent)
+            if parent not in sys.path:
+                sys.path.insert(0, parent)
+
         try:
             import gi
             gi.require_version("Gst", "1.0")
@@ -62,8 +91,10 @@ class NvDCF:
             import pyds
         except Exception as exc:
             raise RuntimeError(
-                "NvDCF requires NVIDIA DeepStream Python bindings (gi + pyds) "
-                "and libnvds_nvmultiobjecttracker.so."
+                "NvDCF DeepStream bindings are unavailable. The active venv "
+                "must be able to import gi/Gst and pyds from the installed "
+                "DeepStream SDK. First run scripts/install_nvdcf_runtime.sh "
+                "and then verify: python -c 'import gi; gi.require_version(\"Gst\",\"1.0\"); from gi.repository import Gst; import pyds; print(\"DeepStream bindings: OK\")'."
             ) from exc
         Gst.init(None)
         return Gst, GLib, pyds

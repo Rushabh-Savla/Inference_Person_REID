@@ -149,8 +149,9 @@ class DeepStreamRuntime:
         if current is None:
             return None
         for candidate in [current] + list(current.parents):
-            if (candidate / "sources/includes/nvds_version.h").is_file() and (
-                candidate / "sources/includes").is_dir()
+            if (
+                (candidate / "sources/includes/nvds_version.h").is_file()
+                and (candidate / "sources/includes").is_dir()
             ):
                 return candidate
         return None

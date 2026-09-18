@@ -80,6 +80,10 @@ class MultiModal:
         self.pending_match = float(self.idcfg.get("new_pending_match_min", 0.78))
         self.pending_min_model = float(self.idcfg.get("new_pending_model_min", 0.50))
         self.pending_min_clothing = float(self.idcfg.get("new_pending_clothing_min", 0.55))
+        self.pending_required_models = max(
+            3,
+            int(self.idcfg.get("new_pending_required_models", 3)),
+        )
         self.stats = {
             "frames": 0,
             "feature_frames": 0,
@@ -463,7 +467,17 @@ class MultiModal:
     def _stage_new(self, obs):
         best = None
         best_index = None
+        obs_frame = int(obs["row"].get("frame", -1))
+        obs_camera = str(obs["camera"])
         for index, item in enumerate(self.pending):
+            # Never use one temporary identity twice in the same camera frame.
+            # This keeps two simultaneous, visually similar people separated
+            # before either identity is promoted to a permanent GID.
+            if (
+                item.get("last_camera") == obs_camera
+                and int(item.get("last_frame", -2)) == obs_frame
+            ):
+                continue
             score = self._pending_score(obs, item)
             if score is None:
                 continue
@@ -472,7 +486,7 @@ class MultiModal:
                 or score["bottom"] < self.pending_min_clothing
             ):
                 continue
-            if score["models"] < 2:
+            if score["models"] < self.pending_required_models:
                 continue
             if best is None or score["score"] > best["score"]:
                 best = score
@@ -491,6 +505,7 @@ class MultiModal:
             item["observations"].append(obs)
             item["count"] += 1
             item["last_camera"] = str(obs["camera"])
+            item["last_frame"] = obs_frame
             self.stats["pending_new_observations"] += 1
             if item["count"] >= self.pending_min:
                 seed = item["observations"][0]

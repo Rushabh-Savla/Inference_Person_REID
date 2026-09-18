@@ -59,6 +59,7 @@ identity:
   dummy_floor: 0.35
   new_max: 0.48
   new_deep_max: 0.54
+  memory_quality_min: 0.45
 
 face:
   enabled: true

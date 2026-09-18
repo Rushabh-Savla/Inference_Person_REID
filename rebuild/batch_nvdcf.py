@@ -147,6 +147,8 @@ class BatchNvDCF:
         recovery_frames = max(1, int(self.cfg["identity"].get("recovery_frames", 10)))
         labels = []
         previous_overlap = set()
+        last_gids = {}
+        overlap_anchors = {}
         recovery_until = -1
         frame = 0
 
@@ -184,8 +186,22 @@ class BatchNvDCF:
                     recovery=bool(active_overlap) or recovery_mode,
                 )
                 if active_overlap:
+                    # Keep the last clean, feature-resolved identities visible
+                    # during the overlap. These anchors are temporary display/
+                    # bookkeeping only: they are never written to identity memory
+                    # and are never used after the overlap ends.
+                    if not previous_overlap:
+                        overlap_anchors = {
+                            int(item["track_id"]): str(
+                                last_gids.get(int(item["track_id"]), "PENDING")
+                            )
+                            for item in current
+                            if int(item["track_id"]) in active_overlap
+                        }
                     gids = {
-                        int(item["track_id"]): "PENDING"
+                        int(item["track_id"]): str(
+                            overlap_anchors.get(int(item["track_id"]), "PENDING")
+                        )
                         for item in current
                     }
                 else:
@@ -195,6 +211,7 @@ class BatchNvDCF:
                         )
                         for item in current
                     }
+                    overlap_anchors = {}
 
                 # Hard same-frame collision invariant. Re-solve the whole frame
                 # with feature-only recovery, then keep any unresolved collision
@@ -228,6 +245,8 @@ class BatchNvDCF:
                         "recovery": bool(recovery_mode),
                     })
 
+                if not active_overlap:
+                    last_gids = dict(gids)
                 previous_overlap = set(active_overlap)
         finally:
             cap.release()

@@ -93,6 +93,29 @@ class DeepStreamRuntime:
             library = cls.library(root)
             if library:
                 return root, library
+
+        names = (
+            "libnvds_nvmultiobjecttracker.so",
+            "libnvds_nvmultiobjecttracker.so.*",
+        )
+        bases = (
+            Path("/opt"),
+            Path("/usr/local"),
+            Path.home(),
+        )
+        for base in bases:
+            if not base.exists():
+                continue
+            for name in names:
+                try:
+                    for item in base.rglob(name):
+                        if not item.is_file():
+                            continue
+                        library = str(item.resolve())
+                        root = cls.sdk_root(library) or item.parent
+                        return root, library
+                except (OSError, PermissionError):
+                    continue
         return None, None
 
     @staticmethod

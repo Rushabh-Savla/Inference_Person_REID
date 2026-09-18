@@ -61,7 +61,7 @@ def test_new_gid_admission_requires_multiframe_evidence():
 
 
 def test_required_feature_stack_is_present():
-    value = text("rebuild/multimodal_identity.py")
+    value = text("rebuild/multimodal_identity.py") + "\n" + text("rebuild/multimodal_identity_strict.py")
     for name in (
         "NVIDIAReIDExtractor",
         "NVIDIASwinReIDExtractor",
@@ -83,6 +83,13 @@ def test_required_feature_stack_is_present():
     assert "0.09 * top" in value
     assert "0.09 * bottom" in value
     assert "0.22 * top" not in value or "0.22 * bottom" not in value
+
+
+def test_active_resolver_is_strict_wrapper():
+    value = text("rebuild/multimodal_identity.py")
+    assert "MultiModalStrict" in value
+    assert "feature-only" in value.lower()
+    assert "track_id" in value
 
 
 def test_face_and_pose_are_mandatory_runtime_components():

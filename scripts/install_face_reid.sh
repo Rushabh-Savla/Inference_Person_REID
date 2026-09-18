@@ -10,7 +10,7 @@ python -m pip install --upgrade --no-deps   "albumentations==1.3.1"   "qudida==0
 # These packages are imported by qudida/albumentations and are installed
 # without dependency resolution so the repository's pinned NumPy remains
 # authoritative.
-python -m pip install --upgrade --no-deps   "joblib==1.5.2"   "scikit-learn==1.6.1"   "scikit-image==0.25.2"
+python -m pip install --upgrade --no-deps   "joblib==1.5.2"   "threadpoolctl==3.6.0"   "scikit-learn==1.6.1"   "scikit-image==0.25.2"
 
 # Restore the repository's numerics after any prior environment drift.
 python -m pip install --force-reinstall --no-deps   "numpy==2.2.6"   "scipy==1.15.3"
@@ -25,6 +25,7 @@ import scipy
 import sklearn
 import skimage
 import joblib
+import threadpoolctl
 import onnxruntime as ort
 import albumentations as A
 
@@ -33,6 +34,7 @@ print("scipy:", scipy.__version__)
 print("scikit-learn:", sklearn.__version__)
 print("scikit-image:", skimage.__version__)
 print("joblib:", joblib.__version__)
+print("threadpoolctl:", threadpoolctl.__version__)
 print("albumentations:", A.__version__)
 print("onnxruntime:", ort.__version__)
 print("providers:", ort.get_available_providers())

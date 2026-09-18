@@ -18,16 +18,51 @@ echo "[nvdcf] Rootless runtime: $ROOT"
 
 read -r DS_ROOT DS_LIB DS_CFG < <(
   "$VENV_PY" - <<'PY'
+import os
+from pathlib import Path
 from rebuild.deepstream_runtime import DeepStreamRuntime
+
 root, lib = DeepStreamRuntime.find()
 cfg = DeepStreamRuntime.config(root)
-print(root or "", lib or "", cfg or "")
+if root and lib and cfg:
+    print(root, lib, cfg)
+    raise SystemExit(0)
+
+print("", "", "")
 PY
 )
 
 if [[ -z "$DS_ROOT" || -z "$DS_LIB" ]]; then
-  echo "[nvdcf] ERROR: no installed DeepStream runtime containing libnvds_nvmultiobjecttracker.so was found."
-  echo "[nvdcf] Standard NVIDIA locations and library paths were searched."
+  echo "[nvdcf] Installed DeepStream was not found by library-name discovery."
+  echo "[nvdcf] Running a targeted executable/library scan now..."
+  while IFS= read -r item; do
+    [[ -n "$item" ]] || continue
+    root="$(dirname "$(dirname "$item")")"
+    if [[ "$(basename "$(dirname "$item")")" == "gst-plugins" ]]; then
+      root="$(dirname "$root")"
+    fi
+    cfg="$("$VENV_PY" - "$root" <<'PY'
+import sys
+from pathlib import Path
+from rebuild.deepstream_runtime import DeepStreamRuntime
+root = Path(sys.argv[1])
+print(DeepStreamRuntime.config(root) or "")
+PY
+)"
+    if [[ -n "$cfg" ]]; then
+      DS_ROOT="$root"
+      DS_LIB="$item"
+      DS_CFG="$cfg"
+      break
+    fi
+  done < <(
+    find /opt /usr/local /home -type f       \( -name 'libnvds_nvmultiobjecttracker.so' -o -name 'libnvds_nvmultiobjecttracker.so.*' \)       2>/dev/null | head -50
+  )
+fi
+
+if [[ -z "$DS_ROOT" || -z "$DS_LIB" ]]; then
+  echo "[nvdcf] ERROR: actual NvDCF library is not installed on this host."
+  echo "[nvdcf] No DeepStream root/library was fabricated or substituted."
   exit 1
 fi
 

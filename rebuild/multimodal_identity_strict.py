@@ -610,9 +610,16 @@ class MultiModalStrict:
                 if value is not None:
                     rows[int(gid)] = value
             sets.append(rows)
-        good = [x for x in obs if x is not None]
-        scores = [x for x in sets if x]
-        # Keep row alignment by assigning only valid observations, then restore PENDING gaps.
+        good = []
+        scores = []
+        for item, value in zip(obs, sets):
+            if item is None:
+                continue
+            good.append(item)
+            scores.append(value)
+        # Preserve the one-to-one row alignment even when an observation has
+        # no existing GID candidate. Empty candidate sets must still reach
+        # stage_new() so genuine new people can be confirmed across frames.
         amap = self.assign(good, scores, commit=commit, recovery=recovery)
         out = []
         vi = 0

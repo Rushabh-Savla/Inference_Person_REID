@@ -251,11 +251,17 @@ class MultiModalStrict:
             for view in rem.get(model, {}).values():
                 src.extend(view)
             vals[model] = self.best([obs[model]], src or prof.get(model, []))
-        deep = 0.25 * vals["resnet"] + 0.40 * vals["swin"] + 0.35 * vals["solider"]
         crop_quality = float(np.clip(obs.get("quality", 1.0), 0.0, 1.0))
         qweight = 0.75 + 0.25 * crop_quality
-        deep *= qweight
-        attrs = self.attr(obs["attributes"], rem.get("attributes", {}).get("attributes", []) or prof.get("attributes", []))
+        deep = (
+            0.25 * vals["resnet"]
+            + 0.40 * vals["swin"]
+            + 0.35 * vals["solider"]
+        ) * qweight
+        attrs = self.attr(
+            obs["attributes"],
+            rem.get("attributes", {}).get("attributes", []) or prof.get("attributes", []),
+        )
         if attrs is None:
             return None
         pose = 0.0
@@ -265,7 +271,45 @@ class MultiModalStrict:
         top = float(attrs["top"]) * qweight
         bot = float(attrs["bottom"]) * qweight
         pattern = float(attrs["pattern"]) * qweight
-        value = 0.44 * deep + 0.24 * top + 0.24 * bot + 0.05 * pose + 0.03 * pattern
+        facebank = rem.get("face", {}).get("face", []) or prof.get("face", [])
+        face = self.faceval(obs.get("face"), facebank)
+        faceq = (
+            float(np.clip(obs["face"]["quality"], 0.0, 1.0))
+            if face.get("used") and obs.get("face") else 0.0
+        )
+        weights = {"face": 0.46, "deep": 0.28, "top": 0.10, "bottom": 0.10, "pose": 0.04, "pattern": 0.02}
+        qualities = {
+            "face": faceq,
+            "deep": qweight,
+            "top": qweight,
+            "bottom": qweight,
+            "pose": float(np.clip(obs.get("posscore", 0.0), 0.0, 1.0)),
+            "pattern": qweight,
+        }
+        active = []
+        for name, weight in weights.items():
+            if name == "face" and (
+                not face.get("used")
+                or face["score"] < float(self.icfg.get("face_min", 0.60))
+            ):
+                continue
+            if name == "pose" and qualities[name] <= 0.0:
+                continue
+            active.append((name, weight * qualities[name]))
+        total = sum(value for _, value in active)
+        if total <= 0.0:
+            return None
+        value = 0.0
+        for name, weight in active:
+            raw = {
+                "face": float(face["score"]),
+                "deep": float(deep),
+                "top": float(top),
+                "bottom": float(bot),
+                "pose": float(pose),
+                "pattern": float(pattern),
+            }[name]
+            value += (weight / total) * raw
         return {
             "score": float(np.clip(value, 0.0, 0.995)),
             "deep": float(deep),
@@ -277,6 +321,9 @@ class MultiModalStrict:
             "upper_pattern": float(attrs["upper_pattern"]),
             "lower_pattern": float(attrs["lower_pattern"]),
             "pose": float(pose),
+            "face": float(face["score"]),
+            "face_used": bool(face.get("used")),
+            "face_quality": float(faceq),
             "quality": crop_quality,
         }
 

@@ -299,7 +299,7 @@ class DeepStreamRuntime:
             if header.is_file():
                 text = header.read_text(encoding="utf-8", errors="ignore")
                 for key in ("MAJOR", "MINOR", "MICRO"):
-                    match = re.search(rf"NVDS_VERSION_{key}\\s+([0-9]+)", text)
+                    match = re.search(rf"NVDS_VERSION_{key}\s+([0-9]+)", text)
                     if match:
                         values[key] = match.group(1)
             if len(values) == 3:

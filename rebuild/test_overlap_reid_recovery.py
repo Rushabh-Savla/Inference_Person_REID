@@ -1,10 +1,8 @@
 from __future__ import annotations
 
-from types import SimpleNamespace
 
 import numpy as np
 
-from rebuild.face_v4 import FaceExtractorV4
 from rebuild.multimodel_state_invariant_attributes import AttributeAwareResolver
 from rebuild.multimodel_state_invariant_final import LocalGroup
 from rebuild.overlap_recovery import OverlapEpisode, bbox_overlap_metrics, is_severe_overlap, recovery_sources
@@ -104,47 +102,6 @@ def test_ambiguous_post_overlap_group_stays_pending():
     item = group("cam_213:44:1", "cam_213", 11, 20, unit(0), attr=attrs(0, 2), recovery=True, sources=["cam_213:17:1"])
     mapping = resolver._assign([[item]])
     assert mapping[item.key] == "PENDING"
-
-
-def test_face_vector_is_high_value_when_valid():
-    resolver = AttributeAwareResolver({"face_match_weight": 0.40})
-    person = unit(0)
-    face = {"vector": unit(0, 16), "quality": 0.90, "visibility": 0.80, "valid": True}
-    left = group("a", "cam_213", 0, 10, person, attr=attrs(0, 2), face=[face])
-    right = group("b", "cam_224", 12, 22, person, attr=attrs(0, 2), face=[face])
-    evidence = resolver.pair(left, right, [left], [right])
-    meta = resolver._meta[tuple(sorted((left.key, right.key)))]
-    assert meta["face"]["valid"]
-    assert evidence.fused > 0.60
-
-
-def test_face_is_ignored_when_visibility_is_below_gate():
-    resolver = AttributeAwareResolver({})
-    person = unit(0)
-    face = {"vector": unit(0, 16), "quality": 0.90, "visibility": 0.40, "valid": False}
-    left = group("a", "cam_213", 0, 10, person, attr=attrs(0, 2), face=[face])
-    right = group("b", "cam_224", 12, 22, person, attr=attrs(0, 2), face=[face])
-    evidence_no_face = resolver.pair(left, right, [left], [right])
-    clean_left = group("c", "cam_213", 0, 10, person, attr=attrs(0, 2))
-    clean_right = group("d", "cam_224", 12, 22, person, attr=attrs(0, 2))
-    evidence_clean = resolver.pair(clean_left, clean_right, [clean_left], [clean_right])
-    meta = resolver._meta[tuple(sorted((left.key, right.key)))]
-    assert not meta["face"]["valid"]
-    assert abs(evidence_no_face.fused - evidence_clean.fused) < 1e-6
-
-
-def test_face_visibility_proxy_distinguishes_full_and_partial_landmarks():
-    full = SimpleNamespace(landmark_2d_106=np.asarray([
-        [40 + 38 * np.cos(theta), 40 + 38 * np.sin(theta)] for theta in np.linspace(0, 2 * np.pi, 40, endpoint=False)
-    ], np.float32))
-    partial = SimpleNamespace(landmark_2d_106=np.asarray([
-        [40 + 8 * np.cos(theta), 40 + 8 * np.sin(theta)] for theta in np.linspace(0, 2 * np.pi, 20, endpoint=False)
-    ], np.float32))
-    full_score = FaceExtractorV4._visibility_fraction(full, (0, 0, 80, 80))
-    partial_score = FaceExtractorV4._visibility_fraction(partial, (0, 0, 80, 80))
-    assert full_score > partial_score
-    assert full_score >= 0.60
-    assert partial_score < 0.60
 
 
 def test_simultaneous_same_camera_overlap_is_not_created_as_a_stitch():

@@ -35,7 +35,7 @@ def test_nvdcf_uses_real_deepstream_tracker():
 
 
 def test_global_assignment_is_feature_first_and_one_to_one():
-    value = text("rebuild/multimodal_identity.py")
+    value = text("rebuild/multimodal_identity.py") + "\n" + text("rebuild/multimodal_identity_strict.py")
     batch = text("rebuild/batch_nvdcf.py")
     assert "linear_sum_assignment" in value
     assert "self.identity.observe" in batch
@@ -48,7 +48,7 @@ def test_global_assignment_is_feature_first_and_one_to_one():
 
 
 def test_new_gid_admission_requires_multiframe_evidence():
-    value = text("rebuild/multimodal_identity.py")
+    value = text("rebuild/multimodal_identity.py") + "\n" + text("rebuild/multimodal_identity_strict.py")
     cfg = config()["identity"]
     assert "_stage_new" in value
     assert "self.pending" in value
@@ -78,7 +78,7 @@ def test_required_feature_stack_is_present():
         assert name in value
 
     # Face is the highest-weight single identity cue when reliable.
-    assert "0.62 * face" in value
+    assert "0.60 * face" in value
     # Top and bottom clothing are independent mandatory score terms.
     assert "0.09 * top" in value
     assert "0.09 * bottom" in value

@@ -63,6 +63,8 @@ class NvDCF:
         import sys
 
         base = Path(os.environ.get("NVDCF_RUNTIME", "")).expanduser()
+        if not base:
+            base = Path(__file__).resolve().parents[1] / ".nvdcf_runtime"
         roots = [
             base / "usr/lib/python3/dist-packages",
             base / "usr/lib/python3.12/dist-packages",

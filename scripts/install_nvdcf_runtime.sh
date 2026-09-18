@@ -65,11 +65,11 @@ if [[ -z "$DS_ROOT" || -z "$DS_LIB" ]]; then
   exit 1
 fi
 
-DS_VERSION="$("$VENV_PY" - "$DS_ROOT" <<'PY'
+DS_VERSION="$("$VENV_PY" - "$DS_ROOT" "$DS_LIB" <<'PY'
 import sys
-from rebuild.deepstream_runtime import DeepStreamRuntime
 from pathlib import Path
-print(DeepStreamRuntime.version(Path(sys.argv[1])))
+from rebuild.deepstream_runtime import DeepStreamRuntime
+print(DeepStreamRuntime.version(Path(sys.argv[1]), sys.argv[2]))
 PY
 )"
 DS_MM="${DS_VERSION%.*}"
@@ -124,9 +124,8 @@ if [[ "$wheel" != "EXISTING" ]]; then
   done
 fi
 
-# This host is CPython 3.12/x86_64. NVIDIA ships the official PyDS 1.2.2
-# wheel for DeepStream 8.0 in exactly this ABI/architecture.
-if [[ "$wheel" != "EXISTING" && -z "$wheel" && "$(uname -m)" == "x86_64" && "$PY_MINOR" == "12" ]]; then
+# NVIDIA official PyDS 1.2.2 is for DeepStream 8.0 / CPython 3.12 / x86_64.
+if [[ "$wheel" != "EXISTING" && -z "$wheel" && "$DS_VERSION" =~ ^8\.0(\.[0-9]+)?$ && "$(uname -m)" == "x86_64" && "$PY_MINOR" == "12" ]]; then
   wheel="$tmp/pyds-1.2.2-cp312-cp312-linux_x86_64.whl"
   url="https://github.com/NVIDIA-AI-IOT/deepstream_python_apps/releases/download/v1.2.2/pyds-1.2.2-cp312-cp312-linux_x86_64.whl"
   echo "[nvdcf] Installing NVIDIA PyDS 1.2.2"
@@ -163,7 +162,7 @@ if [[ "$wheel" != "EXISTING" && -z "$wheel" && -d "$DS_ROOT/sources/includes" ]]
 fi
 
 if [[ -z "$wheel" ]]; then
-  echo "[nvdcf] ERROR: no PyDS binding could be installed for this DeepStream runtime."
+  echo "[nvdcf] ERROR: matching PyDS bindings were not found for DeepStream $DS_VERSION."
   exit 1
 fi
 if [[ "$wheel" != "EXISTING" ]]; then

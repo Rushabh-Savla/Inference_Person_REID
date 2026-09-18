@@ -1,19 +1,34 @@
 from __future__ import annotations
 
 import argparse
+import os
+import subprocess
+import tempfile
 from pathlib import Path
 
-import cv2
 import numpy as np
 
 from rebuild.deepstream_runtime import DeepStreamRuntime
 
+
+def _command(value):
+    try:
+        result = subprocess.run(value, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, check=False, timeout=20)
+        return result.stdout.strip()
+    except Exception as exc:
+        return f"unavailable: {exc}"
 
 def main():
     parser = argparse.ArgumentParser(description="Verify every strict ReID runtime component.")
     parser.add_argument("--video", default="", help="Optional real input video for a one-buffer NvDCF smoke test.")
     args = parser.parse_args()
 
+    info = DeepStreamRuntime.diagnostics()
+    print("[verify] GPU:", info["gpu"])
+    print("[verify] CUDA:", info["cuda"])
+    print("[verify] TensorRT:", info["tensorrt"])
+    print("[verify] cuDNN:", _command(["bash", "-lc", "python - <<'PY'\nimport torch\nprint(torch.backends.cudnn.version())\nPY"]))
+    
     root, library, config = DeepStreamRuntime.require()
     print("[verify] DeepStream root:", root)
     print("[verify] DeepStream version:", DeepStreamRuntime.version(root))
@@ -89,7 +104,6 @@ def main():
 
     if args.video:
         from rebuild.nvdcf_tracker import NvDCF
-        import tempfile
         detector = NvDCF(cfg["detector"])
         with tempfile.NamedTemporaryFile(suffix=".jsonl") as handle:
             detector.track("verify", args.video, Path(handle.name))

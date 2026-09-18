@@ -133,7 +133,28 @@ fi
 
 if [[ "$wheel" == "EXISTING" ]]; then
   :
-elif [[ "$DS_VERSION" =~ ^8\.0\.[0-9]+$ ]] && [[ "$(uname -m)" == "x86_64" ]] && [[ "$PY_MINOR" == "12" ]]; then
+elif [[ "$(uname -m)" == "x86_64" ]] && [[ "$PY_MINOR" == "12" ]]; then
+  # DeepStream 8.0 ships Python 3.12 bindings as PyDS 1.2.2.
+  # The NvDCF library is in a custom application layout, so its SDK version
+  # cannot be trusted from the directory name alone.
+  wheel="$tmp/pyds-1.2.2-cp312-cp312-linux_x86_64.whl"
+  url="https://github.com/NVIDIA-AI-IOT/deepstream_python_apps/releases/download/v1.2.2/pyds-1.2.2-cp312-cp312-linux_x86_64.whl"
+  echo "[nvdcf] No importable PyDS found; trying NVIDIA PyDS 1.2.2 (CPython 3.12 / x86_64)"
+  if command -v curl >/dev/null 2>&1; then
+    if ! curl -fL --retry 3 --retry-delay 2 "$url" -o "$wheel"; then
+      rm -f "$wheel"
+    fi
+  elif command -v wget >/dev/null 2>&1; then
+    if ! wget -q "$url" -O "$wheel"; then
+      rm -f "$wheel"
+    fi
+  fi
+fi
+
+if [[ "$wheel" == "EXISTING" ]]; then
+  :
+elif [[ -n "$wheel" && -f "$wheel" ]]; then
+  :
   wheel="$tmp/pyds-1.2.2-cp312-cp312-linux_x86_64.whl"
   url="https://github.com/NVIDIA-AI-IOT/deepstream_python_apps/releases/download/v1.2.2/pyds-1.2.2-cp312-cp312-linux_x86_64.whl"
   echo "[nvdcf] Downloading NVIDIA PyDS 1.2.2 for DeepStream 8.0"

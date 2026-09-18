@@ -155,6 +155,52 @@ class DeepStreamRuntime:
                 return candidate
         return None
 
+    @classmethod
+    def tracker_plugin(cls):
+        names = ("libnvdsgst_tracker.so", "libnvdsgst_tracker.so.*")
+        bases = (
+            Path("/opt/nvidia"),
+            Path("/usr/local/nvidia"),
+            Path("/usr/local"),
+            Path.home() / "deepstream",
+            Path.home() / ".local/share",
+            Path.home() / "face_recognition_system",
+        )
+        for base in bases:
+            if not base.exists():
+                continue
+            for name in names:
+                try:
+                    for item in base.rglob(name):
+                        if item.is_file():
+                            return item
+                except (OSError, PermissionError):
+                    continue
+        return None
+
+    @classmethod
+    def pyds(cls):
+        names = ("pyds*.so", "pyds*.whl")
+        bases = (
+            Path("/opt/nvidia"),
+            Path("/usr/local/nvidia"),
+            Path("/usr/local"),
+            Path.home() / "deepstream",
+            Path.home() / ".local/share",
+            Path.home() / "face_recognition_system",
+        )
+        for base in bases:
+            if not base.exists():
+                continue
+            for name in names:
+                try:
+                    for item in base.rglob(name):
+                        if item.is_file():
+                            return item
+                except (OSError, PermissionError):
+                    continue
+        return None
+
     @staticmethod
     def version(root):
         if root is None:
@@ -227,6 +273,13 @@ class DeepStreamRuntime:
             current = os.environ.get("GST_PLUGIN_PATH", "")
             os.environ["GST_PLUGIN_PATH"] = (
                 str(plugins) + (os.pathsep + current if current else "")
+            )
+        plugin = DeepStreamRuntime.tracker_plugin()
+        if plugin is not None:
+            plugin_dir = plugin.parent
+            current = os.environ.get("GST_PLUGIN_PATH", "")
+            os.environ["GST_PLUGIN_PATH"] = (
+                str(plugin_dir) + (os.pathsep + current if current else "")
             )
 
         typelibs = root / "lib/girepository-1.0"

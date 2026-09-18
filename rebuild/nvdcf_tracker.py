@@ -94,6 +94,16 @@ class NvDCF:
                     str(libs) + (os.pathsep + current if current else "")
                 )
 
+        dsroot = Path("/opt/nvidia/deepstream/deepstream")
+        dslib = dsroot / "lib"
+        dsgst = dslib / "gst-plugins"
+        for path in (dslib, dsgst):
+            if path.exists():
+                current = os.environ.get("LD_LIBRARY_PATH", "")
+                os.environ["LD_LIBRARY_PATH"] = (
+                    str(path) + (os.pathsep + current if current else "")
+                )
+
         for pattern in (
             "/opt/nvidia/deepstream/deepstream/lib/pyds*.so",
             str(base / "opt/nvidia/deepstream/deepstream/lib/pyds*.so"),

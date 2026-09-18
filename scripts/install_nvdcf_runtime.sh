@@ -134,48 +134,21 @@ fi
 if [[ "$wheel" == "EXISTING" ]]; then
   :
 elif [[ "$(uname -m)" == "x86_64" ]] && [[ "$PY_MINOR" == "12" ]]; then
-  # DeepStream 8.0 ships Python 3.12 bindings as PyDS 1.2.2.
-  # The NvDCF library is in a custom application layout, so its SDK version
-  # cannot be trusted from the directory name alone.
   wheel="$tmp/pyds-1.2.2-cp312-cp312-linux_x86_64.whl"
   url="https://github.com/NVIDIA-AI-IOT/deepstream_python_apps/releases/download/v1.2.2/pyds-1.2.2-cp312-cp312-linux_x86_64.whl"
   echo "[nvdcf] No importable PyDS found; trying NVIDIA PyDS 1.2.2 (CPython 3.12 / x86_64)"
   if command -v curl >/dev/null 2>&1; then
-    if ! curl -fL --retry 3 --retry-delay 2 "$url" -o "$wheel"; then
-      rm -f "$wheel"
-    fi
+    if ! curl -fL --retry 3 --retry-delay 2 "$url" -o "$wheel"; then rm -f "$wheel"; fi
   elif command -v wget >/dev/null 2>&1; then
-    if ! wget -q "$url" -O "$wheel"; then
-      rm -f "$wheel"
-    fi
+    if ! wget -q "$url" -O "$wheel"; then rm -f "$wheel"; fi
   fi
 fi
 
 if [[ "$wheel" == "EXISTING" ]]; then
   :
-elif [[ -n "$wheel" && -f "$wheel" ]]; then
-  :
-  wheel="$tmp/pyds-1.2.2-cp312-cp312-linux_x86_64.whl"
-  url="https://github.com/NVIDIA-AI-IOT/deepstream_python_apps/releases/download/v1.2.2/pyds-1.2.2-cp312-cp312-linux_x86_64.whl"
-  echo "[nvdcf] Downloading NVIDIA PyDS 1.2.2 for DeepStream 8.0"
-  if command -v curl >/dev/null 2>&1; then
-    curl -fL --retry 3 --retry-delay 2 "$url" -o "$wheel"
-  elif command -v wget >/dev/null 2>&1; then
-    wget -q "$url" -O "$wheel"
-  else
-    echo "[nvdcf] curl or wget is required."
-    exit 1
-  fi
-fi
-
-if [[ "$wheel" == "EXISTING" ]]; then
-  :
-elif [[ -z "$wheel" ]]; then
-  for item in "$DS_ROOT/lib"/pyds*.whl "$DS_ROOT/sources/deepstream_python_apps/bindings/dist"/pyds*.whl "$DS_ROOT/sources/deepstream_python_apps/bindings/dist"/*.whl; do
-    if [[ -f "$item" ]]; then
-      wheel="$item"
-      break
-    fi
+elif [[ -z "$wheel" || ! -f "$wheel" ]]; then
+  for item in "$DS_ROOT/lib"/pyds*.whl "$DS_ROOT/sources/deepstream_python_apps/bindings/dist"/pyds*.whl; do
+    if [[ -f "$item" ]]; then wheel="$item"; break; fi
   done
 fi
 
@@ -204,12 +177,10 @@ elif [[ -z "$wheel" && -d "$DS_ROOT/sources/includes" ]]; then
 fi
 
 if [[ -z "$wheel" ]]; then
-  echo "[nvdcf] ERROR: no usable NVIDIA PyDS binding was found, and the discovered NvDCF library directory is not a complete DeepStream SDK."
+  echo "[nvdcf] ERROR: no usable NVIDIA PyDS binding was found."
   echo "[nvdcf] Found NvDCF: $DS_LIB"
-  echo "[nvdcf] Expected either an importable pyds binding or a DeepStream SDK containing sources/includes."
   exit 1
 fi
-
 if [[ "$wheel" != "EXISTING" ]]; then
   echo "[nvdcf] Installing PyDS: $wheel"
   "$VENV_PY" -m pip install --no-deps --force-reinstall "$wheel"

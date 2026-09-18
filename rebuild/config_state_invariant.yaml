@@ -3,7 +3,7 @@ detector:
   model: weights/yolo11m.pt
   conf: 0.55
   iou: 0.60
-  library: /opt/nvidia/deepstream/deepstream/lib/libnvds_nvmultiobjecttracker.so
+  library: auto
   config: trackers/nvdcf_accuracy.yml
   width: 0
   height: 0
@@ -28,11 +28,11 @@ cross_camera_models:
   solider_batch: 16
 
 identity_state:
-  path: identity_state/reid_nvdcf_strict_v2.sqlite3
-  model_id: nvdcf-strict-multimodal-v2
+  path: identity_state/reid_nvdcf_strict_v3.sqlite3
+  model_id: nvdcf-strict-multimodal-v3
   bank_size: 96
   qdrant_path: qdrant_storage_nvdcf_strict_v2
-  qdrant_prefix: person_reid_nvdcf_strict_v2
+  qdrant_prefix: person_reid_nvdcf_strict_v3
   qdrant_limit: 32
 
 identity:
@@ -50,6 +50,26 @@ identity:
   new_pending_model_min: 0.55
   new_pending_clothing_min: 0.58
   new_pending_required_models: 3
+  top_min: 0.42
+  bottom_min: 0.42
+  model_min: 0.46
+  deep_min: 0.48
+  face_min: 0.60
+  face_quality_min: 0.50
+  dummy_floor: 0.35
+  new_max: 0.48
+  new_deep_max: 0.54
+
+face:
+  enabled: true
+  model: buffalo_l
+  det_size: [640, 640]
+  min_detection: 0.55
+  min_size: 28
+  min_quality: 0.50
+  min_visibility: 0.68
+  face_weight: 0.46
+  min_similarity: 0.60
 
 pose:
   enabled: true
@@ -61,4 +81,4 @@ overlap:
 
 input:
   videos: []
-  output_dir: rebuild_outputs_nvdcf_strict
+  output_dir: rebuild_outputs_nvdcf_strict_v3

@@ -238,7 +238,7 @@ class BatchNvDCF:
                     if gid.startswith("G"):
                         grouped.setdefault(gid, []).append(tid)
                 if any(len(items) > 1 for items in grouped.values()):
-                    self.identity.stats["duplicate_frames"] += 1
+                    self.identity.stats["duplicate"] += 1
                     feature_map = self.identity.observe(image, current, commit=False, recovery=True)
                     gids = {int(item["track_id"]): str(feature_map.get(int(item["track_id"]), "PENDING")) for item in current}
 

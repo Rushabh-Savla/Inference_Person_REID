@@ -1,37 +1,3 @@
-detector:
-  backend: nvdcf
-  model: weights/yolo11m.pt
-  conf: 0.55
-  iou: 0.60
-  library: /opt/nvidia/deepstream/deepstream/lib/libnvds_nvmultiobjecttracker.so
-  config: trackers/nvdcf_accuracy.yml
-  width: 0
-  height: 0
-  pose:
-    enabled: true
-    model: yolo11n-pose.pt
-
-reid:
-  model: nvidia_reidentificationnet
-  weights: weights/reid/resnet50_market1501_aicity156.onnx
-  device: cuda
-  max_batch: 32
-  interval: 1
-  part_interval: 1
-  illumination_variant: true
-  min_quality: 0.20
-
-cross_camera_models:
-  swin_weights: weights/reid/nvidia_swin_base_1024/export_55/swin_base_market1501_aicity156_featuredim1024.onnx
-  solider_weights: weights/solider_swin_base_msmt17.onnx
-  swin_batch: 16
-  solider_batch: 16
-
-identity_state:
-  path: identity_state/reid_nvdcf_strict_v2.sqlite3
-  model_id: nvdcf-strict-multimodal-v2
-  bank_size: 96
-  qdrant_path: qdrant_storage_nvdcf_strict_v2
   qdrant_prefix: person_reid_nvdcf_strict_v2
   qdrant_limit: 32
 
@@ -48,6 +14,7 @@ identity:
   known_floor: 0.58
   new_confirm_frames: 4
   new_pending_match_min: 0.82
+  new_pending_margin: 0.08
   new_pending_model_min: 0.55
   new_pending_clothing_min: 0.58
   new_pending_required_models: 3

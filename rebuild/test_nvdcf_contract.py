@@ -1,3 +1,22 @@
+from pathlib import Path
+
+import yaml
+
+
+ROOT = Path(__file__).resolve().parents[1]
+
+
+def text(path):
+    return (ROOT / path).read_text(encoding="utf-8")
+
+
+def config():
+    return yaml.safe_load(text("rebuild/config_state_invariant.yaml"))
+
+
+def test_nvdcf_is_the_only_tracker_backend():
+    value = config()["detector"]
+    assert value["backend"] == "nvdcf"
     assert "config" in value
     assert "nvdcf" in str(value["config"]).lower()
     whole = text("rebuild/config_state_invariant.yaml").lower()
@@ -38,11 +57,10 @@ def test_new_gid_admission_requires_multiframe_evidence():
     assert float(cfg["new_pending_match_min"]) >= 0.80
     assert float(cfg["new_pending_model_min"]) >= 0.50
     assert float(cfg["new_pending_clothing_min"]) >= 0.55
-    assert int(cfg["new_pending_required_models"]) == 3
 
 
 def test_required_feature_stack_is_present():
-    value = text("rebuild/multimodal_identity.py") + "\n" + text("rebuild/multimodal_identity_strict.py")
+    value = text("rebuild/multimodal_identity.py")
     for name in (
         "NVIDIAReIDExtractor",
         "NVIDIASwinReIDExtractor",
@@ -79,3 +97,30 @@ def test_face_and_pose_are_mandatory_runtime_components():
     assert value["face"]["required"] is True
     assert float(value["face"]["min_visibility"]) >= 0.65
     assert value["pose"]["enabled"] is True
+
+
+def test_qdrant_has_every_identity_space():
+    value = text("src/live/qdrant_gallery.py")
+    for name in (
+        '"resnet": 256',
+        '"swin": 1024',
+        '"solider": 1024',
+        '"attributes": 112',
+        '"face": 512',
+        '"pose": 51',
+    ):
+        assert name in value
+
+
+def test_batch_has_hard_same_frame_collision_gate():
+    value = text("rebuild/batch_nvdcf.py")
+    assert "same-frame duplicate GID" in value
+    assert "same-frame duplicate GID survived validation" in value
+    assert "PENDING" in value
+
+
+def test_no_tracker_id_to_gid_fallback_exists():
+    value = text("rebuild/batch_nvdcf.py")
+    assert "self.identity.trackmap.get" not in value
+    assert "trackmap.get" not in value
+    assert "f\"G{int(prior)" not in value

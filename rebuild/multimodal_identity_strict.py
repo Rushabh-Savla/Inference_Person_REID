@@ -6,6 +6,7 @@ import numpy as np
 from scipy.optimize import linear_sum_assignment
 
 from rebuild.identity_v2 import crop, quality
+from rebuild.face_v4 import FaceExtractorV4
 from rebuild.person_attributes import pack
 from reid.nvidia_reid import NVIDIAReIDExtractor
 from reid.nvidia_swin import NVIDIASwinReIDExtractor
@@ -25,7 +26,19 @@ class MultiModalStrict:
         self.rcfg = cfg["reid"]
         self.mcfg = cfg["cross_camera_models"]
         self.icfg = cfg["identity"]
+        self.fcfg = cfg["face"]
         self.pcfg = cfg["pose"]
+        if not bool(self.fcfg.get("enabled", True)):
+            raise RuntimeError("Face matching is mandatory in the strict identity runtime")
+        self.face = FaceExtractorV4(
+            model=str(self.fcfg.get("model", "buffalo_l")),
+            det_size=tuple(self.fcfg.get("det_size", [640, 640])),
+            min_detection=float(self.fcfg.get("min_detection", 0.55)),
+            min_size=int(self.fcfg.get("min_size", 28)),
+            min_quality=float(self.fcfg.get("min_quality", 0.50)),
+            min_visibility=float(self.fcfg.get("min_visibility", 0.68)),
+            device="cuda",
+        )
         self.resnet = NVIDIAReIDExtractor(
             weights=self.rcfg["weights"],
             device=str(self.rcfg.get("device", "cuda")),
@@ -73,6 +86,9 @@ class MultiModalStrict:
             "duplicate": 0,
             "pending_new_observations": 0,
             "pending_new_confirmed": 0,
+            "face_observations": 0,
+            "face_reliable": 0,
+            "qdrant_retrievals": 0,
         }
 
     @staticmethod

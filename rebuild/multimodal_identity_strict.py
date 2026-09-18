@@ -345,6 +345,8 @@ class MultiModalStrict:
             return False
         if support < 2:
             return False
+        if float(row.get("quality", 0.0)) < float(self.icfg.get("memory_quality_min", 0.45)):
+            return False
         floor = float(self.icfg.get("recovery_min", 0.58) if recovery else self.icfg.get("existing_min", 0.61))
         gap = float(self.icfg.get("recovery_margin", 0.018) if recovery else self.icfg.get("margin", 0.025))
         face_ok = (

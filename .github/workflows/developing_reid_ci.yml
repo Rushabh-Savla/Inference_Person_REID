@@ -22,6 +22,7 @@ jobs:
           python -m py_compile
           rebuild/nvdcf_tracker.py
           rebuild/multimodal_identity.py
+          rebuild/multimodal_identity_strict.py
           rebuild/batch_nvdcf.py
           rebuild/face_v4.py
           rebuild/person_attributes.py

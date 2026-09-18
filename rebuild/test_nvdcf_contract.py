@@ -164,3 +164,15 @@ def test_deepstream_runtime_is_discovered():
     assert "DeepStreamRuntime.find" in value
     assert "NVDCF_DEEPSTREAM_ROOT" in value
     assert "libnvds_nvmultiobjecttracker.so" in value
+
+def test_deepstream_version_parser_reads_sdk_header(tmp_path):
+    header = tmp_path / "sources/includes/nvds_version.h"
+    header.parent.mkdir(parents=True)
+    header.write_text(
+        "#define NVDS_VERSION_MAJOR 8\n"
+        "#define NVDS_VERSION_MINOR 0\n"
+        "#define NVDS_VERSION_MICRO 0\n",
+        encoding="utf-8",
+    )
+    from rebuild.deepstream_runtime import DeepStreamRuntime
+    assert DeepStreamRuntime.version(tmp_path) == "8.0.0"

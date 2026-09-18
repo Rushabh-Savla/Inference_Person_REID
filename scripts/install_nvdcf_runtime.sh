@@ -66,10 +66,11 @@ if [[ -z "$DS_ROOT" || -z "$DS_LIB" ]]; then
   exit 1
 fi
 
-DS_VERSION="$("$VENV_PY" - <<'PY'
+DS_VERSION="$("$VENV_PY" - "$DS_ROOT" <<'PY'
+import sys
 from rebuild.deepstream_runtime import DeepStreamRuntime
-root, _ = DeepStreamRuntime.find()
-print(DeepStreamRuntime.version(root))
+from pathlib import Path
+print(DeepStreamRuntime.version(Path(sys.argv[1])))
 PY
 )"
 DS_MM="${DS_VERSION%.*}"
@@ -138,9 +139,9 @@ if [[ -z "$wheel" ]]; then
     exit 1
   fi
   echo "[nvdcf] Building PyDS against $DS_ROOT"
-  "$VENV_PY" -m pip install --upgrade --no-deps build >/dev/null
+  "$VENV_PY" -m pip install --upgrade --no-deps build pyproject-hooks >/dev/null
   export CMAKE_BUILD_PARALLEL_LEVEL="${CMAKE_BUILD_PARALLEL_LEVEL:-$(nproc)}"
-  export CMAKE_ARGS="-DDS_VERSION=$DS_MM -DDS_PATH=$DS_ROOT -DPYTHON_MAJOR_VERSION=3 -DPYTHON_MINOR_VERSION=$PY_MINOR"
+  export CMAKE_ARGS="-DDS_PATH=$DS_ROOT -DPYTHON_MAJOR_VERSION=3 -DPYTHON_MINOR_VERSION=$PY_MINOR"
   "$VENV_PY" -m build --wheel "$bind"
   wheel="$(find "$bind/dist" -maxdepth 1 -type f -name 'pyds-*.whl' -print -quit)"
   [[ -n "$wheel" ]] || { echo "[nvdcf] ERROR: PyDS wheel build produced no wheel."; exit 1; }

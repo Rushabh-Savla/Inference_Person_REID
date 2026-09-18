@@ -18,18 +18,11 @@ echo "[nvdcf] Python: $VENV_PY"
 echo "[nvdcf] DeepStream root: $DS_ROOT"
 echo "[nvdcf] Rootless runtime: $ROOT"
 
-# No sudo/root is used. apt-get download only downloads .deb archives;
-# dpkg-deb -x extracts them into the project venv.
-cd "$tmp"
-apt-get download python3-gi python3-gst-1.0 gir1.2-gstreamer-1.0
-
-for deb in "$tmp"/*.deb; do
-  dpkg-deb -x "$deb" "$ROOT"
-done
+# No sudo, apt or system package installation is required.
+# DeepStream itself is expected to already be installed on the host.
+# We only locate/build/install the Python binding in the user's venv.
 
 # Keep the project's CUDA ONNX Runtime and model stack intact.
-"$VENV_PY" -m pip install --force-reinstall --no-deps "numpy==1.26.4"
-
 # Locate a prebuilt PyDS wheel when the installed DeepStream release ships one.
 wheel=""
 for item in   "$DS_ROOT"/lib/pyds*.whl   "$DS_ROOT"/sources/deepstream_python_apps/bindings/dist/pyds*.whl   "$DS_ROOT"/sources/deepstream_python_apps/bindings/dist/*.whl

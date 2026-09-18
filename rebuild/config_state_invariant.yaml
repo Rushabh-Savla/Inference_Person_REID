@@ -28,11 +28,11 @@ cross_camera_models:
   solider_batch: 16
 
 identity_state:
-  path: identity_state/reid_nvdcf_strict.sqlite3
-  model_id: nvdcf-strict-multimodal-v1
+  path: identity_state/reid_nvdcf_strict_v2.sqlite3
+  model_id: nvdcf-strict-multimodal-v2
   bank_size: 96
-  qdrant_path: qdrant_storage_nvdcf_strict
-  qdrant_prefix: person_reid_nvdcf_strict
+  qdrant_path: qdrant_storage_nvdcf_strict_v2
+  qdrant_prefix: person_reid_nvdcf_strict_v2
   qdrant_limit: 32
 
 identity:
@@ -46,6 +46,10 @@ identity:
   recovery_margin: 0.012
   new_floor: 0.50
   known_floor: 0.58
+  new_confirm_frames: 4
+  new_pending_match_min: 0.82
+  new_pending_model_min: 0.55
+  new_pending_clothing_min: 0.58
 
 face:
   enabled: true
@@ -55,7 +59,7 @@ face:
   min_detection: 0.55
   min_size: 32
   min_quality: 0.50
-  min_visibility: 0.68
+  min_visibility: 0.65
   device: cuda
 
 pose:

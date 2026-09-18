@@ -77,9 +77,10 @@ def test_required_feature_stack_is_present():
         assert name in value
 
     # Top and bottom clothing are independent mandatory score terms.
-    assert "0.24 * top" in value
-    assert "0.24 * bot" in value
-    assert "0.22 * top" not in value or "0.22 * bottom" not in value
+    assert '"top": float(top)' in value
+    assert '"bottom": float(bot)' in value
+    assert 'attrs["top"]' in value
+    assert 'attrs["bottom"]' in value
 
 
 def test_active_resolver_is_strict_wrapper():

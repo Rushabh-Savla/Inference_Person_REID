@@ -37,16 +37,13 @@ if [[ -z "$DS_ROOT" || -z "$DS_LIB" ]]; then
   echo "[nvdcf] Running a targeted executable/library scan now..."
   while IFS= read -r item; do
     [[ -n "$item" ]] || continue
-    root="$(dirname "$(dirname "$item")")"
-    if [[ "$(basename "$(dirname "$item")")" == "gst-plugins" ]]; then
-      root="$(dirname "$root")"
-    fi
-    cfg="$("$VENV_PY" - "$root" <<'PY'
+    read -r root cfg <<< "$("$VENV_PY" - "$item" <<'PY'
 import sys
 from pathlib import Path
 from rebuild.deepstream_runtime import DeepStreamRuntime
-root = Path(sys.argv[1])
-print(DeepStreamRuntime.config(root) or "")
+lib = Path(sys.argv[1]).resolve()
+sdk = DeepStreamRuntime.sdk_root(str(lib)) or lib.parent
+print(sdk, DeepStreamRuntime.config(sdk) or "")
 PY
 )"
     if [[ -n "$cfg" ]]; then
@@ -94,15 +91,36 @@ done
 export NVDCF_RUNTIME="$ROOT"
 export NVDCF_DEEPSTREAM_ROOT="$DS_ROOT"
 export PYTHONPATH="$ROOT/usr/lib/python3/dist-packages:$ROOT/usr/lib/python3.12/dist-packages:${PYTHONPATH:-}"
-export LD_LIBRARY_PATH="$DS_ROOT/lib:$DS_ROOT/lib/gst-plugins:$ROOT/usr/lib/x86_64-linux-gnu:${LD_LIBRARY_PATH:-}"
-export GST_PLUGIN_PATH="$DS_ROOT/lib/gst-plugins:${GST_PLUGIN_PATH:-}"
+DS_LIB_DIR="$("$VENV_PY" - "$DS_LIB" <<'PY'
+import sys
+from rebuild.deepstream_runtime import DeepStreamRuntime
+print(DeepStreamRuntime.library_dir(sys.argv[1]))
+PY
+)"
+export LD_LIBRARY_PATH="$DS_LIB_DIR:$DS_ROOT/lib:$DS_ROOT/lib/gst-plugins:$ROOT/usr/lib/x86_64-linux-gnu:${LD_LIBRARY_PATH:-}"
+export GST_PLUGIN_PATH="$DS_LIB_DIR:$DS_ROOT/lib/gst-plugins:${GST_PLUGIN_PATH:-}"
 if [[ -d "$ROOT/usr/lib/x86_64-linux-gnu/girepository-1.0" ]]; then
   export GI_TYPELIB_PATH="$ROOT/usr/lib/x86_64-linux-gnu/girepository-1.0:${GI_TYPELIB_PATH:-}"
 fi
 
 wheel=""
 
-if [[ "$DS_VERSION" =~ ^8\.0\.[0-9]+$ ]] && [[ "$(uname -m)" == "x86_64" ]] && [[ "$PY_MINOR" == "12" ]]; then
+# Reuse an already-installed NVIDIA pyds binding when this host has one.
+if "$VENV_PY" - <<'PY'
+import gi
+gi.require_version("Gst", "1.0")
+from gi.repository import Gst
+import pyds
+print(pyds.__file__)
+PY
+then
+  echo "[nvdcf] Existing PyDS import is usable; skipping rebuild."
+  wheel="EXISTING"
+fi
+
+if [[ "$wheel" == "EXISTING" ]]; then
+  :
+elif [[ "$DS_VERSION" =~ ^8\.0\.[0-9]+$ ]] && [[ "$(uname -m)" == "x86_64" ]] && [[ "$PY_MINOR" == "12" ]]; then
   wheel="$tmp/pyds-1.2.2-cp312-cp312-linux_x86_64.whl"
   url="https://github.com/NVIDIA-AI-IOT/deepstream_python_apps/releases/download/v1.2.2/pyds-1.2.2-cp312-cp312-linux_x86_64.whl"
   echo "[nvdcf] Downloading NVIDIA PyDS 1.2.2 for DeepStream 8.0"
@@ -116,7 +134,9 @@ if [[ "$DS_VERSION" =~ ^8\.0\.[0-9]+$ ]] && [[ "$(uname -m)" == "x86_64" ]] && [
   fi
 fi
 
-if [[ -z "$wheel" ]]; then
+if [[ "$wheel" == "EXISTING" ]]; then
+  :
+elif [[ -z "$wheel" ]]; then
   for item in "$DS_ROOT/lib"/pyds*.whl "$DS_ROOT/sources/deepstream_python_apps/bindings/dist"/pyds*.whl "$DS_ROOT/sources/deepstream_python_apps/bindings/dist"/*.whl; do
     if [[ -f "$item" ]]; then
       wheel="$item"
@@ -125,7 +145,9 @@ if [[ -z "$wheel" ]]; then
   done
 fi
 
-if [[ -z "$wheel" ]]; then
+if [[ "$wheel" == "EXISTING" ]]; then
+  :
+elif [[ -z "$wheel" ]]; then
   bind="$DS_ROOT/sources/deepstream_python_apps/bindings"
   if [[ ! -f "$bind/pyproject.toml" && ! -f "$bind/setup.py" ]]; then
     echo "[nvdcf] PyDS source not installed; cloning NVIDIA deepstream_python_apps rootlessly."
@@ -147,8 +169,10 @@ if [[ -z "$wheel" ]]; then
   [[ -n "$wheel" ]] || { echo "[nvdcf] ERROR: PyDS wheel build produced no wheel."; exit 1; }
 fi
 
-echo "[nvdcf] Installing PyDS: $wheel"
-"$VENV_PY" -m pip install --no-deps --force-reinstall "$wheel"
+if [[ "$wheel" != "EXISTING" ]]; then
+  echo "[nvdcf] Installing PyDS: $wheel"
+  "$VENV_PY" -m pip install --no-deps --force-reinstall "$wheel"
+fi
 
 "$VENV_PY" - <<'PY'
 import os

@@ -242,6 +242,8 @@ class MultiModalStrict:
 
     def cand(self, obs):
         hits, got = self.q.search_component([self.group(obs)])
+        if hits:
+            self.stats["qdrant_retrievals"] += 1
         ids = set(int(x) for x in hits)
         ids.update(int(x) for x in self.pro)
         return sorted(ids), got
@@ -281,7 +283,7 @@ class MultiModalStrict:
             float(np.clip(obs["face"]["quality"], 0.0, 1.0))
             if face.get("used") and obs.get("face") else 0.0
         )
-        weights = {"face": 0.46, "deep": 0.28, "top": 0.10, "bottom": 0.10, "pose": 0.04, "pattern": 0.02}
+        weights = {"face": float(self.fcfg.get("face_weight", 0.46)), "deep": 0.28, "top": 0.10, "bottom": 0.10, "pose": 0.04, "pattern": 0.02}
         qualities = {
             "face": faceq,
             "deep": qweight,
@@ -427,12 +429,23 @@ class MultiModalStrict:
         pose = 0.0
         if obs.get("pose") is not None and item.get("pose"):
             pose = self.best([obs["pose"]], item["pose"])
-        score = (
-            0.46 * deep
-            + 0.26 * top
-            + 0.26 * bottom
-            + 0.02 * pose
+        face = self.faceval(
+            obs.get("face"),
+            item.get("face", []),
         )
+        if face.get("used") and face["score"] >= float(self.icfg.get("face_min", 0.60)):
+            score = (
+                0.45 * float(face["score"])
+                + 0.31 * deep
+                + 0.12 * top
+                + 0.12 * bottom
+            )
+        else:
+            score = (
+                0.50 * deep
+                + 0.25 * top
+                + 0.25 * bottom
+            )
         support = sum(
             values[name] >= self.pending_model_min
             for name in self.models
@@ -445,6 +458,8 @@ class MultiModalStrict:
             "top": top,
             "bottom": bottom,
             "pose": float(pose),
+            "face": float(face["score"]),
+            "face_used": bool(face.get("used")),
             "support": int(support),
             "quality": crop_quality,
         }
@@ -482,6 +497,8 @@ class MultiModalStrict:
                 item["attributes"].append(np.asarray(obs["attributes"], np.float32))
                 if obs.get("pose") is not None:
                     item["pose"].append(np.asarray(obs["pose"], np.float32))
+                if obs.get("face") is not None and obs["face"].get("valid"):
+                    item["face"].append(np.asarray(obs["face"]["vector"], np.float32))
                 item["observations"].append(obs)
                 item["count"] += 1
                 item["last_camera"] = camera
@@ -506,7 +523,11 @@ class MultiModalStrict:
                 [np.asarray(obs["pose"], np.float32)]
                 if obs.get("pose") is not None else []
             ),
-            "face": [],
+            "face": (
+                [np.asarray(obs["face"]["vector"], np.float32)]
+                if obs.get("face") is not None and obs["face"].get("valid")
+                else []
+            ),
             "observations": [obs],
             "count": 1,
             "last_camera": camera,
@@ -634,9 +655,24 @@ class MultiModalStrict:
             item["resnet"] = np.asarray(resnet[vi], np.float32)
             item["swin"] = np.asarray(swin[vi], np.float32)
             item["solider"] = np.asarray(solider[vi], np.float32)
-            item["attributes"] = np.asarray(pack(item["person"], frame, item["row"]["bbox"]), np.float32)
-            item["face"] = None
-            item["pose"], item["posscore"] = self.poseval(poses, item["row"]["bbox"])
+            item["attributes"] = np.asarray(
+                pack(item["person"], frame, item["row"]["bbox"]),
+                np.float32,
+            )
+            face = self.face.extract(item["person"])
+            item["face"] = None if face is None else {
+                "vector": np.asarray(face.vector, np.float32),
+                "quality": float(face.quality),
+                "visibility": float(face.visibility),
+                "valid": bool(face.valid),
+            }
+            if item["face"] is not None:
+                self.stats["face_observations"] += 1
+                self.stats["face_reliable"] += 1
+            item["pose"], item["posscore"] = self.poseval(
+                poses,
+                item["row"]["bbox"],
+            )
             vi += 1
         sets = []
         for item in obs:

@@ -309,7 +309,7 @@ class BatchNvDCF:
                 "tracker": "NVIDIA NvDCF",
                 "identity": "Qdrant + top clothing + bottom clothing + NVIDIA ResNet + NVIDIA Swin + SOLIDER + pose",
                 "post_overlap_identity": "feature_only",
-                "tracker_id_global_fallback": False,
+                "tracker_gid_fallback": False,
                 "same_frame_gid_invariant": True,
                 "new_gids": int(self.identity.stats["new"]),
                 "duplicate_frames": int(self.identity.stats["duplicate"]),

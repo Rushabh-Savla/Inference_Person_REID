@@ -90,8 +90,9 @@ def pack(person: np.ndarray, frame: np.ndarray, box) -> np.ndarray:
     if h < 40 or w < 20:
         return np.zeros(112, np.float32)
 
-    upper = person[int(h * 0.12):max(int(h * 0.58), int(h * 0.12) + 1)]
-    lower = person[int(h * 0.45):]
+    split = max(int(h * 0.52), int(h * 0.12) + 1)
+    upper = person[int(h * 0.12):split]
+    lower = person[split:]
     headpart = person[:max(int(h * 0.34), 1)]
     eyepart = headpart
 

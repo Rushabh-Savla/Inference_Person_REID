@@ -107,57 +107,44 @@ fi
 
 wheel=""
 
-# Reuse an already-installed NVIDIA pyds binding when this host has one.
-PYDS_HOST="$("$VENV_PY" - <<'PY'
-import sys
-from rebuild.deepstream_runtime import DeepStreamRuntime
-item = DeepStreamRuntime.pyds()
-print(item if item is not None and item.suffix == ".so" else "")
-PY
-)"
-if [[ -n "$PYDS_HOST" ]]; then
-  PYDS_DIR="$(dirname "$PYDS_HOST")"
-  export PYTHONPATH="$PYDS_DIR:$PYTHONPATH"
-fi
-if "$VENV_PY" - <<'PY'
-import gi
-gi.require_version("Gst", "1.0")
-from gi.repository import Gst
+# Prefer an already importable PyDS binding; do not print noisy import tracebacks.
+PYDS_INFO="$("$VENV_PY" - <<'PY' 2>/dev/null
 import pyds
 print(pyds.__file__)
 PY
-then
-  echo "[nvdcf] Existing PyDS import is usable; skipping rebuild."
+)" || true
+if [[ -n "$PYDS_INFO" ]]; then
+  echo "[nvdcf] Existing PyDS: $PYDS_INFO"
   wheel="EXISTING"
 fi
 
-if [[ "$wheel" == "EXISTING" ]]; then
-  :
-elif [[ "$(uname -m)" == "x86_64" ]] && [[ "$PY_MINOR" == "12" ]]; then
-  wheel="$tmp/pyds-1.2.2-cp312-cp312-linux_x86_64.whl"
-  url="https://github.com/NVIDIA-AI-IOT/deepstream_python_apps/releases/download/v1.2.2/pyds-1.2.2-cp312-cp312-linux_x86_64.whl"
-  echo "[nvdcf] No importable PyDS found; trying NVIDIA PyDS 1.2.2 (CPython 3.12 / x86_64)"
-  if command -v curl >/dev/null 2>&1; then
-    if ! curl -fL --retry 3 --retry-delay 2 "$url" -o "$wheel"; then rm -f "$wheel"; fi
-  elif command -v wget >/dev/null 2>&1; then
-    if ! wget -q "$url" -O "$wheel"; then rm -f "$wheel"; fi
-  fi
-fi
-
-if [[ "$wheel" == "EXISTING" ]]; then
-  :
-elif [[ -z "$wheel" || ! -f "$wheel" ]]; then
+if [[ "$wheel" != "EXISTING" ]]; then
   for item in "$DS_ROOT/lib"/pyds*.whl "$DS_ROOT/sources/deepstream_python_apps/bindings/dist"/pyds*.whl; do
     if [[ -f "$item" ]]; then wheel="$item"; break; fi
   done
 fi
 
-if [[ "$wheel" == "EXISTING" ]]; then
-  :
-elif [[ -z "$wheel" && -d "$DS_ROOT/sources/includes" ]]; then
+# This host is CPython 3.12/x86_64. NVIDIA ships the official PyDS 1.2.2
+# wheel for DeepStream 8.0 in exactly this ABI/architecture.
+if [[ "$wheel" != "EXISTING" && -z "$wheel" && "$(uname -m)" == "x86_64" && "$PY_MINOR" == "12" ]]; then
+  wheel="$tmp/pyds-1.2.2-cp312-cp312-linux_x86_64.whl"
+  url="https://github.com/NVIDIA-AI-IOT/deepstream_python_apps/releases/download/v1.2.2/pyds-1.2.2-cp312-cp312-linux_x86_64.whl"
+  echo "[nvdcf] Installing NVIDIA PyDS 1.2.2"
+  if command -v curl >/dev/null 2>&1; then
+    curl -fL --retry 3 --retry-delay 2 "$url" -o "$wheel"
+  elif command -v wget >/dev/null 2>&1; then
+    wget -q "$url" -O "$wheel"
+  else
+    echo "[nvdcf] ERROR: curl or wget is required to install PyDS."
+    exit 1
+  fi
+fi
+
+# Build from source only when the actual DeepStream SDK headers are present.
+if [[ "$wheel" != "EXISTING" && -z "$wheel" && -d "$DS_ROOT/sources/includes" ]]; then
   bind="$DS_ROOT/sources/deepstream_python_apps/bindings"
   if [[ ! -f "$bind/pyproject.toml" && ! -f "$bind/setup.py" ]]; then
-    echo "[nvdcf] PyDS source not installed; cloning NVIDIA deepstream_python_apps rootlessly."
+    echo "[nvdcf] PyDS source not installed; cloning NVIDIA deepstream_python_apps."
     bind="$ROOT/deepstream_python_apps/bindings"
     rm -rf "$ROOT/deepstream_python_apps"
     git clone --depth 1 https://github.com/NVIDIA-AI-IOT/deepstream_python_apps.git "$ROOT/deepstream_python_apps"
@@ -173,12 +160,10 @@ elif [[ -z "$wheel" && -d "$DS_ROOT/sources/includes" ]]; then
   export CMAKE_ARGS="-DDS_PATH=$DS_ROOT -DPYTHON_MAJOR_VERSION=3 -DPYTHON_MINOR_VERSION=$PY_MINOR"
   "$VENV_PY" -m build --wheel "$bind"
   wheel="$(find "$bind/dist" -maxdepth 1 -type f -name 'pyds-*.whl' -print -quit)"
-  [[ -n "$wheel" ]] || { echo "[nvdcf] ERROR: PyDS wheel build produced no wheel."; exit 1; }
 fi
 
 if [[ -z "$wheel" ]]; then
-  echo "[nvdcf] ERROR: no usable NVIDIA PyDS binding was found."
-  echo "[nvdcf] Found NvDCF: $DS_LIB"
+  echo "[nvdcf] ERROR: no PyDS binding could be installed for this DeepStream runtime."
   exit 1
 fi
 if [[ "$wheel" != "EXISTING" ]]; then

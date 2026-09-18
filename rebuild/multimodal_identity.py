@@ -76,6 +76,11 @@ class MultiModal:
         )
         self.profiles = self._load()
         self.trackmap = {}
+        self.pending = []
+        self.pending_min = max(2, int(self.idcfg.get("new_confirm_frames", 4)))
+        self.pending_match = float(self.idcfg.get("new_pending_match_min", 0.78))
+        self.pending_min_model = float(self.idcfg.get("new_pending_model_min", 0.50))
+        self.pending_min_clothing = float(self.idcfg.get("new_pending_clothing_min", 0.55))
         self.stats = {
             "frames": 0,
             "feature_frames": 0,
@@ -87,6 +92,8 @@ class MultiModal:
             "duplicate_frames": 0,
             "pending_frames": 0,
             "cross_camera_matches": 0,
+            "pending_new_observations": 0,
+            "pending_new_confirmed": 0,
         }
 
     @staticmethod
@@ -395,6 +402,125 @@ class MultiModal:
             obs=len(profile["resnet"]),
         )
 
+    def _pending_score(self, obs, pending):
+        values = {
+            model: self._best([obs[model]], pending.get(model, []))
+            for model in self.MODELS
+        }
+        deep = (
+            0.30 * values["resnet"]
+            + 0.37 * values["swin"]
+            + 0.33 * values["solider"]
+        )
+        attrs = self._attrscores(
+            obs["attributes"],
+            pending.get("attributes", []),
+        )
+        if attrs is None:
+            return None
+        top = float(attrs["top"])
+        bottom = float(attrs["bottom"])
+        pose = (
+            self._best([obs["pose"]], pending.get("pose", []))
+            if obs.get("pose") is not None and pending.get("pose")
+            else 0.0
+        )
+        face = self._face_score(
+            obs.get("face"),
+            pending.get("face", []),
+        )
+        if face.get("used"):
+            score = (
+                0.64 * float(face["score"])
+                + 0.18 * deep
+                + 0.09 * top
+                + 0.08 * bottom
+                + 0.01 * pose
+            )
+        else:
+            score = (
+                0.46 * deep
+                + 0.26 * top
+                + 0.26 * bottom
+                + 0.02 * pose
+            )
+        models = sum(
+            values[name] >= self.pending_min_model
+            for name in self.MODELS
+        )
+        return {
+            "score": float(np.clip(score, 0.0, 0.995)),
+            "resnet": float(values["resnet"]),
+            "swin": float(values["swin"]),
+            "solider": float(values["solider"]),
+            "top": top,
+            "bottom": bottom,
+            "pose": float(pose),
+            "face": float(face.get("score", 0.0)),
+            "faceused": bool(face.get("used")),
+            "models": int(models),
+        }
+
+    def _stage_new(self, obs):
+        best = None
+        best_index = None
+        for index, item in enumerate(self.pending):
+            score = self._pending_score(obs, item)
+            if score is None:
+                continue
+            if (
+                score["top"] < self.pending_min_clothing
+                or score["bottom"] < self.pending_min_clothing
+            ):
+                continue
+            if score["models"] < 2:
+                continue
+            if best is None or score["score"] > best["score"]:
+                best = score
+                best_index = index
+
+        if best is not None and best["score"] >= self.pending_match:
+            item = self.pending[best_index]
+            item["resnet"].append(np.asarray(obs["resnet"], np.float32))
+            item["swin"].append(np.asarray(obs["swin"], np.float32))
+            item["solider"].append(np.asarray(obs["solider"], np.float32))
+            item["attributes"].append(np.asarray(obs["attributes"], np.float32))
+            if obs.get("pose") is not None:
+                item["pose"].append(np.asarray(obs["pose"], np.float32))
+            if obs.get("face"):
+                item["face"].append(dict(obs["face"]))
+            item["observations"].append(obs)
+            item["count"] += 1
+            item["last_camera"] = str(obs["camera"])
+            self.stats["pending_new_observations"] += 1
+            if item["count"] >= self.pending_min:
+                seed = item["observations"][0]
+                gid = self._new(seed)
+                for extra in item["observations"][1:]:
+                    self._save(gid, extra)
+                self.pending.pop(best_index)
+                self.stats["pending_new_confirmed"] += 1
+                return gid
+            return None
+
+        self.pending.append({
+            "resnet": [np.asarray(obs["resnet"], np.float32)],
+            "swin": [np.asarray(obs["swin"], np.float32)],
+            "solider": [np.asarray(obs["solider"], np.float32)],
+            "attributes": [np.asarray(obs["attributes"], np.float32)],
+            "pose": (
+                [np.asarray(obs["pose"], np.float32)]
+                if obs.get("pose") is not None
+                else []
+            ),
+            "face": [dict(obs["face"])] if obs.get("face") else [],
+            "observations": [obs],
+            "count": 1,
+            "last_camera": str(obs["camera"]),
+        })
+        self.stats["pending_new_observations"] += 1
+        return None
+
     def _new(self, obs):
         gid = int(self.registry.allocate_gid())
         self.profiles[gid] = {
@@ -448,7 +574,11 @@ class MultiModal:
                 if best_score >= known_floor:
                     self.stats["pending_frames"] += 1
                     continue
-                selected = self._new(observations[row])
+                staged = self._stage_new(observations[row])
+                if staged is None:
+                    self.stats["pending_frames"] += 1
+                    continue
+                selected = int(staged)
 
             chosen[row] = selected
 
@@ -465,7 +595,8 @@ class MultiModal:
             obs = observations[row]
             if not commit:
                 continue
-            self.trackmap[(str(obs["row"]["camera"]), int(obs["row"]["track_id"]))] = int(gid)
+            # Tracker IDs are observation bookkeeping only. They never
+            # participate in Global ID recovery or selection.
             self._save(gid, obs)
             if recovery:
                 self.stats["recovery_matches"] += 1
@@ -498,51 +629,3 @@ class MultiModal:
             })
 
         if not observations:
-            return {}
-
-        self.stats["feature_frames"] += 1
-        if recovery:
-            self.stats["recovery_frames"] += 1
-
-        resnet = self.resnet.extract_batch(images)
-        swin = self.swin.extract_batch(images)
-        solider = self.solider.extract_batch(images)
-        if not (len(resnet) == len(observations) == len(swin) == len(solider)):
-            raise RuntimeError("Multimodal extractors returned mismatched batch lengths")
-
-        for index, obs in enumerate(observations):
-            obs["resnet"] = np.asarray(resnet[index], np.float32)
-            obs["swin"] = np.asarray(swin[index], np.float32)
-            obs["solider"] = np.asarray(solider[index], np.float32)
-            obs["attributes"] = np.asarray(pack(obs["person"], frame, obs["row"]["bbox"]), np.float32)
-
-            face = self.face.extract(frame, obs["row"]["bbox"])
-            if face is not None and face.valid and face.visibility >= self.face_threshold:
-                obs["face"] = {
-                    "vector": np.asarray(face.vector, np.float32),
-                    "quality": float(face.quality),
-                    "visibility": float(face.visibility),
-                }
-                self.stats["face_frames"] += 1
-            else:
-                obs["face"] = None
-
-            obs["pose"], obs["pose_overlap"] = self._posevec(poses, obs["row"]["bbox"])
-
-        scoresets = []
-        for obs in observations:
-            ids, retrieved = self._candidates(obs)
-            scores = {}
-            for gid in ids:
-                value = self._score(obs, int(gid), retrieved)
-                if value is not None:
-                    scores[int(gid)] = value
-            scoresets.append(scores)
-
-        return self.assign_rows(observations, scoresets, commit=commit, recovery=recovery)
-
-    def close(self):
-        self.registry.close()
-
-
-__all__ = ["MultiModal"]

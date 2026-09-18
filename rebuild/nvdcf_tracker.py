@@ -144,6 +144,11 @@ class NvDCF:
                 parent = str(Path(path).parent)
                 if parent not in sys.path:
                     sys.path.insert(0, parent)
+        pyds = DeepStreamRuntime.pyds()
+        if pyds is not None and pyds.suffix == ".so":
+            parent = str(pyds.parent)
+            if parent not in sys.path:
+                sys.path.insert(0, parent)
 
         try:
             import gi

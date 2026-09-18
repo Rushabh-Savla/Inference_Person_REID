@@ -61,6 +61,10 @@ class NvDCF:
                 f"NvDCF library found at {library}, but no NvDCF tracker config exists under {dsroot}."
             )
         DeepStreamRuntime.configure(dsroot)
+        ctypes.CDLL(
+            library,
+            mode=getattr(os, "RTLD_NOW", 2) | getattr(os, "RTLD_GLOBAL", 256),
+        )
         return dsroot, library, config
 
     @staticmethod

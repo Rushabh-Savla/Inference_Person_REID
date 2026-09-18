@@ -131,6 +131,8 @@ def test_overlap_uses_clean_anchors_only_inside_overlap():
     assert "last_gids" in value
     assert "never used after the overlap ends" in value
     assert "overlap_anchors = {}" in value
+    assert "candidate = str(" in value
+    assert "candidate not in anchor_used" in value
 
 
 def test_batch_has_hard_same_frame_collision_gate():

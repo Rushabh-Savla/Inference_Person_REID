@@ -8,6 +8,10 @@ from pathlib import Path
 
 import numpy as np
 
+repo = Path(__file__).resolve().parents[1]
+if str(repo) not in os.sys.path:
+    os.sys.path.insert(0, str(repo))
+
 from rebuild.deepstream_runtime import DeepStreamRuntime
 
 

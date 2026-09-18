@@ -322,8 +322,6 @@ class BatchNvDCF:
                 "cross_camera_matches": int(self.identity.stats["cross"]),
                 "pending_new_observations": int(self.identity.stats["pending_new_observations"]),
                 "pending_new_confirmed": int(self.identity.stats["pending_new_confirmed"]),
-                "pending_new_observations": int(self.identity.stats["pending_new_observations"]),
-                "pending_new_confirmed": int(self.identity.stats["pending_new_confirmed"]),
                 "face_observations": int(self.identity.stats["face_observations"]),
                 "face_reliable": int(self.identity.stats["face_reliable"]),
                 "qdrant_retrievals": int(self.identity.stats["qdrant_retrievals"]),

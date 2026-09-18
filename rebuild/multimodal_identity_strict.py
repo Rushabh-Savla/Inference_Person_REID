@@ -233,7 +233,11 @@ class MultiModalStrict:
                 "pose": {"pose": [obs["pose"]]} if obs.get("pose") is not None else {},
             },
             attribute_bank=[obs["attributes"]],
-            face_bank=[],
+            face_bank=(
+                [{"vector": obs["face"]["vector"], "valid": True}]
+                if obs.get("face") is not None
+                else []
+            ),
         )
 
     def cand(self, obs):
@@ -341,7 +345,20 @@ class MultiModalStrict:
             return False
         floor = float(self.icfg.get("recovery_min", 0.58) if recovery else self.icfg.get("existing_min", 0.61))
         gap = float(self.icfg.get("recovery_margin", 0.018) if recovery else self.icfg.get("margin", 0.025))
-        return bool(row["score"] >= floor and row["deep"] >= float(self.icfg.get("deep_min", 0.48)) and margin >= gap)
+        face_ok = (
+            not bool(row.get("face_used"))
+            or (
+                float(row.get("face", 0.0)) >= float(self.icfg.get("face_min", 0.60))
+                and float(row.get("face_quality", 0.0))
+                >= float(self.icfg.get("face_quality_min", 0.50))
+            )
+        )
+        return bool(
+            row["score"] >= floor
+            and row["deep"] >= float(self.icfg.get("deep_min", 0.48))
+            and margin >= gap
+            and face_ok
+        )
 
     def save(self, gid, obs):
         gid = int(gid)
@@ -354,6 +371,9 @@ class MultiModalStrict:
         if obs.get("pose") is not None:
             prof["pose"].append(np.asarray(obs["pose"], np.float32))
             prof["pose"] = prof["pose"][-64:]
+        if obs.get("face") is not None and obs["face"].get("valid"):
+            prof["face"].append(np.asarray(obs["face"]["vector"], np.float32))
+            prof["face"] = prof["face"][-48:]
         prof["camera"].add(str(obs["camera"]))
         node = SimpleNamespace(
             key=f"G{gid:06d}",
@@ -365,7 +385,10 @@ class MultiModalStrict:
                 "pose": {"pose": prof["pose"][-16:]},
             },
             attribute_bank=prof["attributes"][-16:],
-            face_bank=[],
+            face_bank=[
+                {"vector": value, "valid": True}
+                for value in prof["face"][-16:]
+            ],
         )
         self.q.upsert_component(gid, [node])
         self.reg.save_component(
@@ -375,7 +398,7 @@ class MultiModalStrict:
                 "swin": prof["swin"][-64:],
                 "solider": prof["solider"][-64:],
                 "attributes": prof["attributes"][-64:],
-                "face": [],
+                "face": prof["face"][-48:],
                 "pose": prof["pose"][-64:],
             },
             cameras=prof["camera"],

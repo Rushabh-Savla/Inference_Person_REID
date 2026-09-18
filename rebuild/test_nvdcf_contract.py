@@ -67,22 +67,18 @@ def test_required_feature_stack_is_present():
         "NVIDIAReIDExtractor",
         "NVIDIASwinReIDExtractor",
         "SOLIDERReIDExtractor",
-        "FaceExtractorV4",
         "pack",
         "QdrantGallery",
         "YOLO",
         "top",
         "bottom",
         "pose",
-        "face",
     ):
         assert name in value
 
-    # Face is the highest-weight single identity cue when reliable.
-    assert "0.60 * face" in value
     # Top and bottom clothing are independent mandatory score terms.
-    assert "0.09 * top" in value
-    assert "0.09 * bottom" in value
+    assert "0.24 * top" in value
+    assert "0.24 * bot" in value
     assert "0.22 * top" not in value or "0.22 * bottom" not in value
 
 
@@ -106,11 +102,11 @@ def test_pending_promotion_requires_all_three_models():
     assert "self.pending_margin" in value
 
 
-def test_face_and_pose_are_mandatory_runtime_components():
+def test_nvidia_reid_and_pose_are_mandatory_runtime_components():
     value = config()
-    assert value["face"]["enabled"] is True
-    assert value["face"]["required"] is True
-    assert float(value["face"]["min_visibility"]) >= 0.65
+    assert value["reid"]["model"] == "nvidia_reidentificationnet"
+    assert value["cross_camera_models"]["swin_weights"]
+    assert value["cross_camera_models"]["solider_weights"]
     assert value["pose"]["enabled"] is True
 
 

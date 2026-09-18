@@ -198,6 +198,23 @@ class BatchNvDCF:
                             for item in current
                             if int(item["track_id"]) in active_overlap
                         }
+                    anchor_used = {
+                        value
+                        for value in overlap_anchors.values()
+                        if str(value).startswith("G")
+                    }
+                    for item in current:
+                        tid = int(item["track_id"])
+                        if tid in overlap_anchors and str(overlap_anchors[tid]).startswith("G"):
+                            continue
+                        candidate = str(
+                            feature_map.get(tid, "PENDING")
+                        )
+                        if candidate.startswith("G") and candidate not in anchor_used:
+                            overlap_anchors[tid] = candidate
+                            anchor_used.add(candidate)
+                        else:
+                            overlap_anchors[tid] = "PENDING"
                     gids = {
                         int(item["track_id"]): str(
                             overlap_anchors.get(int(item["track_id"]), "PENDING")

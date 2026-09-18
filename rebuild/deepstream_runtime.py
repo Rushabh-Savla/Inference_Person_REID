@@ -133,6 +133,29 @@ class DeepStreamRuntime:
         return None
 
     @staticmethod
+    def library_dir(library):
+        if not library:
+            return None
+        try:
+            return Path(library).resolve().parent
+        except OSError:
+            return Path(library).parent
+
+    @classmethod
+    def sdk_root(cls, library):
+        if not library:
+            return None
+        current = cls.library_dir(library)
+        if current is None:
+            return None
+        for candidate in [current] + list(current.parents):
+            if (candidate / "sources/includes/nvds_version.h").is_file() and (
+                candidate / "sources/includes").is_dir()
+            ):
+                return candidate
+        return None
+
+    @staticmethod
     def version(root):
         if root is None:
             return "unknown"
@@ -181,13 +204,17 @@ class DeepStreamRuntime:
         return result
 
     @staticmethod
-    def configure(root):
+    def configure(root, library=None):
         if root is None:
             return
         paths = [
             root / "lib",
             root / "lib/gst-plugins",
         ]
+        if library:
+            libdir = DeepStreamRuntime.library_dir(library)
+            if libdir is not None:
+                paths.append(libdir)
         for path in paths:
             if path.is_dir():
                 current = os.environ.get("LD_LIBRARY_PATH", "")
@@ -226,5 +253,15 @@ class DeepStreamRuntime:
                 f"NvDCF library found at {library}, but no NVIDIA NvDCF tracker config "
                 f"was found below {root}."
             )
-        cls.configure(root)
+        cls.configure(root, library)
+        try:
+            import ctypes
+            ctypes.CDLL(
+                library,
+                mode=getattr(os, "RTLD_NOW", 2) | getattr(os, "RTLD_GLOBAL", 256),
+            )
+        except OSError as exc:
+            raise RuntimeError(
+                f"NvDCF library was found but could not be loaded: {library}: {exc}"
+            ) from exc
         return root, library, config

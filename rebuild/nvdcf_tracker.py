@@ -55,34 +55,51 @@ class NvDCF:
 
     @staticmethod
     def _deps():
-        # The project venv owns the ML/ONNX stack, while DeepStream commonly
-        # installs PyGObject and PyDS into system/DeepStream locations. Make
-        # those bindings visible from the existing venv instead of forcing a
-        # second Python environment.
-        import sys
+        # Keep DeepStream's Python runtime inside the existing ML venv.
+        # No root privileges are required: install_nvdcf_runtime.sh extracts
+        # the small Debian Python/GStreamer packages into .nvdcf_runtime and
+        # this loader adds them to the current process.
         import glob
+        import sys
 
-        paths = [
-            "/usr/lib/python3/dist-packages",
-            "/usr/lib/python3.12/dist-packages",
-            "/opt/nvidia/deepstream/deepstream/lib",
-            "/opt/nvidia/deepstream/deepstream/lib/python",
-            "/opt/nvidia/deepstream/deepstream/sources/deepstream_python_apps/bindings",
-            "/opt/nvidia/deepstream/deepstream/sources/deepstream_python_apps/bindings/build",
+        base = Path(os.environ.get("NVDCF_RUNTIME", "")).expanduser()
+        roots = [
+            base / "usr/lib/python3/dist-packages",
+            base / "usr/lib/python3.12/dist-packages",
+            base / "usr/lib/x86_64-linux-gnu/girepository-1.0",
+            Path("/usr/lib/python3/dist-packages"),
+            Path("/usr/lib/python3.12/dist-packages"),
+            Path("/opt/nvidia/deepstream/deepstream/lib"),
+            Path("/opt/nvidia/deepstream/deepstream/lib/python"),
+            Path("/opt/nvidia/deepstream/deepstream/sources/deepstream_python_apps/bindings"),
+            Path("/opt/nvidia/deepstream/deepstream/sources/deepstream_python_apps/bindings/build"),
         ]
-        for path in paths:
-            if Path(path).exists() and path not in sys.path:
-                sys.path.insert(0, path)
+        for path in roots:
+            if path.exists() and str(path) not in sys.path:
+                sys.path.insert(0, str(path))
 
-        # Some DeepStream installs expose a versioned PyDS shared object under
-        # the SDK lib directory. Python can import it directly once that
-        # directory is visible.
-        for path in glob.glob(
-            "/opt/nvidia/deepstream/deepstream/lib/pyds*.so"
+        if base.exists():
+            typelib = base / "usr/lib/x86_64-linux-gnu/girepository-1.0"
+            libs = base / "usr/lib/x86_64-linux-gnu"
+            if typelib.exists():
+                current = os.environ.get("GI_TYPELIB_PATH", "")
+                os.environ["GI_TYPELIB_PATH"] = (
+                    str(typelib) + (os.pathsep + current if current else "")
+                )
+            if libs.exists():
+                current = os.environ.get("LD_LIBRARY_PATH", "")
+                os.environ["LD_LIBRARY_PATH"] = (
+                    str(libs) + (os.pathsep + current if current else "")
+                )
+
+        for pattern in (
+            "/opt/nvidia/deepstream/deepstream/lib/pyds*.so",
+            str(base / "opt/nvidia/deepstream/deepstream/lib/pyds*.so"),
         ):
-            parent = str(Path(path).parent)
-            if parent not in sys.path:
-                sys.path.insert(0, parent)
+            for path in glob.glob(pattern):
+                parent = str(Path(path).parent)
+                if parent not in sys.path:
+                    sys.path.insert(0, parent)
 
         try:
             import gi
@@ -91,10 +108,10 @@ class NvDCF:
             import pyds
         except Exception as exc:
             raise RuntimeError(
-                "NvDCF DeepStream bindings are unavailable. The active venv "
-                "must be able to import gi/Gst and pyds from the installed "
-                "DeepStream SDK. First run scripts/install_nvdcf_runtime.sh "
-                "and then verify: python -c 'import gi; gi.require_version(\"Gst\",\"1.0\"); from gi.repository import Gst; import pyds; print(\"DeepStream bindings: OK\")'."
+                "NvDCF DeepStream bindings are unavailable. Run "
+                "scripts/install_nvdcf_runtime.sh without sudo; it installs "
+                "the GI/GStreamer Python packages into the project venv and "
+                "builds/uses PyDS from the installed DeepStream SDK."
             ) from exc
         Gst.init(None)
         return Gst, GLib, pyds

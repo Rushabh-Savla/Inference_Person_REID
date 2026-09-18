@@ -304,7 +304,7 @@ class DeepStreamRuntime:
                         values[key] = match.group(1)
             if len(values) == 3:
                 return f'{values["MAJOR"]}.{values["MINOR"]}.{values["MICRO"]}'
-            match = re.search(r"deepstream[-_]?([0-9]+(?:\\.[0-9]+){1,2})", str(root).lower())
+            match = re.search(r"deepstream[-_]?([0-9]+(?:\.[0-9]+){1,2})", str(root).lower())
             if match:
                 return match.group(1)
         if library:
@@ -322,7 +322,7 @@ class DeepStreamRuntime:
             except (OSError, subprocess.SubprocessError):
                 pass
             for value in paths:
-                match = re.search(r"deepstream[-_]?([0-9]+(?:\\.[0-9]+){1,2})", value.lower())
+                match = re.search(r"deepstream[-_]?([0-9]+(?:\.[0-9]+){1,2})", value.lower())
                 if match:
                     return match.group(1)
             try:
@@ -334,7 +334,7 @@ class DeepStreamRuntime:
                     timeout=15,
                     check=False,
                 )
-                match = re.search(r"deepstream[^0-9]*([0-9]+\\.[0-9]+(?:\\.[0-9]+)?)", result.stdout.lower())
+                match = re.search(r"deepstream[^0-9]*([0-9]+\.[0-9]+(?:\.[0-9]+)?)", result.stdout.lower())
                 if match:
                     return match.group(1)
             except (OSError, subprocess.SubprocessError):

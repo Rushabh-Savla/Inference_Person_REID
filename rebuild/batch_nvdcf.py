@@ -160,21 +160,42 @@ class BatchNvDCF:
                 if not current:
                     continue
 
+                tids = [int(item["track_id"]) for item in current]
+                if len(tids) != len(set(tids)):
+                    raise RuntimeError(
+                        f"NvDCF emitted duplicate tracker IDs in one frame: {camera}:{frame}:{tids}"
+                    )
+
                 self.identity.stats["frames"] += 1
                 active_overlap = self._overlap_ids(current)
                 if previous_overlap - active_overlap:
                     recovery_until = max(recovery_until, frame + recovery_frames)
                 recovery_mode = frame <= recovery_until
 
-                # Global ID is feature-resolved on every frame. NvDCF track IDs
-                # identify observations only; they never select a GID.
+                # Every overlap frame still runs the complete feature stack, but
+                # its assignments are quarantined. Nothing learned from a
+                # mixed/occluded crop is committed to the identity gallery.
+                #
+                # After overlap, recovery=True forces feature-only identity
+                # assignment. NvDCF track_id is never used to choose the GID.
                 feature_map = self.identity.observe(
                     image,
                     current,
                     commit=not bool(active_overlap),
-                    recovery=recovery_mode,
+                    recovery=bool(active_overlap) or recovery_mode,
                 )
-                gids = {int(item["track_id"]): str(feature_map.get(int(item["track_id"]), "PENDING")) for item in current}
+                if active_overlap:
+                    gids = {
+                        int(item["track_id"]): "PENDING"
+                        for item in current
+                    }
+                else:
+                    gids = {
+                        int(item["track_id"]): str(
+                            feature_map.get(int(item["track_id"]), "PENDING")
+                        )
+                        for item in current
+                    }
 
                 # Hard same-frame collision invariant. Re-solve the whole frame
                 # with feature-only recovery, then keep any unresolved collision
@@ -263,6 +284,8 @@ class BatchNvDCF:
                 "recovery_frames": int(self.identity.stats["recovery_frames"]),
                 "recovery_matches": int(self.identity.stats["recovery_matches"]),
                 "cross_camera_matches": int(self.identity.stats["cross_camera_matches"]),
+                "pending_new_observations": int(self.identity.stats["pending_new_observations"]),
+                "pending_new_confirmed": int(self.identity.stats["pending_new_confirmed"]),
             }
             (self.out / "nvdcf_identity_debug.json").write_text(json.dumps(debug, indent=2), encoding="utf-8")
             print(f"[nvdcf] result: new_gids={debug['new_gids']} recovery_matches={debug['recovery_matches']} cross_camera_matches={debug['cross_camera_matches']} duplicate_frames={debug['duplicate_frames']} pending_frames={debug['pending_frames']}")

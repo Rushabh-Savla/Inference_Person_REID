@@ -145,3 +145,21 @@ def test_no_tracker_id_to_gid_fallback_exists():
     assert "self.identity.trackmap.get" not in value
     assert "trackmap.get" not in value
     assert "f\"G{int(prior)" not in value
+
+
+def test_face_runtime_is_mandatory():
+    cfg = config()
+    assert cfg["face"]["enabled"] is True
+    assert cfg["face"]["model"] == "buffalo_l"
+    assert float(cfg["face"]["min_visibility"]) >= 0.65
+    assert float(cfg["face"]["min_quality"]) >= 0.50
+    value = text("rebuild/multimodal_identity_strict.py")
+    assert "FaceExtractorV4" in value
+    assert "self.face.extract" in value
+    assert "faceval" in value
+
+def test_deepstream_runtime_is_discovered():
+    value = text("rebuild/deepstream_runtime.py") + "\n" + text("rebuild/nvdcf_tracker.py")
+    assert "DeepStreamRuntime.find" in value
+    assert "NVDCF_DEEPSTREAM_ROOT" in value
+    assert "libnvds_nvmultiobjecttracker.so" in value

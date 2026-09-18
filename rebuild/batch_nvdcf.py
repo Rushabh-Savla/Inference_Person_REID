@@ -294,8 +294,11 @@ class BatchNvDCF:
         print(f"[nvdcf] Swin: {self.identity.swin.describe()}")
         print(f"[nvdcf] SOLIDER: {self.identity.solider.describe()}")
         print(f"[nvdcf] POSE: {self.cfg['pose']['model']}")
-        print("[nvdcf] QDRANT: ENABLED")
-        print("[nvdcf] GID assignment: feature-only after overlap and one-to-one every frame")
+        print("[nvdcf] QDRANT: ENABLED — candidate retrieval participates in identity comparison")
+        print("[nvdcf] FACE: InsightFace SCRFD + ArcFace, reliable face has highest fusion priority")
+        print("[nvdcf] CLOTHING: top + bottom + upper/lower pattern every comparison")
+        print("[nvdcf] POSE: YOLO pose participates in matching")
+        print("[nvdcf] GID assignment: feature-only after overlap; Hungarian one-to-one every frame")
 
         all_labels = []
         try:
@@ -321,9 +324,20 @@ class BatchNvDCF:
                 "pending_new_confirmed": int(self.identity.stats["pending_new_confirmed"]),
                 "pending_new_observations": int(self.identity.stats["pending_new_observations"]),
                 "pending_new_confirmed": int(self.identity.stats["pending_new_confirmed"]),
+                "face_observations": int(self.identity.stats["face_observations"]),
+                "face_reliable": int(self.identity.stats["face_reliable"]),
+                "qdrant_retrievals": int(self.identity.stats["qdrant_retrievals"]),
             }
             (self.out / "nvdcf_identity_debug.json").write_text(json.dumps(debug, indent=2), encoding="utf-8")
-            print(f"[nvdcf] result: new_gids={debug['new_gids']} recovery_matches={debug['recovery_matches']} cross_camera_matches={debug['cross_camera_matches']} duplicate_frames={debug['duplicate_frames']} pending_frames={debug['pending_frames']}")
+            print(
+                f"[nvdcf] result: new_gids={debug['new_gids']} "
+                f"recovery_matches={debug['recovery_matches']} "
+                f"cross_camera_matches={debug['cross_camera_matches']} "
+                f"duplicate_frames={debug['duplicate_frames']} "
+                f"pending_frames={debug['pending_frames']} "
+                f"face_reliable={debug['face_reliable']} "
+                f"qdrant_retrievals={debug['qdrant_retrievals']}"
+            )
             return all_labels
         finally:
             self.identity.close()

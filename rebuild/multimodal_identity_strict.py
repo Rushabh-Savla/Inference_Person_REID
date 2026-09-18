@@ -503,6 +503,11 @@ class MultiModalStrict:
                 if item is not None:
                     mat[i, j] = float(item["score"])
         rr, cc = linear_sum_assignment(-mat)
+        assignments = {
+            int(i): int(gids[j])
+            for i, j in zip(rr.tolist(), cc.tolist())
+            if j < len(gids)
+        }
         take = {}
         for i, j in zip(rr.tolist(), cc.tolist()):
             rows = sets[i]
@@ -516,7 +521,10 @@ class MultiModalStrict:
                     (
                         float(value["score"])
                         for other_gid, value in rows.items()
-                        if int(other_gid) != selected_gid
+                        if (
+                            int(other_gid) != selected_gid
+                            and int(other_gid) not in assignments.values()
+                        )
                     ),
                     default=0.0,
                 )

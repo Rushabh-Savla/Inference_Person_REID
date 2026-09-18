@@ -42,7 +42,21 @@ def test_global_assignment_is_feature_first_and_one_to_one():
     assert "recovery=True" in batch
     assert "feature-only" in batch.lower()
     assert "tracker_id_global_fallback" not in batch
-    assert 'gid = str(feature_map.get(int(item["track_id"]), "PENDING"))' in batch
+    assert 'feature_map.get(int(item["track_id"]), "PENDING")' in batch
+    assert 'if active_overlap:' in batch
+    assert 'gids = {' in batch
+
+
+def test_new_gid_admission_requires_multiframe_evidence():
+    value = text("rebuild/multimodal_identity.py")
+    cfg = config()["identity"]
+    assert "_stage_new" in value
+    assert "self.pending" in value
+    assert "_new(seed)" in value
+    assert int(cfg["new_confirm_frames"]) >= 3
+    assert float(cfg["new_pending_match_min"]) >= 0.80
+    assert float(cfg["new_pending_model_min"]) >= 0.50
+    assert float(cfg["new_pending_clothing_min"]) >= 0.55
 
 
 def test_required_feature_stack_is_present():

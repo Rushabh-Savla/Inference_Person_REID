@@ -10,7 +10,6 @@ class MultiModal(MultiModalStrict):
 
     def __init__(self, cfg):
         super().__init__(cfg)
-        self.face_threshold = float(self.fth)
 
     def observe(self, frame, rows, commit=True, recovery=False):
         values = super().observe(

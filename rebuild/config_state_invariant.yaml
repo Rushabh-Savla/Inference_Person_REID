@@ -31,7 +31,7 @@ identity_state:
   path: identity_state/reid_nvdcf_strict_v3.sqlite3
   model_id: nvdcf-strict-multimodal-v3
   bank_size: 96
-  qdrant_path: qdrant_storage_nvdcf_strict_v2
+  qdrant_path: qdrant_storage_nvdcf_strict_v3
   qdrant_prefix: person_reid_nvdcf_strict_v3
   qdrant_limit: 32
 

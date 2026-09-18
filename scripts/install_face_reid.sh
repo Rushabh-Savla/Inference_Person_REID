@@ -7,8 +7,10 @@ set -euo pipefail
 python -m pip install --upgrade --no-deps "insightface==0.7.3"
 python -m pip install --upgrade --no-deps   "albumentations==1.3.1"   "qudida==0.0.4"   "easydict==1.13"   "prettytable==3.12.0"
 
-# These packages are imported by qudida/albumentations.
-python -m pip install --upgrade --no-deps   "scikit-learn==1.6.1"   "scikit-image==0.25.2"
+# These packages are imported by qudida/albumentations and are installed
+# without dependency resolution so the repository's pinned NumPy remains
+# authoritative.
+python -m pip install --upgrade --no-deps   "joblib==1.5.2"   "scikit-learn==1.6.1"   "scikit-image==0.25.2"
 
 # Restore the repository's numerics after any prior environment drift.
 python -m pip install --force-reinstall --no-deps   "numpy==2.2.6"   "scipy==1.15.3"
@@ -22,6 +24,7 @@ import numpy as np
 import scipy
 import sklearn
 import skimage
+import joblib
 import onnxruntime as ort
 import albumentations as A
 
@@ -29,6 +32,7 @@ print("numpy:", np.__version__)
 print("scipy:", scipy.__version__)
 print("scikit-learn:", sklearn.__version__)
 print("scikit-image:", skimage.__version__)
+print("joblib:", joblib.__version__)
 print("albumentations:", A.__version__)
 print("onnxruntime:", ort.__version__)
 print("providers:", ort.get_available_providers())

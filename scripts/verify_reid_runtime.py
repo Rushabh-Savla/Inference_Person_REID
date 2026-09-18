@@ -78,17 +78,14 @@ def main():
     print("[verify] Top/bottom clothing feature extraction: OK")
 
     from src.live.qdrant_gallery import QdrantGallery
-    q = QdrantGallery(
-        cfg["identity_state"]["qdrant_path"],
-        cfg["identity_state"]["qdrant_prefix"],
-        cfg["identity_state"]["qdrant_limit"],
-    )
-    # Confirm Qdrant accepts and retrieves a real vector in the configured space.
-    q._upsert(999999, "resnet", "full", [np.ones(256, np.float32)])
-    hits, _ = q.search_component([])
-    if not isinstance(hits, dict):
-        raise RuntimeError("Qdrant retrieval API did not return its expected structure")
-    print("[verify] Qdrant collections/retrieval API: OK")
+    with tempfile.TemporaryDirectory(prefix="reid_qdrant_verify_") as qroot:
+        q = QdrantGallery(qroot, "verify_reid", 8)
+        probevec = np.ones(256, np.float32)
+        q._upsert(1, "resnet", "full", [probevec])
+        hits = q._query("resnet", probevec)
+        if not hits or int((hits[0].payload or {}).get("gid", -1)) != 1:
+            raise RuntimeError("Qdrant vector was stored but could not be retrieved")
+    print("[verify] Qdrant write + retrieval: OK")
 
     if args.video:
         from rebuild.nvdcf_tracker import NvDCF

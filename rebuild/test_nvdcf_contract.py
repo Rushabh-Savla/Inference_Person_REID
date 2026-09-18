@@ -57,6 +57,7 @@ def test_new_gid_admission_requires_multiframe_evidence():
     assert float(cfg["new_pending_match_min"]) >= 0.80
     assert float(cfg["new_pending_model_min"]) >= 0.50
     assert float(cfg["new_pending_clothing_min"]) >= 0.55
+    assert int(cfg["new_pending_required_models"]) == 3
 
 
 def test_required_feature_stack_is_present():

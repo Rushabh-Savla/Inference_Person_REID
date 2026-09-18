@@ -13,8 +13,8 @@ print("scipy:", scipy.__version__)
 print("onnxruntime:", ort.__version__)
 print("providers:", ort.get_available_providers())
 
-if np.__version__ != "2.2.6":
-    raise SystemExit("Expected numpy==2.2.6")
+if np.__version__ != "1.26.4":
+    raise SystemExit("Expected numpy==1.26.4")
 if scipy.__version__ != "1.15.3":
     raise SystemExit("Expected scipy==1.15.3")
 if ort.__version__ != "1.28.0":

@@ -46,7 +46,7 @@ class NvDCF:
                     )
                 dsroot, discovered = DeepStreamRuntime.find()
                 root = dsroot if discovered and Path(discovered).resolve() == Path(library).resolve() else Path(library).resolve().parent.parent
-                DeepStreamRuntime.configure(root)
+                DeepStreamRuntime.configure(root, library)
                 return root, library, config
         dsroot, library = DeepStreamRuntime.find()
         if dsroot is None or library is None:

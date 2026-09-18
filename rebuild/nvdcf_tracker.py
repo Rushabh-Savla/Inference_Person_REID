@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import os
 from pathlib import Path
 
@@ -79,13 +80,18 @@ class NvDCF:
         # No root privileges are required: install_nvdcf_runtime.sh extracts
         # the small Debian Python/GStreamer packages into .nvdcf_runtime and
         # this loader adds them to the current process.
+        import ctypes
         import glob
         import sys
 
         base = Path(os.environ.get("NVDCF_RUNTIME", "")).expanduser()
         if not base:
             base = Path(__file__).resolve().parents[1] / ".nvdcf_runtime"
-        dsroot, _, _ = DeepStreamRuntime.require()
+        dsroot, library, _ = DeepStreamRuntime.require()
+        ctypes.CDLL(
+            library,
+            mode=getattr(os, "RTLD_NOW", 2) | getattr(os, "RTLD_GLOBAL", 256),
+        )
         roots = [
             base / "usr/lib/python3/dist-packages",
             base / "usr/lib/python3.12/dist-packages",
@@ -115,7 +121,6 @@ class NvDCF:
                     str(libs) + (os.pathsep + current if current else "")
                 )
 
-        dsroot = Path("/opt/nvidia/deepstream/deepstream")
         dslib = dsroot / "lib"
         dsgst = dslib / "gst-plugins"
         for path in (dslib, dsgst):
@@ -127,6 +132,7 @@ class NvDCF:
 
         for pattern in (
             str(dsroot / "lib/pyds*.so"),
+            str(dsroot / "lib/python/pyds*.so"),
             str(base / "opt/nvidia/deepstream/deepstream/lib/pyds*.so"),
         ):
             for path in glob.glob(pattern):
@@ -398,11 +404,19 @@ class NvDCF:
                         trk = float(getattr(obj, "tracker_confidence", 0.0))
                         det = float(getattr(obj, "confidence", 0.0))
                         handle.write(
-                            f'{{"camera":{camera!r},"frame":{frame},'
-                            f'"timestamp":{frame / fps:.6f},'
-                            f'"track_id":{tid},"bbox":{box},'
-                            f'"detection_score":{det:.6f},'
-                            f'"tracker_confidence":{trk:.6f}}}\n'
+                            json.dumps(
+                                {
+                                    "camera": str(camera),
+                                    "frame": frame,
+                                    "timestamp": frame / fps,
+                                    "track_id": tid,
+                                    "bbox": box,
+                                    "detection_score": det,
+                                    "tracker_confidence": trk,
+                                },
+                                separators=(",", ":"),
+                            )
+                            + "\n"
                         )
                     try:
                         objs = objs.next

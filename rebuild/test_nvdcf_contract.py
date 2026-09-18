@@ -52,15 +52,17 @@ def test_new_gid_admission_requires_multiframe_evidence():
     cfg = config()["identity"]
     assert "stage_new" in value
     assert "self.pending" in value
-    assert "_new(seed)" in value
+    assert "self.new(seed)" in value
     assert int(cfg["new_confirm_frames"]) >= 3
     assert float(cfg["new_pending_match_min"]) >= 0.80
     assert float(cfg["new_pending_model_min"]) >= 0.50
     assert float(cfg["new_pending_clothing_min"]) >= 0.55
+    assert int(cfg["new_pending_required_models"]) == 3
+    assert float(cfg["new_pending_margin"]) >= 0.08
 
 
 def test_required_feature_stack_is_present():
-    value = text("rebuild/multimodal_identity.py")
+    value = text("rebuild/multimodal_identity.py") + "\n" + text("rebuild/multimodal_identity_strict.py")
     for name in (
         "NVIDIAReIDExtractor",
         "NVIDIASwinReIDExtractor",
@@ -100,7 +102,7 @@ def test_unknown_observation_alignment_is_preserved():
 def test_pending_promotion_requires_all_three_models():
     value = text("rebuild/multimodal_identity_strict.py")
     assert "self.pending_required_models = 3" in value
-    assert "score["support"] < self.pending_required_models" in value
+    assert 'score["support"] < self.pending_required_models' in value
     assert "self.pending_margin" in value
 
 

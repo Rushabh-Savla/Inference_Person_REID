@@ -180,6 +180,37 @@ class DeepStreamRuntime:
         return None
 
     @classmethod
+    def dependency_lib_dirs(cls, library):
+        if not library:
+            return []
+        try:
+            result = subprocess.run(
+                ["ldd", str(library)],
+                stdout=subprocess.PIPE,
+                stderr=subprocess.STDOUT,
+                text=True,
+                timeout=15,
+                check=False,
+            )
+        except (OSError, subprocess.SubprocessError):
+            return []
+        found = []
+        seen = set()
+        for line in result.stdout.splitlines():
+            parts = line.strip().split()
+            values = [part for part in parts if part.startswith("/")]
+            if not values:
+                continue
+            item = Path(values[0]).resolve()
+            if not item.is_file():
+                continue
+            directory = item.parent
+            key = str(directory)
+            if key not in seen:
+                seen.add(key)
+                found.append(directory)
+        return found
+    @classmethod
     def runtime_lib_dirs(cls):
         names = (
             "libnvds_meta.so",
@@ -333,6 +364,12 @@ class DeepStreamRuntime:
             os.environ["GST_PLUGIN_PATH"] = (
                 str(plugins) + (os.pathsep + current if current else "")
             )
+        for libdir in DeepStreamRuntime.dependency_lib_dirs(library):
+            current = os.environ.get("LD_LIBRARY_PATH", "")
+            os.environ["LD_LIBRARY_PATH"] = (
+                str(libdir) + (os.pathsep + current if current else "")
+            )
+
         for libdir in DeepStreamRuntime.runtime_lib_dirs():
             current = os.environ.get("LD_LIBRARY_PATH", "")
             os.environ["LD_LIBRARY_PATH"] = (

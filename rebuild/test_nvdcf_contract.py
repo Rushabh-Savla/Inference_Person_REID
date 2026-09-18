@@ -91,6 +91,19 @@ def test_active_resolver_is_strict_wrapper():
     assert "track_id" in value
 
 
+def test_unknown_observation_alignment_is_preserved():
+    value = text("rebuild/multimodal_identity_strict.py")
+    assert "for item, value in zip(obs, sets):" in value
+    assert "scores = [x for x in sets if x]" not in value
+
+
+def test_pending_promotion_requires_all_three_models():
+    value = text("rebuild/multimodal_identity_strict.py")
+    assert "self.pending_required_models = 3" in value
+    assert "score["support"] < self.pending_required_models" in value
+    assert "self.pending_margin" in value
+
+
 def test_face_and_pose_are_mandatory_runtime_components():
     value = config()
     assert value["face"]["enabled"] is True

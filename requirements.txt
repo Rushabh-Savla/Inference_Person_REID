@@ -30,7 +30,6 @@ numpy==1.26.4
 opencv-python==5.0.0.93
 PyYAML==6.0.3
 
-# InsightFace is intentionally not installed in the state-final runtime:
-# FACE is OFF, and insightface declares CPU-only `onnxruntime`, which can
-# replace the CUDA runtime package during dependency resolution.
-# Face ReID runtime: run scripts/install_face_reid.sh after this file.
+# InsightFace is intentionally installed separately because its package metadata
+# can pull plain `onnxruntime` during dependency resolution and replace the pinned
+# CUDA runtime. Face ReID runtime: run scripts/install_face_reid.sh after this file.

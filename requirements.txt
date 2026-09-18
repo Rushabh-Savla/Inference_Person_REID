@@ -19,10 +19,6 @@ tensorboard==2.21.0
 # Do NOT add plain `onnxruntime` here. Both NVIDIA ReID models and SOLIDER
 # require CUDAExecutionProvider in this final runtime.
 onnxruntime-gpu==1.28.0
-# InsightFace is installed without dependency resolution by scripts/install_face_reid.sh
-# so it cannot replace the CUDA ONNX Runtime package.
-insightface==2.0.0
-
 # --- Tracking --------------------------------------------------------------
 lap==0.5.13
 
@@ -37,3 +33,4 @@ PyYAML==6.0.3
 # InsightFace is intentionally not installed in the state-final runtime:
 # FACE is OFF, and insightface declares CPU-only `onnxruntime`, which can
 # replace the CUDA runtime package during dependency resolution.
+# Face ReID runtime: run scripts/install_face_reid.sh after this file.

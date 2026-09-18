@@ -141,7 +141,7 @@ class MultiModalStrict:
 
     @classmethod
     def faceval(cls, cur, old):
-        if not cur:
+        if not cur or not bool(cur.get("valid", False)):
             return {"used": False, "score": 0.0}
         vec = cls.unit(cur.get("vector"))
         if vec is None:
@@ -670,7 +670,8 @@ class MultiModalStrict:
             }
             if item["face"] is not None:
                 self.stats["face_observations"] += 1
-                self.stats["face_reliable"] += 1
+                if item["face"]["valid"]:
+                    self.stats["face_reliable"] += 1
             item["pose"], item["posscore"] = self.poseval(
                 poses,
                 item["row"]["bbox"],

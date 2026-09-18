@@ -293,7 +293,6 @@ class BatchNvDCF:
         print(f"[nvdcf] ResNet: {self.identity.resnet.describe()}")
         print(f"[nvdcf] Swin: {self.identity.swin.describe()}")
         print(f"[nvdcf] SOLIDER: {self.identity.solider.describe()}")
-        print(f"[nvdcf] FACE: {self.identity.face.describe()}")
         print(f"[nvdcf] POSE: {self.cfg['pose']['model']}")
         print("[nvdcf] QDRANT: ENABLED")
         print("[nvdcf] GID assignment: feature-only after overlap and one-to-one every frame")
@@ -308,8 +307,7 @@ class BatchNvDCF:
 
             debug = {
                 "tracker": "NVIDIA NvDCF",
-                "identity": "Qdrant + reliable face + top clothing + bottom clothing + NVIDIA ResNet + NVIDIA Swin + SOLIDER + pose",
-                "face_visibility_threshold": float(self.identity.face_threshold),
+                "identity": "Qdrant + top clothing + bottom clothing + NVIDIA ResNet + NVIDIA Swin + SOLIDER + pose",
                 "post_overlap_identity": "feature_only",
                 "tracker_id_global_fallback": False,
                 "same_frame_gid_invariant": True,

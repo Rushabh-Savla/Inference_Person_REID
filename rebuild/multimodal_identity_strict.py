@@ -3,7 +3,7 @@ from __future__ import annotations
 from types import SimpleNamespace
 
 import numpy as np
-from scipy.optimize import linear_sum_assignment
+from rebuild.assignment_guard import solve
 
 from rebuild.identity_v2 import crop, quality
 from rebuild.face_v4 import FaceExtractorV4
@@ -604,78 +604,29 @@ class MultiModalStrict:
 
     def assign(self, obs, sets, commit=True, recovery=False):
         count = len(obs)
-        gids = sorted(self.pro)
         if count == 0:
             return []
 
-        floor = float(self.icfg.get("dummy_floor", 0.35))
-        banned = set()
-
-        # Assignment is solved globally, then any rejected pair is banned and
-        # Hungarian is rerun so its observation can compete for its next-best
-        # identity. This avoids a locally rejected match poisoning the whole row.
-        while True:
-            cols = len(gids) + count
-            mat = np.full((count, cols), floor, np.float32)
-            for i, rows in enumerate(sets):
-                for j, gid in enumerate(gids):
-                    if (i, gid) in banned:
-                        continue
-                    item = rows.get(gid)
-                    if item is not None:
-                        mat[i, j] = float(item["score"])
-
-            rr, cc = linear_sum_assignment(-mat)
-            chosen = {}
-            for i, j in zip(rr.tolist(), cc.tolist()):
-                if j < len(gids) and mat[i, j] > floor:
-                    chosen[int(i)] = int(gids[j])
-
-            rejected = []
-            for i, gid in chosen.items():
-                item = sets[i].get(gid)
-                if item is None:
-                    rejected.append((i, gid))
-                    continue
-
-                used_elsewhere = {
-                    other
-                    for row, other in chosen.items()
-                    if row != i
-                }
-                alternatives = [
-                    float(value["score"])
-                    for other_gid, value in sets[i].items()
-                    if int(other_gid) != int(gid)
-                    and int(other_gid) not in used_elsewhere
-                    and (i, int(other_gid)) not in banned
-                ]
-                second = max(alternatives, default=0.0)
-                if not self.accept(item, second, recovery=recovery):
-                    rejected.append((i, gid))
-
-            if not rejected:
-                break
-
-            before = len(banned)
-            banned.update((int(i), int(gid)) for i, gid in rejected)
-            if len(banned) == before:
-                break
+        chosen = solve(
+            sets,
+            lambda item, second: self.accept(item, second, recovery=recovery),
+            floor=float(self.icfg.get("dummy_floor", 0.35)),
+        )
 
         out = ["PENDING"] * count
         used = set()
         matched = {}
 
-        for i, gid in chosen.items():
+        for i, gid in sorted(chosen.items()):
             if gid in used:
                 self.stats["duplicate"] += 1
                 continue
             used.add(gid)
-            matched[i] = gid
-            out[i] = f"G{gid:06d}"
+            matched[int(i)] = int(gid)
+            out[int(i)] = f"G{int(gid):06d}"
 
-        # New-ID admission happens only after all existing identities have had
-        # their chance. Recovery never creates a new GID.
+        # Existing identities are always tested before new-ID admission.
+        # Recovery mode is deliberately unable to create a new identity.
         if not recovery and commit:
             for i in range(count):
                 if out[i] != "PENDING":
@@ -683,20 +634,24 @@ class MultiModalStrict:
                 gid = self.stage_new(obs[i])
                 if gid is None:
                     continue
-                label = f"G{gid:06d}"
-                if label in used:
-                    continue
-                used.add(label)
-                out[i] = label
+                label = f"G{int(gid):06d}"
+                if label not in used:
+                    used.add(label)
+                    out[i] = label
 
         if commit:
             for i, gid in matched.items():
-                if out[i] != "PENDING":
-                    self.save(gid, obs[i])
-                    if recovery:
-                        self.stats["recovery_match"] += 1
-                    if len(self.pro[gid]["camera"]) > 1:
-                        self.stats["cross"] += 1
+                if out[i] == "PENDING":
+                    continue
+                item = sets[i].get(int(gid))
+                if item is None:
+                    continue
+                self.save(gid, obs[i])
+                if recovery:
+                    self.stats["recovery_match"] += 1
+                if len(self.pro[gid]["camera"]) > 1:
+                    self.stats["cross"] += 1
+
         return out
 
     def observe(self, frame, rows, commit=True, recovery=False):

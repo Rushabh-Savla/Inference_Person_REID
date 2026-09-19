@@ -8,8 +8,6 @@ import numpy as np
 
 from rebuild.overlap_guard import carry, merge
 
-from rebuild.multimodal_identity import MultiModal
-from rebuild.nvdcf_tracker import NvDCF
 
 
 class BatchNvDCF:
@@ -20,6 +18,8 @@ class BatchNvDCF:
 
         with open(config_path, "r", encoding="utf-8") as handle:
             self.cfg = yaml.safe_load(handle) or {}
+        from rebuild.multimodal_identity import MultiModal
+        from rebuild.nvdcf_tracker import NvDCF
         self.out = Path(self.cfg["input"]["output_dir"])
         self.out.mkdir(parents=True, exist_ok=True)
         self.cache = self.out / "cache_nvdcf"

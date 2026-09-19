@@ -94,6 +94,7 @@ class MultiModalStrict:
             "face_observations": 0,
             "face_reliable": 0,
             "qdrant_retrievals": 0,
+            "memory_reject": 0,
         }
 
     @staticmethod
@@ -363,8 +364,63 @@ class MultiModalStrict:
             and face_ok
         )
 
+    def _memory_ok(self, gid, obs):
+        prof = self.pro.get(int(gid))
+        if not prof or not prof.get("resnet"):
+            return True
+
+        checks = {}
+        for name in self.models:
+            checks[name] = self.best(
+                [obs[name]],
+                prof.get(name, [])[-24:],
+            )
+
+        attrs = self.attr(
+            obs["attributes"],
+            prof.get("attributes", [])[-24:],
+        )
+        if attrs is None:
+            return False
+
+        deep = (
+            0.25 * checks["resnet"]
+            + 0.40 * checks["swin"]
+            + 0.35 * checks["solider"]
+        )
+        top = float(attrs["top"])
+        bottom = float(attrs["bottom"])
+
+        # Long-term memory updates are stricter than frame assignment. This
+        # protects a stable identity from a single contaminated/occluded crop.
+        required = int(self.icfg.get("memory_required_models", 2))
+        support = sum(
+            float(checks[name]) >= float(self.icfg.get("memory_model_min", 0.52))
+            for name in self.models
+        )
+        if support < required:
+            return False
+        if deep < float(self.icfg.get("memory_deep_min", 0.56)):
+            return False
+        if top < float(self.icfg.get("memory_top_min", 0.50)):
+            return False
+        if bottom < float(self.icfg.get("memory_bottom_min", 0.50)):
+            return False
+
+        current_face = obs.get("face")
+        stored_face = prof.get("face", [])
+        if current_face is not None and current_face.get("valid") and stored_face:
+            face_score = self.faceval(current_face, stored_face)["score"]
+            if face_score < float(self.icfg.get("memory_face_min", 0.65)):
+                return False
+        return True
+
     def save(self, gid, obs):
         gid = int(gid)
+        if not self._memory_ok(gid, obs):
+            self.stats["memory_reject"] = self.stats.get("memory_reject", 0) + 1
+            return
+
         prof = self.pro[gid]
         for model in self.models:
             prof[model].append(np.asarray(obs[model], np.float32))

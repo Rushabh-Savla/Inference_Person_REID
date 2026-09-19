@@ -8,11 +8,7 @@ services:
       - "6334:6334"
     volumes:
       - ./qdrant_storage:/qdrant/storage
-    healthcheck:
-      test: ["CMD-SHELL", "bash -c '</dev/tcp/127.0.0.1/6333'"]
-      interval: 5s
-      timeout: 3s
-      retries: 20
+
 
   reid:
     build:
@@ -20,8 +16,7 @@ services:
       dockerfile: Dockerfile
     container_name: person-reid-nvdcf
     depends_on:
-      qdrant:
-        condition: service_healthy
+      - qdrant
     network_mode: host
     gpus: all
     ipc: host

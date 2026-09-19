@@ -75,7 +75,11 @@ def main():
     import torch
     if not torch.cuda.is_available():
         raise RuntimeError("PyTorch cannot see CUDA")
+    cudnn = torch.backends.cudnn.version()
+    if cudnn != 92000:
+        raise RuntimeError(f"PyTorch cuDNN mismatch: expected 92000, found {cudnn}")
     print("[verify] PyTorch CUDA: OK")
+    print("[verify] PyTorch cuDNN:", cudnn)
 
     import yaml
     cfg = yaml.safe_load((ROOT / "rebuild/config_state_invariant.yaml").read_text())

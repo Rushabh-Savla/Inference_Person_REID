@@ -46,3 +46,4 @@ jobs:
           rebuild/test_assignment_guard.py
           rebuild/test_overlap_guard.py
           rebuild/test_docker_contract.py
+          rebuild/test_reid_strict_invariants.py

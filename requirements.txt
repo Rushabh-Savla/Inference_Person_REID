@@ -30,6 +30,6 @@ numpy==1.26.4
 opencv-python==5.0.0.93
 PyYAML==6.0.3
 
-# InsightFace is intentionally installed separately because its package metadata
-# can pull plain `onnxruntime` during dependency resolution and replace the pinned
-# CUDA runtime. Face ReID runtime: run scripts/install_face_reid.sh after this file.
+# InsightFace 2.0 is installed separately with --no-deps in the DeepStream Docker image
+# so its metadata cannot replace onnxruntime-gpu. The host runtime previously validated
+# SCRFD + ArcFace + buffalo_l under InsightFace 2.0.

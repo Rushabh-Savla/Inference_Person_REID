@@ -6,7 +6,7 @@ ENV PYTHONUNBUFFERED=1
 ENV NVIDIA_VISIBLE_DEVICES=all
 ENV NVIDIA_DRIVER_CAPABILITIES=compute,utility,video,graphics
 
-RUN apt-get update && apt-get install -y --no-install-recommends     python3-pip     python3-dev     python3-gi     python3-gst-1.0     gir1.2-gstreamer-1.0     gstreamer1.0-libav     libvpx9     ffmpeg     git     curl     pkg-config     libglib2.0-0     libsm6     libxext6     libxrender1     libgomp1     && rm -rf /var/lib/apt/lists/*
+RUN apt-get update && apt-get install -y --no-install-recommends     python3-pip     python3-dev     python3-gi     python3-gst-1.0     gir1.2-gstreamer-1.0     gstreamer1.0-libav     libvpx9     libmp3lame0     ffmpeg     git     curl     pkg-config     libglib2.0-0     libsm6     libxext6     libxrender1     libgomp1     && rm -rf /var/lib/apt/lists/*
 
 # DeepStream 8.0 on CPython 3.12 needs matching NVIDIA PyDS.
 # Prefer an SDK-shipped wheel; otherwise install NVIDIA's official 1.2.2 wheel.
@@ -40,7 +40,11 @@ RUN python3 -m pip install --upgrade pip setuptools wheel --ignore-installed && 
 COPY docker/requirements-extra.txt /tmp/reid-extra.txt
 RUN python3 -m pip install --no-cache-dir -r /tmp/reid-extra.txt --constraint /tmp/reid-requirements.txt
 
-RUN gst-inspect-1.0 avdec_mpeg4 >/dev/null && \
+RUN GST_PLUGIN_SYSTEM_PATH_1_0=/usr/lib/x86_64-linux-gnu/gstreamer-1.0 \
+    GST_PLUGIN_PATH_1_0=/usr/lib/x86_64-linux-gnu/gstreamer-1.0 \
+    gst-inspect-1.0 avdec_mpeg4 >/dev/null && \
+    GST_PLUGIN_SYSTEM_PATH_1_0=/usr/lib/x86_64-linux-gnu/gstreamer-1.0 \
+    GST_PLUGIN_PATH_1_0=/usr/lib/x86_64-linux-gnu/gstreamer-1.0 \
     gst-inspect-1.0 avdec_h264 >/dev/null && \
     echo "[docker] GStreamer software decoders: MPEG-4/H.264 OK"
 

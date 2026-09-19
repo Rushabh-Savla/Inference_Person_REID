@@ -55,8 +55,10 @@ class DeepStreamRuntime:
             Path("/opt/nvidia"),
             Path("/usr/local/nvidia"),
             Path("/usr/local"),
+            Path.home() / "face_recognition_system",
             Path.home() / "deepstream",
             Path.home() / ".local/share",
+            Path(os.environ.get("VIRTUAL_ENV", "")),
         ):
             if not base.exists():
                 continue

@@ -39,6 +39,10 @@ RUN python3 -m pip install --upgrade pip setuptools wheel --ignore-installed && 
 COPY docker/requirements-extra.txt /tmp/reid-extra.txt
 RUN python3 -m pip install --no-cache-dir -r /tmp/reid-extra.txt --constraint /tmp/reid-requirements.txt
 
+# Install InsightFace after the CUDA runtime dependencies are resolved.
+# --no-deps preserves onnxruntime-gpu as the single ONNX Runtime distribution.
+RUN python3 -m pip install --no-cache-dir --no-deps insightface==2.0
+
 RUN set -eux; \
     missing="$(ldd /usr/lib/x86_64-linux-gnu/gstreamer-1.0/libgstlibav.so | grep 'not found' || true)"; \
     test -z "$missing"; \

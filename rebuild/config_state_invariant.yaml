@@ -34,7 +34,7 @@ identity_state:
   qdrant_path: qdrant_storage_nvdcf_strict_v3
   qdrant_prefix: person_reid_nvdcf_strict_v4
   qdrant_limit: 32
-  qdrant_url: http://127.0.0.1:6333
+  qdrant_url: ${QDRANT_URL:http://127.0.0.1:6335}
 
 identity:
   interval: 1

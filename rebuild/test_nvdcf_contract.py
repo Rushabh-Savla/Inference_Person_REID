@@ -43,12 +43,13 @@ def test_global_assignment_is_feature_first_and_one_to_one():
     batch = text("rebuild/batch_nvdcf.py")
     assert "linear_sum_assignment" in guard
     assert "self.identity.observe" in batch
-    assert "carry(" in batch
+    assert "carry(" not in batch
     assert "recovery=True" in batch
     assert "feature-only" in batch.lower()
     assert "tracker_id_global_fallback" not in batch
     assert 'feature_map.get(int(item["track_id"]), "PENDING")' in batch
     assert 'if active_overlap:' in batch
+    assert 'identity_source\": \"multimodal_qdrant\"' in batch
     assert 'gids = {' in batch
 
 

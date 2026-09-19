@@ -3,11 +3,16 @@ services:
     image: qdrant/qdrant:v1.19.1
     container_name: person-reid-qdrant
     restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "bash", "-lc", "curl -fsS http://127.0.0.1:6333/readyz >/dev/null"]
+      interval: 2s
+      timeout: 2s
+      retries: 30
     ports:
       - "6333:6333"
       - "6334:6334"
     volumes:
-      - ./qdrant_storage:/qdrant/storage
+      - qdrant_data:/qdrant/storage
 
 
   reid:
@@ -16,11 +21,12 @@ services:
       dockerfile: Dockerfile
     container_name: person-reid-nvdcf
     depends_on:
-      - qdrant
+      qdrant:
+        condition: service_healthy
     network_mode: host
     gpus: all
     ipc: host
-    shm_size: "4gb"
+    shm_size: "8gb"
     privileged: true
     environment:
       NVIDIA_VISIBLE_DEVICES: all
@@ -36,3 +42,7 @@ services:
     working_dir: /workspace/inference_person_reid
     stdin_open: true
     tty: true
+
+
+volumes:
+  qdrant_data:

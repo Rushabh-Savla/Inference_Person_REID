@@ -25,21 +25,25 @@ def merge(tracked, detections, frame: int, minimum: float = 0.20):
 
     if not tracked:
         matched = set()
+        collapse_rows = set()
         result = []
     else:
         matrix = np.asarray(
             [[iou(det["bbox"], item["bbox"]) for item in tracked] for det in detections],
             dtype=np.float32,
         )
-        # If multiple detector boxes substantially overlap one NvDCF box,
-        # that tracker observation is an occlusion-collapse result. Do not feed
-        # the mixed crop into identity resolution; preserve each detector box as
-        # an independent shadow observation instead.
         ambiguous_cols = {
             int(col)
             for col in range(matrix.shape[1])
             if int(np.sum(matrix[:, col] >= float(minimum))) >= 2
         }
+        collapse_rows = {
+            int(row)
+            for row in range(matrix.shape[0])
+            for col in ambiguous_cols
+            if float(matrix[row, col]) >= float(minimum)
+        }
+
         keep_cols = [
             col for col in range(matrix.shape[1])
             if col not in ambiguous_cols
@@ -60,6 +64,7 @@ def merge(tracked, detections, frame: int, minimum: float = 0.20):
     for index, item in enumerate(detections):
         if index in matched:
             continue
+        reason = "collapse" if index in collapse_rows else "untracked"
         result.append(
             {
                 "camera": str(item["camera"]),
@@ -70,6 +75,7 @@ def merge(tracked, detections, frame: int, minimum: float = 0.20):
                 "detection_score": float(item.get("detection_score", 0.0)),
                 "tracker_confidence": 0.0,
                 "shadow": True,
+                "shadow_reason": reason,
             }
         )
     return result

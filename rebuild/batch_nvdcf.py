@@ -359,8 +359,6 @@ class BatchNvDCF:
                         "recovery": bool(recovery_mode),
                     })
 
-                if not active_overlap:
-                    last_gids = dict(gids)
                 previous_overlap = set(active_overlap)
         finally:
             cap.release()

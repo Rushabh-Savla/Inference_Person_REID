@@ -41,7 +41,7 @@ COPY docker/requirements-extra.txt /tmp/reid-extra.txt
 RUN python3 -m pip install --no-cache-dir -r /tmp/reid-extra.txt --constraint /tmp/reid-requirements.txt
 
 RUN set -eux; \
-    test -z "$(ldd /usr/lib/x86_64-linux-gnu/gstreamer-1.0/libgstlibav.so | grep \\x27not found\\x27 || true)"; \
+    test -z "$(ldd /usr/lib/x86_64-linux-gnu/gstreamer-1.0/libgstlibav.so | grep "not found" || true)"; \
     GST_PLUGIN_SYSTEM_PATH_1_0=/usr/lib/x86_64-linux-gnu/gstreamer-1.0 \
     GST_PLUGIN_PATH=/usr/lib/x86_64-linux-gnu/gstreamer-1.0 \
     GST_PLUGIN_PATH_1_0=/usr/lib/x86_64-linux-gnu/gstreamer-1.0 \

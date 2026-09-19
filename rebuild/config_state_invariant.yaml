@@ -80,7 +80,7 @@ face:
   min_size: 28
   min_quality: 0.50
   min_visibility: 0.68
-  face_weight: 0.46
+  face_weight: 0.70
   min_similarity: 0.60
 
 pose:

@@ -369,18 +369,23 @@ class NvDCF:
             )
 
         pipeline = Gst.Pipeline.new(f"nvdcf_{camera}")
+        feature = None
+        feature_rank = None
         if software:
             feature = Gst.Registry.get().lookup_feature("nvv4l2decoder")
             if feature is not None:
+                feature_rank = feature.get_rank()
                 feature.set_rank(Gst.Rank.NONE)
 
         source = Gst.ElementFactory.make("uridecodebin", f"source_{camera}")
+        preconv = Gst.ElementFactory.make("nvvideoconvert", f"preconv_{camera}")
+        prefilter = Gst.ElementFactory.make("capsfilter", f"prefilter_{camera}")
         mux = Gst.ElementFactory.make("nvstreammux", f"mux_{camera}")
         conv = Gst.ElementFactory.make("nvvideoconvert", f"conv_{camera}")
         filt = Gst.ElementFactory.make("capsfilter", f"caps_{camera}")
         tracker = Gst.ElementFactory.make("nvtracker", f"tracker_{camera}")
         sink = Gst.ElementFactory.make("fakesink", f"sink_{camera}")
-        elems = (source, mux, conv, filt, tracker, sink)
+        elems = (source, preconv, prefilter, mux, conv, filt, tracker, sink)
         if any(x is None for x in elems):
             raise RuntimeError("DeepStream elements for NvDCF could not be created")
 
@@ -392,6 +397,10 @@ class NvDCF:
         mux.set_property("live-source", 0)
         mux.set_property("enable-padding", 0)
 
+        prefilter.set_property(
+            "caps",
+            Gst.Caps.from_string("video/x-raw(memory:NVMM),format=NV12"),
+        )
         filt.set_property(
             "caps",
             Gst.Caps.from_string("video/x-raw(memory:NVMM),format=RGBA"),
@@ -411,9 +420,14 @@ class NvDCF:
         sinkpad = mux.get_request_pad("sink_0")
         if sinkpad is None:
             raise RuntimeError("NvDCF could not request nvstreammux sink_0")
-        source.connect("pad-added", self._pad, sinkpad)
+        source_sink = preconv.get_static_pad("sink")
+        if source_sink is None:
+            raise RuntimeError("NvDCF could not access decode upload sink")
+        source.connect("pad-added", self._pad, source_sink)
         if (
-            not mux.link(conv)
+            not preconv.link(prefilter)
+            or not prefilter.link(mux)
+            or not mux.link(conv)
             or not conv.link(filt)
             or not filt.link(tracker)
             or not tracker.link(sink)
@@ -557,6 +571,8 @@ class NvDCF:
             pipeline.set_state(Gst.State.NULL)
             handle.close()
             det_handle.close()
+            if feature is not None and feature_rank is not None:
+                feature.set_rank(feature_rank)
 
         if state["error"]:
             raise RuntimeError(f"NvDCF failed for {camera}: {state['error']}")

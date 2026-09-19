@@ -306,10 +306,10 @@ class MultiModalStrict:
             # modalities still participate as corroborating evidence.
             face_conf = float(face["score"]) * (0.75 + 0.25 * faceq)
             value = (
-                0.62 * face_conf
-                + 0.20 * float(deep)
-                + 0.07 * float(top)
-                + 0.07 * float(bot)
+                0.70 * face_conf
+                + 0.16 * float(deep)
+                + 0.05 * float(top)
+                + 0.05 * float(bot)
                 + 0.03 * float(pose)
                 + 0.01 * float(pattern)
             )

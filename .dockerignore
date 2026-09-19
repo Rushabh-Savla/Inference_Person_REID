@@ -1,0 +1,9 @@
+.git
+.git/**
+qdrant_storage*
+identity_state*
+rebuild_outputs*
+recordings*
+__pycache__/**
+*.pyc
+*.log

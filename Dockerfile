@@ -41,9 +41,11 @@ COPY docker/requirements-extra.txt /tmp/reid-extra.txt
 RUN python3 -m pip install --no-cache-dir -r /tmp/reid-extra.txt --constraint /tmp/reid-requirements.txt
 
 RUN GST_PLUGIN_SYSTEM_PATH_1_0=/usr/lib/x86_64-linux-gnu/gstreamer-1.0 \
+    GST_PLUGIN_PATH=/usr/lib/x86_64-linux-gnu/gstreamer-1.0 \
     GST_PLUGIN_PATH_1_0=/usr/lib/x86_64-linux-gnu/gstreamer-1.0 \
     gst-inspect-1.0 avdec_mpeg4 >/dev/null && \
     GST_PLUGIN_SYSTEM_PATH_1_0=/usr/lib/x86_64-linux-gnu/gstreamer-1.0 \
+    GST_PLUGIN_PATH=/usr/lib/x86_64-linux-gnu/gstreamer-1.0 \
     GST_PLUGIN_PATH_1_0=/usr/lib/x86_64-linux-gnu/gstreamer-1.0 \
     gst-inspect-1.0 avdec_h264 >/dev/null && \
     echo "[docker] GStreamer software decoders: MPEG-4/H.264 OK"

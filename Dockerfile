@@ -21,11 +21,12 @@ RUN set -eux; \
         fi; \
     done; \
     if [ "$found" -eq 0 ]; then \
+        wheel=/tmp/pyds-1.2.2-cp312-cp312-linux_x86_64.whl; \
         curl -fL --retry 3 --retry-delay 2 \
           https://github.com/NVIDIA-AI-IOT/deepstream_python_apps/releases/download/v1.2.2/pyds-1.2.2-cp312-cp312-linux_x86_64.whl \
-          -o /tmp/pyds-1.2.2-cp312-cp312-linux_x86_64.whl; \
-        python3 -m pip install --no-deps /tmp/pyds.whl; \
-        rm -f /tmp/pyds.whl; \
+          -o "$wheel"; \
+        python3 -m pip install --no-deps "$wheel"; \
+        rm -f "$wheel"; \
     fi
 
 WORKDIR /workspace/inference_person_reid

@@ -622,8 +622,18 @@ class MultiModalStrict:
         # Existing identities are always tested before new-ID admission.
         # Recovery mode is deliberately unable to create a new identity.
         if not recovery and commit:
+            guard = float(self.icfg.get("new_existing_guard", 0.50))
             for i in range(count):
                 if out[i] != "PENDING":
+                    continue
+                best_existing = max(
+                    (float(value["score"]) for value in sets[i].values()),
+                    default=0.0,
+                )
+                # A new GID is forbidden while any established identity is
+                # reasonably similar. This prevents tracker changes or noisy
+                # crops from creating duplicate permanent identities.
+                if best_existing >= guard:
                     continue
                 gid = self.stage_new(obs[i])
                 if gid is None:

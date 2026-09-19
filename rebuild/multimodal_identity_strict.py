@@ -23,6 +23,7 @@ class MultiModalStrict:
         from src.live.persistent_multimodel import PersistentMultimodelRegistry
         from src.live.qdrant_gallery import QdrantGallery
         from ultralytics import YOLO
+        self.pack = pack
         self.cfg = cfg
         self.rcfg = cfg["reid"]
         self.mcfg = cfg["cross_camera_models"]
@@ -802,7 +803,7 @@ class MultiModalStrict:
             item["swin"] = np.asarray(swin[vi], np.float32)
             item["solider"] = np.asarray(solider[vi], np.float32)
             item["attributes"] = np.asarray(
-                pack(item["person"], frame, item["row"]["bbox"]),
+                self.pack(item["person"], frame, item["row"]["bbox"]),
                 np.float32,
             )
             face = self.face.extract(item["person"])

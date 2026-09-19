@@ -183,7 +183,13 @@ class BatchNvDCF:
                         f"NvDCF emitted duplicate tracker IDs in one frame: {camera}:{frame}:{tids}"
                     )
 
-                active_overlap = self._overlap_ids(current)
+                geometric_overlap = self._overlap_ids(current)
+                collapse_overlap = {
+                    int(item["track_id"])
+                    for item in current
+                    if str(item.get("shadow_reason", "")) == "collapse"
+                }
+                active_overlap = geometric_overlap | collapse_overlap
                 if previous_overlap - active_overlap:
                     recovery_until = max(recovery_until, frame + recovery_frames)
                 recovery_mode = frame <= recovery_until

@@ -12,6 +12,8 @@ def test_docker_stack_is_deepstream_and_qdrant():
     assert "gpus: all" in compose
     assert "QDRANT_URL: http://127.0.0.1:6333" in compose
     assert "/opt/nvidia/deepstream/deepstream/lib/libnvds_nvmultiobjecttracker.so" in compose
+    assert "qdrant_data:/qdrant/storage" in compose
+    assert "shm_size: \"8gb\"" in compose
 
 
 def test_container_runtime_is_strict():
@@ -28,3 +30,11 @@ def test_qdrant_client_supports_remote_service():
     assert 'QDRANT_URL' in value
     assert 'QdrantClient(' in value
     assert 'url=self.url' in value
+
+def test_one_command_runner_is_present():
+    runner = (ROOT / "scripts/run_docker_reid.sh").read_text(encoding="utf-8")
+    assert "docker compose up -d qdrant" in runner
+    assert "docker compose build reid" in runner
+    assert "verify_reid_runtime.py" in runner
+    assert "batch_state_final" in runner
+    assert "_live_src_cam_219.mp4" in runner

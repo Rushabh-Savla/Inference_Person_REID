@@ -218,10 +218,33 @@ class BatchNvDCF:
         recovery_frames = max(1, int(self.cfg["identity"].get("recovery_frames", 10)))
         labels = []
         previous_overlap = set()
-        last_gids = {}
-        overlap_anchors = {}
+        last_clean = []
+        overlap_anchors = []
         recovery_until = -1
         frame = 0
+
+        def carry(rows, anchors, gids_used):
+            if not rows or not anchors:
+                return {}
+            matrix = []
+            for row in rows:
+                values = []
+                for anchor in anchors:
+                    values.append(self._metrics(row["bbox"], anchor["bbox"])[0])
+                matrix.append(values)
+            rr, cc = linear_sum_assignment(-np.asarray(matrix, dtype=np.float32))
+            output = {}
+            for r, col in zip(rr.tolist(), cc.tolist()):
+                gid = str(anchors[col]["gid"])
+                score = float(matrix[r][col])
+                if (
+                    score >= 0.15
+                    and gid.startswith("G")
+                    and gid not in gids_used
+                ):
+                    output[int(r)] = gid
+                    gids_used.add(gid)
+            return output
 
         try:
             while True:
@@ -244,62 +267,65 @@ class BatchNvDCF:
                     recovery_until = max(recovery_until, frame + recovery_frames)
                 recovery_mode = frame <= recovery_until
 
-                # Every overlap frame still runs the complete feature stack, but
-                # its assignments are quarantined. Nothing learned from a
-                # mixed/occluded crop is committed to the identity gallery.
-                #
-                # After overlap, recovery=True forces feature-only identity
-                # assignment. NvDCF track_id is never used to choose the GID.
                 feature_map = self.identity.observe(
                     image,
                     current,
                     commit=not bool(active_overlap),
                     recovery=bool(active_overlap) or recovery_mode,
                 )
+
+                gids = {
+                    int(item["track_id"]): str(
+                        feature_map.get(int(item["track_id"]), "PENDING")
+                    )
+                    for item in current
+                }
+
+                # During the actual overlap only, a prior clean identity can be
+                # carried by spatial continuity. This is temporary occlusion
+                # bookkeeping, not tracker-ID -> GID conversion. Any identity
+                # surviving past the overlap must be re-established by the
+                # multimodal feature matcher.
                 if active_overlap:
-                    # Keep the last clean, feature-resolved identities visible
-                    # during the overlap. These anchors are temporary display/
-                    # bookkeeping only: they are never written to identity memory
-                    # and are never used after the overlap ends.
-                    if not previous_overlap:
-                        overlap_anchors = {
-                            int(item["track_id"]): str(
-                                last_gids.get(int(item["track_id"]), "PENDING")
-                            )
-                            for item in current
-                            if int(item["track_id"]) in active_overlap
+                    used = {
+                        value for value in gids.values()
+                        if value.startswith("G")
+                    }
+                    if not overlap_anchors:
+                        overlap_anchors = list(last_clean)
+
+                    indices = [
+                        index for index, item in enumerate(current)
+                        if gids[int(item["track_id"])] == "PENDING"
+                    ]
+                    subset = [current[index] for index in indices]
+                    carried = carry(subset, overlap_anchors, used)
+                    for local, gid in carried.items():
+                        tid = int(subset[local]["track_id"])
+                        gids[tid] = gid
+
+                    overlap_anchors = [
+                        {
+                            "bbox": item["bbox"],
+                            "gid": gids[int(item["track_id"])],
                         }
-                    anchor_used = {
-                        value
-                        for value in overlap_anchors.values()
-                        if str(value).startswith("G")
-                    }
-                    for item in current:
-                        tid = int(item["track_id"])
-                        if tid in overlap_anchors and str(overlap_anchors[tid]).startswith("G"):
-                            continue
-                        candidate = str(
-                            feature_map.get(tid, "PENDING")
-                        )
-                        if candidate.startswith("G") and candidate not in anchor_used:
-                            overlap_anchors[tid] = candidate
-                            anchor_used.add(candidate)
-                        else:
-                            overlap_anchors[tid] = "PENDING"
-                    gids = {
-                        int(item["track_id"]): str(
-                            overlap_anchors.get(int(item["track_id"]), "PENDING")
-                        )
                         for item in current
-                    }
+                        if gids[int(item["track_id"])].startswith("G")
+                    ]
                 else:
-                    gids = {
-                        int(item["track_id"]): str(
-                            feature_map.get(int(item["track_id"]), "PENDING")
-                        )
+                    overlap_anchors = []
+
+                if active_overlap:
+                    pass
+                else:
+                    last_clean = [
+                        {
+                            "bbox": item["bbox"],
+                            "gid": gids[int(item["track_id"])],
+                        }
                         for item in current
-                    }
-                    overlap_anchors = {}
+                        if gids[int(item["track_id"])].startswith("G")
+                    ]
 
                 # Hard same-frame collision invariant. Re-solve the whole frame
                 # with feature-only recovery, then keep any unresolved collision

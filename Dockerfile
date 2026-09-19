@@ -46,10 +46,12 @@ RUN python3 -m pip install --no-cache-dir --no-deps insightface==2.0
 RUN set -eux; \
     missing="$(ldd /usr/lib/x86_64-linux-gnu/gstreamer-1.0/libgstlibav.so | grep 'not found' || true)"; \
     test -z "$missing"; \
+    GST_REGISTRY=/tmp/reid-gst-registry.bin \
     GST_PLUGIN_SYSTEM_PATH_1_0=/usr/lib/x86_64-linux-gnu/gstreamer-1.0 \
     GST_PLUGIN_PATH=/usr/lib/x86_64-linux-gnu/gstreamer-1.0 \
     GST_PLUGIN_PATH_1_0=/usr/lib/x86_64-linux-gnu/gstreamer-1.0 \
     gst-inspect-1.0 avdec_mpeg4 >/dev/null; \
+    GST_REGISTRY=/tmp/reid-gst-registry.bin \
     GST_PLUGIN_SYSTEM_PATH_1_0=/usr/lib/x86_64-linux-gnu/gstreamer-1.0 \
     GST_PLUGIN_PATH=/usr/lib/x86_64-linux-gnu/gstreamer-1.0 \
     GST_PLUGIN_PATH_1_0=/usr/lib/x86_64-linux-gnu/gstreamer-1.0 \

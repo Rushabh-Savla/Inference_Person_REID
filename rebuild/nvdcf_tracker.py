@@ -353,6 +353,10 @@ class NvDCF:
         twidth = max(32, (twidth + 31) // 32 * 32)
         theight = max(32, (theight + 31) // 32 * 32)
 
+        # DeepStream's hardware decoder path on this GPU rejects frames
+        # larger than 2048x2048. Force software decode for such sources,
+        # then continue through the same NvDCF pipeline after upload to NVMM.
+        software = max(width, height) > 2048
         if not self.library:
             raise RuntimeError(
                 "NvDCF low-level library not found. Install DeepStream "
@@ -365,6 +369,11 @@ class NvDCF:
             )
 
         pipeline = Gst.Pipeline.new(f"nvdcf_{camera}")
+        if software:
+            feature = Gst.Registry.get().lookup_feature("nvv4l2decoder")
+            if feature is not None:
+                feature.set_rank(Gst.Rank.NONE)
+
         source = Gst.ElementFactory.make("uridecodebin", f"source_{camera}")
         mux = Gst.ElementFactory.make("nvstreammux", f"mux_{camera}")
         conv = Gst.ElementFactory.make("nvvideoconvert", f"conv_{camera}")

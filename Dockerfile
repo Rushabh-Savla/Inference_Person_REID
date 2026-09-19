@@ -12,7 +12,7 @@ WORKDIR /workspace/inference_person_reid
 
 COPY requirements.txt /tmp/reid-requirements.txt
 
-RUN python3 -m pip install --upgrade pip setuptools wheel &&     python3 -m pip install --no-cache-dir -r /tmp/reid-requirements.txt &&     python3 -m pip uninstall -y onnxruntime >/dev/null 2>&1 || true &&     python3 -m pip install --no-cache-dir --no-deps insightface==0.7.3
+RUN python3 -m pip install --upgrade pip setuptools wheel &&     python3 -m pip install --no-cache-dir -r /tmp/reid-requirements.txt &&     python3 -m pip uninstall -y onnxruntime >/dev/null 2>&1 || true &&     python3 -m pip install --no-cache-dir --no-deps insightface==2.0
 
 COPY docker/requirements-extra.txt /tmp/reid-extra.txt
 RUN python3 -m pip install --no-cache-dir -r /tmp/reid-extra.txt

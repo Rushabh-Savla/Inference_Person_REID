@@ -67,6 +67,8 @@ class MultiModalStrict:
             str(state["qdrant_path"]),
             str(state.get("qdrant_prefix", "person_reid")),
             int(state.get("qdrant_limit", 32)),
+            url=state.get("qdrant_url"),
+            api_key=state.get("qdrant_api_key"),
         )
         self.pro = self.load()
         self.pending = []

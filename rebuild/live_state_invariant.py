@@ -13,9 +13,7 @@ from typing import Dict
 
 import yaml
 
-from rebuild.batch_state_invariant_joint_attributes import (
-    BatchPipelineStateInvariantJointAttributes,
-)
+from rebuild.batch_nvdcf import BatchNvDCF
 
 
 class Camera(threading.Thread):
@@ -281,7 +279,7 @@ def run_live_state(cfg_path: str, sources: Dict[str, str], output_dir: str | Non
 
     try:
         print("[live-state] RECONCILE: NVIDIA NvDCF + Qdrant + face + top/bottom clothing + ReID + pose")
-        BatchPipelineStateInvariantJointAttributes(temp).run(paths)
+        BatchNvDCF(temp).run(paths)
     finally:
         Path(temp).unlink(missing_ok=True)
 

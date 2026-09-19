@@ -6,7 +6,7 @@ from pathlib import Path
 import cv2
 import numpy as np
 
-from rebuild.overlap_guard import carry, merge
+from rebuild.overlap_guard import merge
 
 from rebuild.multimodal_identity import MultiModal
 from rebuild.nvdcf_tracker import NvDCF
@@ -138,9 +138,27 @@ class BatchNvDCF:
             writer.release()
         return output
 
+    def _frame_gids(self, current, feature_map):
+        """Resolve a frame strictly from feature scores; tracker IDs are keys only."""
+        return {
+            int(item["track_id"]): str(
+                feature_map.get(int(item["track_id"]), "PENDING")
+            )
+            for item in current
+        }
+
+    @staticmethod
+    def _collision(gids):
+        seen = {}
+        for tid, gid in gids.items():
+            if not str(gid).startswith("G"):
+                continue
+            seen.setdefault(str(gid), []).append(int(tid))
+        return {gid: tids for gid, tids in seen.items() if len(tids) > 1}
+
     def _solve_camera(self, camera, path, tracker_rows):
         detections_path = self.cache / f"{camera}.tracker.detections.jsonl"
-        detections = self._load_detections(detections_path)
+        detections = self._load(detections_path)
         detections_byframe = {}
         for item in detections:
             detections_byframe.setdefault(int(item["frame"]), []).append(item)
@@ -149,11 +167,7 @@ class BatchNvDCF:
         for item in tracker_rows:
             byframe.setdefault(int(item["frame"]), []).append(item)
         for frame_id, values in detections_byframe.items():
-            byframe[frame_id] = merge(
-                byframe.get(frame_id, []),
-                values,
-                frame_id,
-            )
+            byframe[frame_id] = merge(byframe.get(frame_id, []), values, frame_id)
 
         cap = cv2.VideoCapture(path)
         if not cap.isOpened():
@@ -162,11 +176,8 @@ class BatchNvDCF:
         recovery_frames = max(1, int(self.cfg["identity"].get("recovery_frames", 10)))
         labels = []
         previous_overlap = set()
-        last_clean = []
-        overlap_anchors = []
         recovery_until = -1
         frame = 0
-
         try:
             while True:
                 ok, image = cap.read()
@@ -190,88 +201,52 @@ class BatchNvDCF:
                     if str(item.get("shadow_reason", "")) == "collapse"
                 }
                 active_overlap = geometric_overlap | collapse_overlap
-                if previous_overlap - active_overlap:
+                ended = previous_overlap - active_overlap
+                if ended:
                     recovery_until = max(recovery_until, frame + recovery_frames)
-                recovery_mode = frame <= recovery_until
+                recovery_mode = bool(active_overlap) or frame <= recovery_until
+
+                # The resolver sees every person independently and returns IDs from
+                # Qdrant-backed multimodal feature matching. Overlap changes only
+                # the write/admission policy; it never changes the identity source.
                 feature_map = self.identity.observe(
                     image,
                     current,
-                    commit=not bool(active_overlap),
-                    recovery=bool(active_overlap) or recovery_mode,
+                    commit=not recovery_mode,
+                    recovery=recovery_mode,
                 )
+                gids = self._frame_gids(current, feature_map)
 
-                gids = {
-                    int(item["track_id"]): str(
-                        feature_map.get(int(item["track_id"]), "PENDING")
-                    )
-                    for item in current
-                }
-
-                # During the actual overlap only, a prior clean identity can be
-                # carried by spatial continuity. This is temporary occlusion
-                # bookkeeping, not tracker-ID -> GID conversion. Any identity
-                # surviving past the overlap must be re-established by the
-                # multimodal feature matcher.
-                if active_overlap:
-                    used = {
-                        value for value in gids.values()
-                        if value.startswith("G")
-                    }
-                    if not overlap_anchors:
-                        overlap_anchors = list(last_clean)
-
-                    indices = [
-                        index for index, item in enumerate(current)
-                        if gids[int(item["track_id"])] == "PENDING"
-                    ]
-                    subset = [current[index] for index in indices]
-                    carried = carry(subset, overlap_anchors, used)
-                    for local, gid in carried.items():
-                        tid = int(subset[local]["track_id"])
-                        gids[tid] = gid
-
-                    overlap_anchors = [
-                        {
-                            "bbox": item["bbox"],
-                            "gid": gids[int(item["track_id"])],
-                        }
-                        for item in current
-                        if gids[int(item["track_id"])].startswith("G")
-                    ]
-                else:
-                    overlap_anchors = []
-
-                if active_overlap:
-                    pass
-                else:
-                    last_clean = [
-                        {
-                            "bbox": item["bbox"],
-                            "gid": gids[int(item["track_id"])],
-                        }
-                        for item in current
-                        if gids[int(item["track_id"])].startswith("G")
-                    ]
-
-                # Hard same-frame collision invariant. Re-solve the whole frame
-                # with feature-only recovery, then keep any unresolved collision
-                # as PENDING instead of emitting a false merge.
-                grouped = {}
-                for tid, gid in gids.items():
-                    if gid.startswith("G"):
-                        grouped.setdefault(gid, []).append(tid)
-                if any(len(items) > 1 for items in grouped.values()):
+                collisions = self._collision(gids)
+                if collisions:
                     self.identity.stats["duplicate"] += 1
-                    feature_map = self.identity.observe(image, current, commit=False, recovery=True)
-                    gids = {int(item["track_id"]): str(feature_map.get(int(item["track_id"]), "PENDING")) for item in current}
+                    # Re-extract and re-solve the complete frame in recovery mode.
+                    # This is still feature-only and cannot mint an identity.
+                    feature_map = self.identity.observe(
+                        image,
+                        current,
+                        commit=False,
+                        recovery=True,
+                    )
+                    gids = self._frame_gids(current, feature_map)
+                    collisions = self._collision(gids)
+
+                # Never emit two established global identities for two detections
+                # in one frame. Keep unresolved evidence pending instead of forcing
+                # a false merge. The tracker ID is deliberately not consulted here.
+                if collisions:
+                    for gid, tids_for_gid in collisions.items():
+                        for tid in tids_for_gid[1:]:
+                            gids[tid] = "PENDING"
 
                 used = set()
                 for tid in list(gids):
-                    gid = gids[tid]
-                    if gid.startswith("G") and gid in used:
-                        gids[tid] = "PENDING"
-                    elif gid.startswith("G"):
-                        used.add(gid)
+                    gid = str(gids[tid])
+                    if gid.startswith("G"):
+                        if gid in used:
+                            gids[tid] = "PENDING"
+                        else:
+                            used.add(gid)
 
                 for item in current:
                     tid = int(item["track_id"])
@@ -283,6 +258,7 @@ class BatchNvDCF:
                         "gid": gids[tid],
                         "overlap": tid in active_overlap,
                         "recovery": bool(recovery_mode),
+                        "identity_source": "multimodal_qdrant",
                     })
 
                 previous_overlap = set(active_overlap)
@@ -295,12 +271,14 @@ class BatchNvDCF:
         for frame_id, items in by_frame.items():
             gids = [str(item["gid"]) for item in items if str(item["gid"]).startswith("G")]
             if len(gids) != len(set(gids)):
-                raise RuntimeError(f"same-frame duplicate GID survived validation: {camera}:{frame_id}")
+                raise RuntimeError(
+                    f"same-frame duplicate GID survived validation: {camera}:{frame_id}"
+                )
 
         target = self.cache / f"{camera}.labels.jsonl"
         with target.open("w", encoding="utf-8") as handle:
             for item in labels:
-                handle.write(json.dumps(item) + "\n")
+                handle.write(json.dumps(item) + "\\n")
         output = self._render(camera, path, labels)
         print(f"[nvdcf] wrote {output}")
         return labels

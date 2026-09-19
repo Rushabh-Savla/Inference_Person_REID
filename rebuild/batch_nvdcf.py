@@ -329,12 +329,24 @@ class BatchNvDCF:
                 del fps, width, height
                 all_labels.extend(self._solve_camera(camera, path, self._load(target)))
 
+            unique_gids = sorted(
+                {
+                    str(item["gid"])
+                    for item in all_labels
+                    if str(item["gid"]).startswith("G")
+                }
+            )
             debug = {
                 "tracker": "NVIDIA NvDCF",
                 "identity": "Qdrant + top clothing + bottom clothing + NVIDIA ResNet + NVIDIA Swin + SOLIDER + pose",
                 "post_overlap_identity": "feature_only",
                 "tracker_gid_fallback": False,
                 "same_frame_gid_invariant": True,
+                "unique_global_ids": int(len(unique_gids)),
+                "max_global_id": int(max(
+                    (int(value[1:]) for value in unique_gids),
+                    default=0,
+                )),
                 "new_gids": int(self.identity.stats["new"]),
                 "duplicate_frames": int(self.identity.stats["duplicate"]),
                 "pending_frames": int(self.identity.stats["pending"]),

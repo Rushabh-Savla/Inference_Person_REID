@@ -31,13 +31,31 @@ def merge(tracked, detections, frame: int, minimum: float = 0.20):
             [[iou(det["bbox"], item["bbox"]) for item in tracked] for det in detections],
             dtype=np.float32,
         )
-        rr, cc = linear_sum_assignment(-matrix)
-        matched = {
-            int(r)
-            for r, col in zip(rr.tolist(), cc.tolist())
-            if float(matrix[r, col]) >= float(minimum)
+        # If multiple detector boxes substantially overlap one NvDCF box,
+        # that tracker observation is an occlusion-collapse result. Do not feed
+        # the mixed crop into identity resolution; preserve each detector box as
+        # an independent shadow observation instead.
+        ambiguous_cols = {
+            int(col)
+            for col in range(matrix.shape[1])
+            if int(np.sum(matrix[:, col] >= float(minimum))) >= 2
         }
-        result = list(tracked)
+        keep_cols = [
+            col for col in range(matrix.shape[1])
+            if col not in ambiguous_cols
+        ]
+        result = [tracked[col] for col in keep_cols]
+
+        if keep_cols:
+            reduced = matrix[:, keep_cols]
+            rr, cc = linear_sum_assignment(-reduced)
+            matched = {
+                int(r)
+                for r, col in zip(rr.tolist(), cc.tolist())
+                if float(reduced[r, col]) >= float(minimum)
+            }
+        else:
+            matched = set()
 
     for index, item in enumerate(detections):
         if index in matched:

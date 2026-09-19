@@ -6,7 +6,7 @@ from pathlib import Path
 import cv2
 import numpy as np
 
-from rebuild.overlap_guard import carry, merge
+from rebuild.overlap_guard import merge
 
 from rebuild.multimodal_identity import MultiModal
 from rebuild.nvdcf_tracker import NvDCF

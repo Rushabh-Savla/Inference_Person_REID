@@ -8,6 +8,30 @@ export GST_PLUGIN_PATH="/opt/nvidia/deepstream/deepstream/lib/gst-plugins:${GST_
 export LD_LIBRARY_PATH="/opt/nvidia/deepstream/deepstream/lib:/opt/nvidia/deepstream/deepstream/lib/gst-plugins:${LD_LIBRARY_PATH:-}"
 export QDRANT_URL="${QDRANT_URL:-http://127.0.0.1:6333}"
 
+for attempt in $(seq 1 60); do
+    if python3 - "$QDRANT_URL" <<'PY'
+import sys
+from urllib.parse import urlparse
+import socket
+value = urlparse(sys.argv[1])
+host = value.hostname or "127.0.0.1"
+port = value.port or 6333
+try:
+    with socket.create_connection((host, port), timeout=1.0):
+        raise SystemExit(0)
+except OSError:
+    raise SystemExit(1)
+PY
+    then
+        break
+    fi
+    if [[ "$attempt" == "60" ]]; then
+        echo "[docker] ERROR: Qdrant did not become reachable at $QDRANT_URL"
+        exit 1
+    fi
+    sleep 1
+done
+
 test -f "${NVDCF_DEEPSTREAM_ROOT}/lib/libnvds_meta.so"
 test -f "${NVDCF_TRACKER_LIBRARY}"
 

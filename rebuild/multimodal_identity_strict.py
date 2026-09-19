@@ -288,39 +288,33 @@ class MultiModalStrict:
             float(np.clip(obs["face"]["quality"], 0.0, 1.0))
             if face.get("used") and obs.get("face") else 0.0
         )
-        weights = {"face": float(self.fcfg.get("face_weight", 0.46)), "deep": 0.28, "top": 0.10, "bottom": 0.10, "pose": 0.04, "pattern": 0.02}
-        qualities = {
-            "face": faceq,
-            "deep": qweight,
-            "top": qweight,
-            "bottom": qweight,
-            "pose": float(np.clip(obs.get("posscore", 0.0), 0.0, 1.0)),
-            "pattern": qweight,
-        }
-        active = []
-        for name, weight in weights.items():
-            if name == "face" and (
-                not face.get("used")
-                or face["score"] < float(self.icfg.get("face_min", 0.60))
-            ):
-                continue
-            if name == "pose" and qualities[name] <= 0.0:
-                continue
-            active.append((name, weight * qualities[name]))
-        total = sum(value for _, value in active)
-        if total <= 0.0:
-            return None
-        value = 0.0
-        for name, weight in active:
-            raw = {
-                "face": float(face["score"]),
-                "deep": float(deep),
-                "top": float(top),
-                "bottom": float(bot),
-                "pose": float(pose),
-                "pattern": float(pattern),
-            }[name]
-            value += (weight / total) * raw
+        reliable_face = bool(
+            face.get("used")
+            and float(face["score"]) >= float(self.icfg.get("face_min", 0.60))
+            and faceq >= float(self.icfg.get("face_quality_min", 0.50))
+        )
+        if reliable_face:
+            # Reliable face is deliberately dominant while the remaining
+            # modalities still participate as corroborating evidence.
+            face_conf = float(face["score"]) * (0.75 + 0.25 * faceq)
+            value = (
+                0.62 * face_conf
+                + 0.20 * float(deep)
+                + 0.07 * float(top)
+                + 0.07 * float(bot)
+                + 0.03 * float(pose)
+                + 0.01 * float(pattern)
+            )
+        else:
+            # Without a reliable face, identity comes from the body ReID stack
+            # plus mandatory top/bottom clothing, pose and pattern descriptors.
+            value = (
+                0.55 * float(deep)
+                + 0.19 * float(top)
+                + 0.19 * float(bot)
+                + 0.05 * float(pose)
+                + 0.02 * float(pattern)
+            )
         return {
             "score": float(np.clip(value, 0.0, 0.995)),
             "deep": float(deep),

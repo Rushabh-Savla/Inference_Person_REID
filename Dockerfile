@@ -19,7 +19,7 @@ RUN python3 -m pip install --no-cache-dir -r /tmp/reid-extra.txt
 
 ENV PYTHONPATH=/workspace/inference_person_reid:/workspace/inference_person_reid/src
 ENV NVDCF_DEEPSTREAM_ROOT=/opt/nvidia/deepstream/deepstream
-ENV NVDCF_TRACKER_LIBRARY=/opt/nvidia/deepstream/deepstream/lib/gst-plugins/libnvds_nvmultiobjecttracker.so
+ENV NVDCF_TRACKER_LIBRARY=/opt/nvidia/deepstream/deepstream/lib/libnvds_nvmultiobjecttracker.so
 ENV GST_PLUGIN_PATH=/opt/nvidia/deepstream/deepstream/lib/gst-plugins
 ENV LD_LIBRARY_PATH=/opt/nvidia/deepstream/deepstream/lib:/opt/nvidia/deepstream/deepstream/lib/gst-plugins:$LD_LIBRARY_PATH
 ENV QDRANT_URL=http://127.0.0.1:6333

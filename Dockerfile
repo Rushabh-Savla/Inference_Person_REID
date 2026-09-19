@@ -33,10 +33,12 @@ WORKDIR /workspace/inference_person_reid
 
 COPY requirements.txt /tmp/reid-requirements.txt
 
-RUN python3 -m pip install --upgrade pip setuptools wheel &&     python3 -m pip install --no-cache-dir -r /tmp/reid-requirements.txt &&     python3 -m pip uninstall -y onnxruntime >/dev/null 2>&1 || true &&     python3 -m pip install --no-cache-dir --no-deps insightface==2.0
+RUN python3 -m pip install --upgrade pip setuptools wheel --ignore-installed && \
+    python3 -m pip install --no-cache-dir -r /tmp/reid-requirements.txt && \
+    python3 -m pip install --no-cache-dir --no-deps insightface==2.0
 
 COPY docker/requirements-extra.txt /tmp/reid-extra.txt
-RUN python3 -m pip install --no-cache-dir -r /tmp/reid-extra.txt
+RUN python3 -m pip install --no-cache-dir -r /tmp/reid-extra.txt --constraint /tmp/reid-requirements.txt
 
 ENV PYTHONPATH=/workspace/inference_person_reid:/workspace/inference_person_reid/src
 ENV NVDCF_DEEPSTREAM_ROOT=/opt/nvidia/deepstream/deepstream

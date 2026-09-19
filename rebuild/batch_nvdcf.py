@@ -163,8 +163,6 @@ class BatchNvDCF:
         labels = []
         previous_overlap = set()
         last_clean = []
-        overlap_frames = 0
-        collapse_frames = 0
         overlap_anchors = []
         recovery_until = -1
         frame = 0
@@ -195,11 +193,6 @@ class BatchNvDCF:
                 if previous_overlap - active_overlap:
                     recovery_until = max(recovery_until, frame + recovery_frames)
                 recovery_mode = frame <= recovery_until
-                if active_overlap:
-                    overlap_frames += 1
-                if collapse_overlap:
-                    collapse_frames += 1
-
                 feature_map = self.identity.observe(
                     image,
                     current,

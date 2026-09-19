@@ -11,7 +11,7 @@ fi
 
 mkdir -p "$ROOT"
 tmp="$(mktemp -d)"
-trap 'rm -rf "$tmp"' EXIT
+trap 'cd "$REPO_DIR" 2>/dev/null || true; rm -rf "$tmp"' EXIT
 
 echo "[nvdcf] Python: $VENV_PY"
 echo "[nvdcf] Rootless runtime: $ROOT"
@@ -80,6 +80,24 @@ echo "[nvdcf] DeepStream version: $DS_VERSION"
 echo "[nvdcf] NvDCF library: $DS_LIB"
 echo "[nvdcf] NvDCF config: ${DS_CFG:-repo-config}"
 
+DS_CORE_LIB="$("$VENV_PY" - "$DS_ROOT" <<'PY'
+import sys
+from pathlib import Path
+from rebuild.deepstream_runtime import DeepStreamRuntime
+value = DeepStreamRuntime.core_library(Path(sys.argv[1]))
+print(value or "")
+PY
+)"
+if [[ -z "$DS_CORE_LIB" ]]; then
+  echo "[nvdcf] ERROR: DeepStream core runtime is incomplete; libnvds_meta.so was not found."
+  echo "[nvdcf] The NvDCF tracker library alone cannot run PyDS or the nvtracker element."
+  echo "[nvdcf] Provide a complete DeepStream SDK/runtime in a user-writable location."
+  exit 1
+fi
+DS_CORE_DIR="$(dirname "$DS_CORE_LIB")"
+export NVDCF_TRACKER_LIBRARY="$DS_LIB"
+echo "[nvdcf] DeepStream core: $DS_CORE_LIB"
+
 # Rootless GI/GStreamer runtime. No sudo is used.
 cd "$tmp"
 apt-get download python3-gi python3-gst-1.0 gir1.2-gstreamer-1.0 >/dev/null
@@ -99,13 +117,18 @@ from rebuild.deepstream_runtime import DeepStreamRuntime
 print(DeepStreamRuntime.library_dir(sys.argv[1]))
 PY
 )"
-export LD_LIBRARY_PATH="$DS_LIB_DIR:$DS_ROOT/lib:$DS_ROOT/lib/gst-plugins:$ROOT/usr/lib/x86_64-linux-gnu:${LD_LIBRARY_PATH:-}"
+export LD_LIBRARY_PATH="$DS_CORE_DIR:$DS_LIB_DIR:$DS_ROOT/lib:$DS_ROOT/lib/gst-plugins:$ROOT/usr/lib/x86_64-linux-gnu:${LD_LIBRARY_PATH:-}"
 export GST_PLUGIN_PATH="$DS_LIB_DIR:$DS_ROOT/lib/gst-plugins:${GST_PLUGIN_PATH:-}"
 if [[ -d "$ROOT/usr/lib/x86_64-linux-gnu/girepository-1.0" ]]; then
   export GI_TYPELIB_PATH="$ROOT/usr/lib/x86_64-linux-gnu/girepository-1.0:${GI_TYPELIB_PATH:-}"
 fi
 
 wheel=""
+FORCE_PYDS_SOURCE=0
+if [[ -d "$DS_ROOT/sources/includes" ]]; then
+  FORCE_PYDS_SOURCE=1
+  echo "[nvdcf] Complete DeepStream SDK sources detected; PyDS will be built against this SDK."
+fi
 
 # Prefer an already importable PyDS binding; do not print noisy import tracebacks.
 PYDS_INFO="$("$VENV_PY" - <<'PY' 2>/dev/null
@@ -113,7 +136,7 @@ import pyds
 print(pyds.__file__)
 PY
 )" || true
-if [[ -n "$PYDS_INFO" ]]; then
+if [[ "$FORCE_PYDS_SOURCE" != "1" && -n "$PYDS_INFO" ]]; then
   echo "[nvdcf] Existing PyDS: $PYDS_INFO"
   wheel="EXISTING"
 fi
@@ -127,7 +150,7 @@ fi
 # NVIDIA official PyDS 1.2.2 targets DeepStream 8.0 / CPython 3.12 / x86_64.
 # For custom layouts with an unreported SDK version, install it and let the
 # final native-load probe prove whether the host runtime is compatible.
-if [[ "$wheel" != "EXISTING" && -z "$wheel" && ( "$DS_VERSION" =~ ^8\.0(\.[0-9]+)?$ || "$DS_VERSION" == "unknown" ) && "$(uname -m)" == "x86_64" && "$PY_MINOR" == "12" ]]; then
+if [[ "$FORCE_PYDS_SOURCE" != "1" && "$wheel" != "EXISTING" && -z "$wheel" && ( "$DS_VERSION" =~ ^8\.0(\.[0-9]+)?$ || "$DS_VERSION" == "unknown" ) && "$(uname -m)" == "x86_64" && "$PY_MINOR" == "12" ]]; then
   wheel="$tmp/pyds-1.2.2-cp312-cp312-linux_x86_64.whl"
   url="https://github.com/NVIDIA-AI-IOT/deepstream_python_apps/releases/download/v1.2.2/pyds-1.2.2-cp312-cp312-linux_x86_64.whl"
   echo "[nvdcf] Installing NVIDIA PyDS 1.2.2"
@@ -148,7 +171,11 @@ if [[ "$wheel" != "EXISTING" && -z "$wheel" && -d "$DS_ROOT/sources/includes" ]]
     echo "[nvdcf] PyDS source not installed; cloning NVIDIA deepstream_python_apps."
     bind="$ROOT/deepstream_python_apps/bindings"
     rm -rf "$ROOT/deepstream_python_apps"
-    git clone --depth 1 https://github.com/NVIDIA-AI-IOT/deepstream_python_apps.git "$ROOT/deepstream_python_apps"
+    if [[ "$DS_VERSION" =~ ^8\.0 ]]; then
+      git clone --branch v1.2.2 --depth 1 https://github.com/NVIDIA-AI-IOT/deepstream_python_apps.git "$ROOT/deepstream_python_apps"
+    else
+      git clone --depth 1 https://github.com/NVIDIA-AI-IOT/deepstream_python_apps.git "$ROOT/deepstream_python_apps"
+    fi
     (cd "$ROOT/deepstream_python_apps" && git submodule update --init --recursive)
   fi
   if [[ ! -f "$bind/pyproject.toml" && ! -f "$bind/setup.py" ]]; then

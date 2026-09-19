@@ -163,6 +163,8 @@ class BatchNvDCF:
         labels = []
         previous_overlap = set()
         last_clean = []
+        overlap_frames = 0
+        collapse_frames = 0
         overlap_anchors = []
         recovery_until = -1
         frame = 0
@@ -193,6 +195,10 @@ class BatchNvDCF:
                 if previous_overlap - active_overlap:
                     recovery_until = max(recovery_until, frame + recovery_frames)
                 recovery_mode = frame <= recovery_until
+                if active_overlap:
+                    overlap_frames += 1
+                if collapse_overlap:
+                    collapse_frames += 1
 
                 feature_map = self.identity.observe(
                     image,
@@ -344,6 +350,8 @@ class BatchNvDCF:
                 "cross_camera_matches": int(self.identity.stats["cross"]),
                 "pending_new_observations": int(self.identity.stats["pending_new_observations"]),
                 "pending_new_confirmed": int(self.identity.stats["pending_new_confirmed"]),
+                "overlap_frames": int(sum(1 for x in all_labels if x.get("overlap"))),
+                "collapse_frames": int(sum(1 for x in all_labels if x.get("overlap") and x.get("track_id", 0) < 0)),
                 "face_observations": int(self.identity.stats["face_observations"]),
                 "face_reliable": int(self.identity.stats["face_reliable"]),
                 "qdrant_retrievals": int(self.identity.stats["qdrant_retrievals"]),

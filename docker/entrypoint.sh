@@ -10,19 +10,23 @@ export QDRANT_URL="${QDRANT_URL:-http://127.0.0.1:6333}"
 
 for attempt in $(seq 1 60); do
     if python3 - "$QDRANT_URL" <<'PY'
-import socket
+from urllib.request import Request, urlopen
 import sys
 from urllib.parse import urlparse
 
 value = urlparse(sys.argv[1])
-host = value.hostname or "127.0.0.1"
-port = value.port or 6333
-
+base = f"{value.scheme or 'http'}://{value.netloc or '127.0.0.1:6333'}"
 try:
-    with socket.create_connection((host, port), timeout=1.0):
-        raise SystemExit(0)
-except OSError:
-    raise SystemExit(1)
+    with urlopen(
+        Request(base.rstrip("/") + "/readyz", method="GET"),
+        timeout=2.0,
+    ) as response:
+        body = response.read().decode("utf-8", "ignore").lower()
+        if response.status == 200 and "ready" in body:
+            raise SystemExit(0)
+except Exception:
+    pass
+raise SystemExit(1)
 PY
     then
         break

@@ -28,6 +28,8 @@ def test_nvdcf_uses_real_deepstream_tracker():
     value = text("rebuild/nvdcf_tracker.py")
     assert "nvtracker" in value
     assert "libnvds_nvmultiobjecttracker.so" in value
+    assert "libnvds_meta.so" in value
+    assert "core_root" in value
     assert "pyds" in value
     assert 'tracker.set_property("ll-lib-file"' in value
     assert 'tracker.set_property("ll-config-file"' in value

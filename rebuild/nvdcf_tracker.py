@@ -355,6 +355,8 @@ class NvDCF:
 
         state = {"error": None}
         handle = target.open("w", encoding="utf-8")
+        detections_target = Path(target).with_suffix(".detections.jsonl")
+        det_handle = detections_target.open("w", encoding="utf-8")
 
         def preprobe(_pad, info, _data):
             buf = info.get_buffer()
@@ -373,7 +375,21 @@ class NvDCF:
                     cv2.COLOR_RGBA2BGR,
                 )
                 dets = self._detect(image)
-                for x1, y1, x2, y2, conf in dets:
+                for index, (x1, y1, x2, y2, conf) in enumerate(dets):
+                    det_handle.write(
+                        json.dumps(
+                            {
+                                "camera": str(camera),
+                                "frame": int(fm.frame_num) + 1,
+                                "timestamp": (int(fm.frame_num) + 1) / fps,
+                                "bbox": [float(x1), float(y1), float(x2), float(y2)],
+                                "detection_score": float(conf),
+                                "index": int(index),
+                            },
+                            separators=(",", ":"),
+                        )
+                        + "\n"
+                    )
                     obj = pyds.nvds_acquire_obj_meta_from_pool(meta)
                     if obj is None:
                         raise RuntimeError("NvDCF could not allocate NvDsObjectMeta")
@@ -473,6 +489,7 @@ class NvDCF:
         finally:
             pipeline.set_state(Gst.State.NULL)
             handle.close()
+            det_handle.close()
 
         if state["error"]:
             raise RuntimeError(f"NvDCF failed for {camera}: {state['error']}")

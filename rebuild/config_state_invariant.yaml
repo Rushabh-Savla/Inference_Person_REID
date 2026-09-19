@@ -65,6 +65,12 @@ identity:
   new_max: 0.48
   new_deep_max: 0.54
   memory_quality_min: 0.45
+  memory_required_models: 2
+  memory_model_min: 0.52
+  memory_deep_min: 0.56
+  memory_top_min: 0.50
+  memory_bottom_min: 0.50
+  memory_face_min: 0.65
 
 face:
   enabled: true

@@ -23,7 +23,7 @@ RUN set -eux; \
     if [ "$found" -eq 0 ]; then \
         curl -fL --retry 3 --retry-delay 2 \
           https://github.com/NVIDIA-AI-IOT/deepstream_python_apps/releases/download/v1.2.2/pyds-1.2.2-cp312-cp312-linux_x86_64.whl \
-          -o /tmp/pyds.whl; \
+          -o /tmp/pyds-1.2.2-cp312-cp312-linux_x86_64.whl; \
         python3 -m pip install --no-deps /tmp/pyds.whl; \
         rm -f /tmp/pyds.whl; \
     fi

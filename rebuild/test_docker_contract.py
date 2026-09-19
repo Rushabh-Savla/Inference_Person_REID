@@ -10,7 +10,7 @@ def test_docker_stack_is_deepstream_and_qdrant():
     assert "nvcr.io/nvidia/deepstream:8.0-triton-multiarch" in docker
     assert "qdrant/qdrant:v1.19.1" in compose
     assert "gpus: all" in compose
-    assert "QDRANT_URL: http://127.0.0.1:6333" in compose
+    assert "${QDRANT_HOST_PORT:-6335}:6333" in compose
     assert "/opt/nvidia/deepstream/deepstream/lib/libnvds_nvmultiobjecttracker.so" in compose
     assert "qdrant_data:/qdrant/storage" in compose
     assert "shm_size: \"8gb\"" in compose
@@ -38,3 +38,4 @@ def test_one_command_runner_is_present():
     assert "verify_reid_runtime.py" in runner
     assert "batch_state_final" in runner
     assert "_live_src_cam_219.mp4" in runner
+    assert "QDRANT_HOST_PORT" in runner

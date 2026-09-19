@@ -294,8 +294,19 @@ class BatchNvDCF:
                         grouped.setdefault(gid, []).append(tid)
                 if any(len(items) > 1 for items in grouped.values()):
                     self.identity.stats["duplicate"] += 1
-                    feature_map = self.identity.observe(image, current, commit=False, recovery=True)
-                    gids = {int(item["track_id"]): str(feature_map.get(int(item["track_id"]), "PENDING")) for item in current}
+                    feature_map = self.identity.observe(
+                        image,
+                        current,
+                        commit=False,
+                        recovery=True,
+                        recovery_hints=hints,
+                    )
+                    gids = {
+                        int(item["track_id"]): str(
+                            feature_map.get(int(item["track_id"]), "PENDING")
+                        )
+                        for item in current
+                    }
 
                 used = set()
                 for tid in list(gids):

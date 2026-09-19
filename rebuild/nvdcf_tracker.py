@@ -393,7 +393,6 @@ class NvDCF:
         tracker.set_property("tracker-width", twidth)
         tracker.set_property("tracker-height", theight)
         tracker.set_property("gpu-id", 0)
-        tracker.set_property("enable-batch-process", 1)
         tracker.set_property("display-tracking-id", 0)
         names = [item.name for item in tracker.list_properties()]
         if "enable-past-frame" in names:

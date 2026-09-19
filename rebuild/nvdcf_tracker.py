@@ -286,27 +286,28 @@ class NvDCF:
 
         # A final deterministic NMS keeps duplicate pose/detector boxes from
         # becoming two physical people.
-        keep = []
-        scored = sorted(
-            out,
-            key=lambda item: (
-                -float(max(
-                    next(
-                        (
-                            conf
-                            for _, conf in poses
-                            if cls._iou(item, _pose) >= 0.90
-                        ),
-                        0.0,
-                    ),
-                    1.0,
-                )),
-                -(float(item[2]) - float(item[0]))
-                * (float(item[3]) - float(item[1])),
-            ),
+        ranked = []
+        for item in out:
+            score = self.conf
+            for det in dets:
+                if self._iou(item, det[:4]) >= 0.90:
+                    score = max(score, float(det[4]))
+            for pbox, pconf in poses:
+                if self._iou(item, pbox) >= 0.90:
+                    score = max(score, float(pconf))
+            ranked.append((float(score), item))
+        ranked.sort(
+            key=lambda value: (
+                -value[0],
+                -(
+                    (value[1][2] - value[1][0])
+                    * (value[1][3] - value[1][1])
+                ),
+            )
         )
-        for item in scored:
-            if all(cls._iou(item, other) < 0.85 for other in keep):
+        keep = []
+        for _score, item in ranked:
+            if all(self._iou(item, other) < 0.85 for other in keep):
                 keep.append(item)
         return keep
 

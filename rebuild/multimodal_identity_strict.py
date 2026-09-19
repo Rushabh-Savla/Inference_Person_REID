@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import os
 from types import SimpleNamespace
 
 import numpy as np
@@ -63,12 +64,14 @@ class MultiModalStrict:
             model_id=str(state["model_id"]),
             bank_size=int(state.get("bank_size", 96)),
         )
+        qdrant_url = os.environ.get("QDRANT_URL") or state.get("qdrant_url")
+        qdrant_key = os.environ.get("QDRANT_API_KEY") or state.get("qdrant_api_key")
         self.q = QdrantGallery(
             str(state["qdrant_path"]),
             str(state.get("qdrant_prefix", "person_reid")),
             int(state.get("qdrant_limit", 32)),
-            url=state.get("qdrant_url"),
-            api_key=state.get("qdrant_api_key"),
+            url=qdrant_url,
+            api_key=qdrant_key,
         )
         self.pro = self.load()
         self.pending = []
@@ -95,6 +98,7 @@ class MultiModalStrict:
             "face_reliable": 0,
             "qdrant_retrievals": 0,
             "memory_reject": 0,
+            "recovery_feature_verified": 0,
         }
 
     @staticmethod
@@ -257,8 +261,15 @@ class MultiModalStrict:
         hits, got = self.q.search_component([self.group(obs)])
         if hits:
             self.stats["qdrant_retrievals"] += 1
-        ids = set(int(x) for x in hits)
+        ids = {int(x) for x in hits}
         ids.update(int(x) for x in self.pro)
+        for value in obs.get("recovery_hints", []) or []:
+            try:
+                gid = int(value)
+            except (TypeError, ValueError):
+                continue
+            if gid in self.pro:
+                ids.add(gid)
         return sorted(ids), got
 
     def score(self, obs, gid, got):
@@ -294,35 +305,45 @@ class MultiModalStrict:
         face = self.faceval(obs.get("face"), facebank)
         faceq = (
             float(np.clip(obs["face"]["quality"], 0.0, 1.0))
-            if face.get("used") and obs.get("face") else 0.0
+            if obs.get("face") is not None else 0.0
+        )
+        face_visibility = (
+            float(obs["face"].get("visibility", 0.0))
+            if obs.get("face") is not None else 0.0
         )
         reliable_face = bool(
-            face.get("used")
-            and float(face["score"]) >= float(self.icfg.get("face_min", 0.60))
+            obs.get("face") is not None
+            and obs["face"].get("valid", False)
             and faceq >= float(self.icfg.get("face_quality_min", 0.50))
+            and face_visibility >= float(self.fcfg.get("min_visibility", 0.68))
         )
-        if reliable_face:
-            # Reliable face is deliberately dominant while the remaining
-            # modalities still participate as corroborating evidence.
+        if reliable_face and facebank:
+            if not face.get("used") or float(face.get("score", 0.0)) < float(
+                self.icfg.get("face_min", 0.60)
+            ):
+                return None
+        if reliable_face and face.get("used"):
             face_conf = float(face["score"]) * (0.75 + 0.25 * faceq)
             value = (
-                0.70 * face_conf
-                + 0.16 * float(deep)
-                + 0.05 * float(top)
-                + 0.05 * float(bot)
-                + 0.03 * float(pose)
-                + 0.01 * float(pattern)
+                0.78 * face_conf
+                + 0.12 * float(deep)
+                + 0.04 * float(top)
+                + 0.04 * float(bot)
+                + 0.015 * float(pose)
+                + 0.005 * float(pattern)
             )
         else:
-            # Without a reliable face, identity comes from the body ReID stack
-            # plus mandatory top/bottom clothing, pose and pattern descriptors.
             value = (
-                0.55 * float(deep)
-                + 0.19 * float(top)
-                + 0.19 * float(bot)
-                + 0.05 * float(pose)
+                0.54 * float(deep)
+                + 0.20 * float(top)
+                + 0.20 * float(bot)
+                + 0.04 * float(pose)
                 + 0.02 * float(pattern)
             )
+        hints = {
+            int(x) for x in (obs.get("recovery_hints", []) or [])
+            if str(x).lstrip("-").isdigit()
+        }
         return {
             "score": float(np.clip(value, 0.0, 0.995)),
             "deep": float(deep),
@@ -336,39 +357,61 @@ class MultiModalStrict:
             "pose": float(pose),
             "face": float(face["score"]),
             "face_used": bool(face.get("used")),
+            "face_reliable": bool(reliable_face and face.get("used")),
             "face_quality": float(faceq),
+            "face_visibility": float(face_visibility),
             "quality": crop_quality,
+            "recovery_hint": bool(int(gid) in hints),
+            "recovery_hints": sorted(hints),
         }
 
     def accept(self, row, second, recovery=False):
         if row is None:
             return False
         margin = float(row["score"] - second)
-        mins = self.models
-        support = sum(float(row[name]) >= float(self.icfg.get("model_min", 0.46)) for name in mins)
-        top = float(row["top"])
-        bot = float(row["bottom"])
-        if top < float(self.icfg.get("top_min", 0.42)) or bot < float(self.icfg.get("bottom_min", 0.42)):
+        support = sum(
+            float(row[name]) >= float(self.icfg.get("model_min", 0.46))
+            for name in self.models
+        )
+        if float(row["top"]) < float(self.icfg.get("top_min", 0.42)):
+            return False
+        if float(row["bottom"]) < float(self.icfg.get("bottom_min", 0.42)):
             return False
         if support < 2:
             return False
-        if float(row.get("quality", 0.0)) < float(self.icfg.get("memory_quality_min", 0.45)):
+        if float(row.get("quality", 0.0)) < float(
+            self.icfg.get("memory_quality_min", 0.45)
+        ):
             return False
-        floor = float(self.icfg.get("recovery_min", 0.58) if recovery else self.icfg.get("existing_min", 0.61))
-        gap = float(self.icfg.get("recovery_margin", 0.018) if recovery else self.icfg.get("margin", 0.025))
-        face_ok = (
-            not bool(row.get("face_used"))
-            or (
-                float(row.get("face", 0.0)) >= float(self.icfg.get("face_min", 0.60))
-                and float(row.get("face_quality", 0.0))
-                >= float(self.icfg.get("face_quality_min", 0.50))
-            )
+        if recovery and row.get("recovery_hints"):
+            if not bool(row.get("recovery_hint")):
+                if (
+                    float(row["score"]) < 0.82
+                    or support < 3
+                    or float(row.get("deep", 0.0)) < 0.58
+                ):
+                    return False
+        floor = float(
+            self.icfg.get("recovery_min", 0.62)
+            if recovery
+            else self.icfg.get("existing_min", 0.62)
         )
+        gap = float(
+            self.icfg.get("recovery_margin", 0.025)
+            if recovery
+            else self.icfg.get("margin", 0.025)
+        )
+        if bool(row.get("face_reliable")):
+            if (
+                float(row.get("face", 0.0)) < float(self.icfg.get("face_min", 0.60))
+                or float(row.get("face_quality", 0.0))
+                < float(self.icfg.get("face_quality_min", 0.50))
+            ):
+                return False
         return bool(
             row["score"] >= floor
             and row["deep"] >= float(self.icfg.get("deep_min", 0.48))
             and margin >= gap
-            and face_ok
         )
 
     def _memory_ok(self, gid, obs):
@@ -721,7 +764,7 @@ class MultiModalStrict:
 
         return out
 
-    def observe(self, frame, rows, commit=True, recovery=False):
+    def observe(self, frame, rows, commit=True, recovery=False, recovery_hints=None):
         poses = self.poses(self.pose, frame)
         obs = []
         self.stats["feature"] += 1
@@ -732,12 +775,14 @@ class MultiModalStrict:
             if person is None or person.size == 0:
                 obs.append(None)
                 continue
+            hints = list((recovery_hints or {}).get(int(row["track_id"]), []) or [])
             item = {
                 "row": row,
                 "camera": str(row["camera"]),
                 "time": float(row["timestamp"]),
                 "person": person,
                 "quality": float(quality(person)),
+                "recovery_hints": [int(x) for x in hints if str(x).lstrip("-").isdigit()],
             }
             obs.append(item)
         valid = [x for x in obs if x is not None]
@@ -807,6 +852,11 @@ class MultiModalStrict:
             else:
                 out.append(amap[vi])
                 vi += 1
+        if recovery:
+            for value in out:
+                if str(value).startswith("G"):
+                    self.stats["recovery_feature_verified"] += 1
+
         return out
 
     def close(self):

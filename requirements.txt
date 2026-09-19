@@ -26,6 +26,7 @@ lap==0.5.13
 qdrant-client==1.19.1
 
 # --- Core numerics / IO ----------------------------------------------------
+opencv-python==4.10.0.84
 numpy==1.26.4
 PyYAML==6.0.3
 

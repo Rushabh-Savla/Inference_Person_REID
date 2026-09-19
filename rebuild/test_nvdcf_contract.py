@@ -44,6 +44,8 @@ def test_global_assignment_is_feature_first_and_one_to_one():
     assert "linear_sum_assignment" in guard
     assert "self.identity.observe" in batch
     assert "carry(" not in batch
+    assert "last_clean" not in batch
+    assert "overlap_anchors" not in batch
     assert "recovery=True" in batch
     assert "feature-only" in batch.lower()
     assert "tracker_id_global_fallback" not in batch

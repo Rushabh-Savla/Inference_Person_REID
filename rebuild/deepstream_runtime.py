@@ -441,7 +441,11 @@ class DeepStreamRuntime:
             "nvdcf_config": cls.config(root),
             "gpu": cls.command(["nvidia-smi", "--query-gpu=name,driver_version,compute_cap", "--format=csv,noheader"]),
             "cuda": cls.command(["nvcc", "--version"]),
-            "tensorrt": cls.command([\n                "python3",\n                "-c",\n                "import tensorrt as trt; print(trt.__version__)",\n            ]),
+            "tensorrt": cls.command([
+                "python3",
+                "-c",
+                "import tensorrt as trt; print(trt.__version__)",
+            ]),
         }
         return result
 

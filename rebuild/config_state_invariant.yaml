@@ -51,6 +51,7 @@ identity:
   new_pending_model_min: 0.55
   new_pending_clothing_min: 0.58
   new_pending_required_models: 3
+  new_existing_guard: 0.50
   pending_ttl_seconds: 300
   pending_max: 64
   pending_time_gap: 0.75

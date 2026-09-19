@@ -34,6 +34,7 @@ identity_state:
   qdrant_path: qdrant_storage_nvdcf_strict_v3
   qdrant_prefix: person_reid_nvdcf_strict_v3
   qdrant_limit: 32
+  qdrant_url: http://127.0.0.1:6333
 
 identity:
   interval: 1
@@ -50,6 +51,9 @@ identity:
   new_pending_model_min: 0.55
   new_pending_clothing_min: 0.58
   new_pending_required_models: 3
+  pending_ttl_seconds: 300
+  pending_max: 64
+  pending_time_gap: 0.75
   top_min: 0.42
   bottom_min: 0.42
   model_min: 0.46

@@ -28,11 +28,11 @@ cross_camera_models:
   solider_batch: 16
 
 identity_state:
-  path: identity_state/reid_nvdcf_strict_v3.sqlite3
-  model_id: nvdcf-strict-multimodal-v3
+  path: identity_state/reid_nvdcf_strict_v4.sqlite3
+  model_id: nvdcf-strict-multimodal-v4
   bank_size: 96
   qdrant_path: qdrant_storage_nvdcf_strict_v3
-  qdrant_prefix: person_reid_nvdcf_strict_v3
+  qdrant_prefix: person_reid_nvdcf_strict_v4
   qdrant_limit: 32
   qdrant_url: http://127.0.0.1:6333
 
@@ -93,4 +93,4 @@ overlap:
 
 input:
   videos: []
-  output_dir: rebuild_outputs_nvdcf_strict_v3
+  output_dir: rebuild_outputs_nvdcf_strict_v4

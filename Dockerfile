@@ -28,4 +28,4 @@ COPY docker/entrypoint.sh /usr/local/bin/reid-entrypoint
 RUN chmod +x /usr/local/bin/reid-entrypoint
 
 ENTRYPOINT ["/usr/local/bin/reid-entrypoint"]
-CMD ["python3", "-m", "rebuild.run", "batch_state_final", "--config", "rebuild/config_state_invariant.yaml"]
+CMD ["bash"]

@@ -89,36 +89,109 @@ class DeepStreamRuntime:
             out.append(Path(key))
         return out
 
-    @classmethod
-    def find(cls):
-        for root in cls.roots():
-            library = cls.library(root)
-            if library:
-                return root, library
+    @staticmethod
+    def core_library(root):
+        if root is None:
+            return None
+        for path in (
+            root / "lib/libnvds_meta.so",
+            root / "lib/libnvds_meta.so.*",
+            root / "lib64/libnvds_meta.so",
+            root / "lib64/libnvds_meta.so.*",
+        ):
+            if path.is_file():
+                return str(path)
+        return None
 
-        names = (
-            "libnvds_nvmultiobjecttracker.so",
-            "libnvds_nvmultiobjecttracker.so.*",
-        )
-        bases = (
-            Path("/opt"),
+    @classmethod
+    def core_root(cls):
+        candidates = []
+        env = os.environ.get("NVDCF_DEEPSTREAM_ROOT") or os.environ.get("DEEPSTREAM_ROOT")
+        if env:
+            start = Path(env).expanduser()
+            candidates.extend([start, *start.parents])
+        candidates.extend([
+            Path("/opt/nvidia/deepstream/deepstream"),
+            Path("/usr/local/nvidia/deepstream/deepstream"),
+            Path("/usr/local/deepstream"),
+        ])
+        candidates.extend(Path("/opt/nvidia/deepstream").glob("deepstream*"))
+        candidates.extend(Path("/usr/local/nvidia/deepstream").glob("deepstream*"))
+        candidates.extend(Path("/usr/local").glob("deepstream*"))
+        candidates.extend(Path.home().glob("deepstream*"))
+        candidates.extend(Path.home().glob(".local/share/deepstream*"))
+        seen = set()
+        for root in candidates:
+            try:
+                key = str(root.resolve())
+            except OSError:
+                key = str(root)
+            if key in seen:
+                continue
+            seen.add(key)
+            value = Path(key)
+            if cls.core_library(value):
+                return value
+
+        for base in (
+            Path("/opt/nvidia"),
+            Path("/usr/local/nvidia"),
             Path("/usr/local"),
-            Path.home(),
-        )
-        for base in bases:
+            Path.home() / "face_recognition_system",
+            Path.home() / "deepstream",
+            Path.home() / ".local/share",
+        ):
             if not base.exists():
                 continue
-            for name in names:
-                try:
-                    for item in base.rglob(name):
-                        if not item.is_file():
-                            continue
-                        library = str(item.resolve())
-                        root = cls.sdk_root(library) or item.parent
-                        return root, library
-                except (OSError, PermissionError):
+            try:
+                for item in base.rglob("libnvds_meta.so"):
+                    if not item.is_file():
+                        continue
+                    if item.parent.name == "lib":
+                        return item.parent.parent
+                    return item.parent
+            except (OSError, PermissionError):
+                continue
+        return None
+
+    @classmethod
+    def find(cls):
+        tracker = None
+        configured = os.environ.get("NVDCF_TRACKER_LIBRARY")
+        if configured and Path(configured).expanduser().is_file():
+            tracker = str(Path(configured).expanduser().resolve())
+
+        if tracker is None:
+            for root in cls.roots():
+                value = cls.library(root)
+                if value:
+                    tracker = value
+                    break
+
+        if tracker is None:
+            for base in (Path("/opt"), Path("/usr/local"), Path.home()):
+                if not base.exists():
                     continue
-        return None, None
+                for name in (
+                    "libnvds_nvmultiobjecttracker.so",
+                    "libnvds_nvmultiobjecttracker.so.*",
+                ):
+                    try:
+                        for item in base.rglob(name):
+                            if item.is_file():
+                                tracker = str(item.resolve())
+                                break
+                    except (OSError, PermissionError):
+                        continue
+                    if tracker:
+                        break
+                if tracker:
+                    break
+
+        root = cls.core_root()
+        if root is None and tracker is not None:
+            root = cls.sdk_root(tracker)
+        return root, tracker
 
     @staticmethod
     def library(root):
@@ -362,6 +435,7 @@ class DeepStreamRuntime:
         root, library = cls.find()
         result = {
             "root": str(root) if root else None,
+            "core_library": cls.core_library(root),
             "version": cls.version(root, library),
             "nvdcf_library": library,
             "nvdcf_config": cls.config(root),
@@ -428,27 +502,32 @@ class DeepStreamRuntime:
     @classmethod
     def require(cls):
         root, library = cls.find()
-        if root is None or library is None:
+        if library is None:
             raise RuntimeError(
-                "Installed DeepStream with libnvds_nvmultiobjecttracker.so was not found. "
-                "Set NVDCF_DEEPSTREAM_ROOT to the actual DeepStream root if it is outside "
-                "the standard NVIDIA install locations."
+                "NVIDIA NvDCF tracker library libnvds_nvmultiobjecttracker.so was not found."
+            )
+        if root is None:
+            raise RuntimeError(
+                "NvDCF tracker was found, but the DeepStream core runtime was not found."
+            )
+        core = cls.core_library(root)
+        if core is None:
+            raise RuntimeError(
+                f"DeepStream root {root} does not contain libnvds_meta.so."
             )
         config = cls.config(root)
         if config is None:
             raise RuntimeError(
-                f"NvDCF library found at {library}, but no NVIDIA NvDCF tracker config "
-                f"was found below {root}."
+                f"No NVIDIA NvDCF tracker config was found for DeepStream root {root}."
             )
         cls.configure(root, library)
         try:
             import ctypes
-            ctypes.CDLL(
-                library,
-                mode=getattr(os, "RTLD_NOW", 2) | getattr(os, "RTLD_GLOBAL", 256),
-            )
+            mode = getattr(os, "RTLD_NOW", 2) | getattr(os, "RTLD_GLOBAL", 256)
+            ctypes.CDLL(core, mode=mode)
+            ctypes.CDLL(library, mode=mode)
         except OSError as exc:
             raise RuntimeError(
-                f"NvDCF library was found but could not be loaded: {library}: {exc}"
+                f"DeepStream/NvDCF native library could not be loaded: {exc}"
             ) from exc
         return root, library, config

@@ -45,9 +45,17 @@ class NvDCF:
                         f"NvDCF library is configured at {library}, but the tracker config was not found."
                     )
                 dsroot, discovered = DeepStreamRuntime.find()
-                root = dsroot if discovered and Path(discovered).resolve() == Path(library).resolve() else Path(library).resolve().parent.parent
-                DeepStreamRuntime.configure(root, library)
-                return root, library, config
+                if dsroot is None:
+                    raise RuntimeError(
+                        "NvDCF tracker library was found, but the complete DeepStream core runtime "
+                        "was not found (libnvds_meta.so is required)."
+                    )
+                DeepStreamRuntime.configure(dsroot, library)
+                ctypes.CDLL(
+                    library,
+                    mode=getattr(os, "RTLD_NOW", 2) | getattr(os, "RTLD_GLOBAL", 256),
+                )
+                return dsroot, library, config
         dsroot, library = DeepStreamRuntime.find()
         if dsroot is None or library is None:
             raise RuntimeError(

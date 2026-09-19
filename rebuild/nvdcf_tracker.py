@@ -207,13 +207,23 @@ class NvDCF:
     def _posebox(self, frame):
         if self.pose is None:
             return []
-        result = self.pose(frame, conf=0.25, iou=0.65, verbose=False)
+        result = self.pose(
+            frame,
+            classes=[0],
+            conf=0.20,
+            iou=0.65,
+            verbose=False,
+        )
         if not result or result[0].boxes is None:
             return []
         out = []
         for box in result[0].boxes:
-            data = self._box(box.xyxy[0].tolist())
-            out.append(data)
+            out.append(
+                (
+                    self._box(box.xyxy[0].tolist()),
+                    float(box.conf[0]),
+                )
+            )
         return out
 
     @staticmethod
@@ -233,20 +243,29 @@ class NvDCF:
     def _split(cls, dets, poses):
         if not poses:
             return dets
+
         out = []
         for det in dets:
             inside = []
-            for pose in poses:
+            for pose, _conf in poses:
                 if cls._iou(pose, det) < 0.15:
                     continue
                 px1, py1, px2, py2 = pose
                 bx1, by1, bx2, by2 = det
-                inter = max(0.0, min(px2, bx2) - max(px1, bx1)) * max(
-                    0.0, min(py2, by2) - max(py1, by1)
+                inter = max(
+                    0.0,
+                    min(px2, bx2) - max(px1, bx1),
+                ) * max(
+                    0.0,
+                    min(py2, by2) - max(py1, by1),
                 )
-                area = max(1.0, (px2 - px1) * (py2 - py1))
+                area = max(
+                    1.0,
+                    (px2 - px1) * (py2 - py1),
+                )
                 if inter / area >= 0.60:
                     inside.append(pose)
+
             keep = []
             for item in inside:
                 if all(cls._iou(item, other) < 0.70 for other in keep):
@@ -255,7 +274,41 @@ class NvDCF:
                 out.extend(keep)
             else:
                 out.append(det)
-        return out
+
+        # Pose is also a secondary person detector. When YOLO main detection
+        # misses a person during occlusion, retain a sufficiently confident
+        # pose box if it is not already represented by a detector box.
+        for pose, pconf in poses:
+            if pconf < 0.25:
+                continue
+            if not any(cls._iou(pose, item) >= 0.45 for item in out):
+                out.append(pose)
+
+        # A final deterministic NMS keeps duplicate pose/detector boxes from
+        # becoming two physical people.
+        keep = []
+        scored = sorted(
+            out,
+            key=lambda item: (
+                -float(max(
+                    next(
+                        (
+                            conf
+                            for _, conf in poses
+                            if cls._iou(item, _pose) >= 0.90
+                        ),
+                        0.0,
+                    ),
+                    1.0,
+                )),
+                -(float(item[2]) - float(item[0]))
+                * (float(item[3]) - float(item[1])),
+            ),
+        )
+        for item in scored:
+            if all(cls._iou(item, other) < 0.85 for other in keep):
+                keep.append(item)
+        return keep
 
     def _detect(self, frame):
         result = self.model(
@@ -265,18 +318,39 @@ class NvDCF:
             iou=self.iou,
             verbose=False,
         )
-        if not result or result[0].boxes is None:
-            return []
         dets = []
-        for box in result[0].boxes:
-            conf = float(box.conf[0])
-            dets.append((*self._box(box.xyxy[0].tolist()), conf))
-        if self.pose is not None:
-            poses = self._posebox(frame)
-            boxes = self._split([x[:4] for x in dets], poses)
-            lookup = {tuple(x[:4]): float(x[4]) for x in dets}
-            dets = [(*box, lookup.get(tuple(box), self.conf)) for box in boxes]
-        return dets
+        if result and result[0].boxes is not None:
+            for box in result[0].boxes:
+                conf = float(box.conf[0])
+                dets.append((
+                    *self._box(box.xyxy[0].tolist()),
+                    conf,
+                ))
+
+        poses = self._posebox(frame) if self.pose is not None else []
+        boxes = self._split([x[:4] for x in dets], poses)
+
+        scored = []
+        for box in boxes:
+            same = [
+                float(item[4])
+                for item in dets
+                if self._iou(box, item[:4]) >= 0.90
+            ]
+            pose_conf = [
+                float(conf)
+                for pbox, conf in poses
+                if self._iou(box, pbox) >= 0.90
+            ]
+            scored.append(
+                (
+                    *box,
+                    max(
+                        same + pose_conf + [self.conf],
+                    ),
+                )
+            )
+        return scored
 
     def track(self, camera, path, target):
         Gst, GLib, pyds = self._deps()

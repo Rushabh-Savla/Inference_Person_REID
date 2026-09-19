@@ -217,8 +217,15 @@ class MultiModalStrict:
 
     def load(self):
         data = self.reg.load_gallery()
+        meta = {}
+        if hasattr(self.reg, "identity_meta"):
+            try:
+                meta = self.reg.identity_meta()
+            except Exception:
+                meta = {}
         out = {}
         for gid, bank in data.items():
+            info = meta.get(int(gid), {})
             out[int(gid)] = {
                 "resnet": list(bank.get("resnet", [])),
                 "swin": list(bank.get("swin", [])),
@@ -226,7 +233,7 @@ class MultiModalStrict:
                 "attributes": list(bank.get("attributes", [])),
                 "face": list(bank.get("face", [])),
                 "pose": list(bank.get("pose", [])),
-                "camera": set(),
+                "camera": set(info.get("cameras", [])),
             }
         return out
 

@@ -90,6 +90,31 @@ class BatchNvDCF:
                     active.add(int(current[second]["track_id"]))
         return active
 
+    @classmethod
+    def _recovery_hints(cls, rows, anchors, limit=3):
+        """Produce spatial hypotheses; never convert an anchor directly to a GID."""
+        result = {}
+        anchors = [x for x in (anchors or []) if str(x.get("gid", "")).startswith("G")]
+        for row in rows or []:
+            rx1, ry1, rx2, ry2 = [float(x) for x in row["bbox"]]
+            rcx, rcy = 0.5 * (rx1 + rx2), 0.5 * (ry1 + ry2)
+            rh = max(1.0, ry2 - ry1)
+            scored = []
+            for anchor in anchors:
+                ax1, ay1, ax2, ay2 = [float(x) for x in anchor["bbox"]]
+                acx, acy = 0.5 * (ax1 + ax2), 0.5 * (ay1 + ay2)
+                ah = max(1.0, ay2 - ay1)
+                iou, iom = cls._metrics(row["bbox"], anchor["bbox"])
+                distance = float(np.hypot(rcx - acx, rcy - acy) / max(rh, ah))
+                proximity = max(0.0, 1.0 - distance / 4.5)
+                spatial = 0.55 * float(iou) + 0.45 * max(float(iom), proximity * 0.5)
+                scored.append((spatial, distance, str(anchor["gid"])))
+            scored.sort(key=lambda x: (-x[0], x[1], x[2]))
+            result[int(row["track_id"])] = [
+                int(x[2][1:]) for x in scored[:limit] if x[0] >= 0.05
+            ]
+        return result
+
     def _render(self, camera, path, labels):
         cap = cv2.VideoCapture(path)
         if not cap.isOpened():
@@ -164,6 +189,7 @@ class BatchNvDCF:
         previous_overlap = set()
         last_clean = []
         overlap_anchors = []
+        recovery_anchors = []
         recovery_until = -1
         frame = 0
 
@@ -190,14 +216,23 @@ class BatchNvDCF:
                     if str(item.get("shadow_reason", "")) == "collapse"
                 }
                 active_overlap = geometric_overlap | collapse_overlap
+                if active_overlap and not overlap_anchors and last_clean:
+                    overlap_anchors = list(last_clean)
                 if previous_overlap - active_overlap:
                     recovery_until = max(recovery_until, frame + recovery_frames)
+                    recovery_anchors = list(overlap_anchors)
                 recovery_mode = frame <= recovery_until
+                hints = (
+                    self._recovery_hints(current, recovery_anchors)
+                    if recovery_mode and not active_overlap
+                    else {}
+                )
                 feature_map = self.identity.observe(
                     image,
                     current,
                     commit=not bool(active_overlap),
                     recovery=bool(active_overlap) or recovery_mode,
+                    recovery_hints=hints,
                 )
 
                 gids = {
@@ -217,9 +252,6 @@ class BatchNvDCF:
                         value for value in gids.values()
                         if value.startswith("G")
                     }
-                    if not overlap_anchors:
-                        overlap_anchors = list(last_clean)
-
                     indices = [
                         index for index, item in enumerate(current)
                         if gids[int(item["track_id"])] == "PENDING"
@@ -273,6 +305,17 @@ class BatchNvDCF:
                     elif gid.startswith("G"):
                         used.add(gid)
 
+                if not active_overlap and recovery_mode:
+                    confirmed = [
+                        {"bbox": item["bbox"], "gid": gids[int(item["track_id"])]}
+                        for item in current
+                        if gids[int(item["track_id"])].startswith("G")
+                    ]
+                    if confirmed:
+                        recovery_anchors = confirmed
+                elif not active_overlap and not recovery_mode:
+                    recovery_anchors = []
+
                 for item in current:
                     tid = int(item["track_id"])
                     labels.append({
@@ -283,6 +326,11 @@ class BatchNvDCF:
                         "gid": gids[tid],
                         "overlap": tid in active_overlap,
                         "recovery": bool(recovery_mode),
+                        "recovery_feature_verified": bool(
+                            recovery_mode and not active_overlap
+                            and str(gids[tid]).startswith("G")
+                        ),
+                        "recovery_hint_count": int(len(hints.get(tid, []))),
                     })
 
                 previous_overlap = set(active_overlap)
@@ -352,6 +400,9 @@ class BatchNvDCF:
                 "pending_frames": int(self.identity.stats["pending"]),
                 "recovery_frames": int(self.identity.stats["recovery"]),
                 "recovery_matches": int(self.identity.stats["recovery_match"]),
+                "recovery_feature_verified": int(
+                    self.identity.stats.get("recovery_feature_verified", 0)
+                ),
                 "cross_camera_matches": int(self.identity.stats["cross"]),
                 "pending_new_observations": int(self.identity.stats["pending_new_observations"]),
                 "pending_new_confirmed": int(self.identity.stats["pending_new_confirmed"]),

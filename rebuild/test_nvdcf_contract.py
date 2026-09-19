@@ -38,9 +38,11 @@ def test_nvdcf_uses_real_deepstream_tracker():
 
 def test_global_assignment_is_feature_first_and_one_to_one():
     value = text("rebuild/multimodal_identity.py") + "\n" + text("rebuild/multimodal_identity_strict.py")
+    guard = text("rebuild/assignment_guard.py")
     batch = text("rebuild/batch_nvdcf.py")
-    assert "linear_sum_assignment" in value
+    assert "linear_sum_assignment" in guard
     assert "self.identity.observe" in batch
+    assert "carry(" in batch
     assert "recovery=True" in batch
     assert "feature-only" in batch.lower()
     assert "tracker_id_global_fallback" not in batch

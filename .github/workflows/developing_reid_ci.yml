@@ -21,6 +21,8 @@ jobs:
       - run: >
           python -m py_compile
           rebuild/deepstream_runtime.py
+          rebuild/assignment_guard.py
+          rebuild/overlap_guard.py
           rebuild/nvdcf_tracker.py
           rebuild/multimodal_identity.py
           rebuild/multimodal_identity_strict.py
@@ -41,3 +43,6 @@ jobs:
           rebuild/test_state_invariant_reid.py
           rebuild/test_overlap_reid_recovery.py
           rebuild/test_nvdcf_contract.py
+          rebuild/test_assignment_guard.py
+          rebuild/test_overlap_guard.py
+          rebuild/test_docker_contract.py

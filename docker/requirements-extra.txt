@@ -1,13 +1,16 @@
-# Dependencies intentionally kept outside the DeepStream image's vendor PyDS stack.
-# PyTorch/TorchVision are installed by the image when absent; the entrypoint checks them.
-easydict
-Cython
-scikit-learn
-onnx
-albumentations
-prettytable
-requests
-h5py
-yacs
-tabulate
-termcolor
+# Pinned non-DeepStream dependencies for reproducible container builds.
+easydict==1.13
+Cython==3.1.3
+scikit-learn==1.6.1
+joblib==1.5.2
+threadpoolctl==3.6.0
+scikit-image==0.25.2
+onnx==1.22.0
+albumentations==1.3.1
+qudida==0.0.4
+prettytable==3.12.0
+requests==2.34.2
+h5py==3.15.1
+yacs==0.1.8
+tabulate==0.9.0
+termcolor==3.1.0

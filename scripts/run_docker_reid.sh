@@ -65,12 +65,12 @@ echo "[docker] building DeepStream 8.0 ReID image"
 docker compose build reid
 
 echo "[docker] running strict runtime verification"
-docker compose run --rm -e QDRANT_URL="$QDRANT_URL" reid \
+docker compose run --no-deps --rm -e QDRANT_URL="$QDRANT_URL" reid \
   python3 scripts/verify_reid_runtime.py \
   --video "${VIDEO_ARGS[0]}"
 
 echo "[docker] running NvDCF multimodal ReID"
-docker compose run --rm -e QDRANT_URL="$QDRANT_URL" reid \
+docker compose run --no-deps --rm -e QDRANT_URL="$QDRANT_URL" reid \
   python3 rebuild/run.py batch_state_final \
   --config rebuild/config_state_invariant.yaml \
   --videos "${VIDEO_ARGS[@]}"

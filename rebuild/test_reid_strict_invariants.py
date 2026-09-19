@@ -82,8 +82,16 @@ def test_post_overlap_recovery_is_feature_driven_not_tracker_driven():
     first = observation(2, 401, hints=[1])
     second = observation(1, 402, hints=[2])
     sets = [
-        {1: item.score(first, 1, {}), 2: item.score(first, 2, {})},
-        {1: item.score(second, 1, {}), 2: item.score(second, 2, {})},
+        {
+            gid: score
+            for gid in (1, 2)
+            if (score := item.score(first, gid, {})) is not None
+        },
+        {
+            gid: score
+            for gid in (1, 2)
+            if (score := item.score(second, gid, {})) is not None
+        },
     ]
     result = item.assign([first, second], sets, commit=True, recovery=True)
     assert result == ["G000002", "G000001"]

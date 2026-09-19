@@ -5,16 +5,8 @@ from types import SimpleNamespace
 
 import numpy as np
 from rebuild.assignment_guard import solve
-
 from rebuild.identity_v2 import crop, quality
-from rebuild.face_v4 import FaceExtractorV4
-from rebuild.person_attributes import pack
-from reid.nvidia_reid import NVIDIAReIDExtractor
-from reid.nvidia_swin import NVIDIASwinReIDExtractor
-from reid.solider_reid import SOLIDERReIDExtractor
-from src.live.persistent_multimodel import PersistentMultimodelRegistry
-from src.live.qdrant_gallery import QdrantGallery
-from ultralytics import YOLO
+
 
 
 class MultiModalStrict:
@@ -23,6 +15,14 @@ class MultiModalStrict:
     models = ("resnet", "swin", "solider")
 
     def __init__(self, cfg):
+        from rebuild.face_v4 import FaceExtractorV4
+        from rebuild.person_attributes import pack
+        from reid.nvidia_reid import NVIDIAReIDExtractor
+        from reid.nvidia_swin import NVIDIASwinReIDExtractor
+        from reid.solider_reid import SOLIDERReIDExtractor
+        from src.live.persistent_multimodel import PersistentMultimodelRegistry
+        from src.live.qdrant_gallery import QdrantGallery
+        from ultralytics import YOLO
         self.cfg = cfg
         self.rcfg = cfg["reid"]
         self.mcfg = cfg["cross_camera_models"]

@@ -6,36 +6,45 @@ import subprocess
 import tempfile
 from pathlib import Path
 
+import cv2
 import numpy as np
 
-repo = Path(__file__).resolve().parents[1]
-if str(repo) not in os.sys.path:
-    os.sys.path.insert(0, str(repo))
+ROOT = Path(__file__).resolve().parents[1]
+if str(ROOT) not in os.sys.path:
+    os.sys.path.insert(0, str(ROOT))
 
 from rebuild.deepstream_runtime import DeepStreamRuntime
 
 
-def _command(value):
+def command(value):
     try:
-        result = subprocess.run(value, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, check=False, timeout=20)
+        result = subprocess.run(
+            value,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
+            text=True,
+            check=False,
+            timeout=20,
+        )
         return result.stdout.strip()
     except Exception as exc:
         return f"unavailable: {exc}"
 
+
 def main():
-    parser = argparse.ArgumentParser(description="Verify every strict ReID runtime component.")
-    parser.add_argument("--video", default="", help="Optional real input video for a one-buffer NvDCF smoke test.")
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--video", default="")
     args = parser.parse_args()
 
     info = DeepStreamRuntime.diagnostics()
     print("[verify] GPU:", info["gpu"])
     print("[verify] CUDA:", info["cuda"])
     print("[verify] TensorRT:", info["tensorrt"])
-    print("[verify] cuDNN:", _command(["bash", "-lc", "python - <<'PY'\nimport torch\nprint(torch.backends.cudnn.version())\nPY"]))
-    
+    print("[verify] cuDNN:", command(["python3", "-c", "import torch; print(torch.backends.cudnn.version())"]))
+
     root, library, config = DeepStreamRuntime.require()
     print("[verify] DeepStream root:", root)
-    print("[verify] DeepStream version:", DeepStreamRuntime.version(root))
+    print("[verify] DeepStream version:", DeepStreamRuntime.version(root, library))
     print("[verify] NvDCF library:", library)
     print("[verify] NvDCF config:", config)
 
@@ -63,54 +72,90 @@ def main():
     print("[verify] ORT:", ort.__version__)
     print("[verify] CUDAExecutionProvider: OK")
 
+    import torch
+    if not torch.cuda.is_available():
+        raise RuntimeError("PyTorch cannot see CUDA")
+    print("[verify] PyTorch CUDA: OK")
+
+    import yaml
+    cfg = yaml.safe_load((ROOT / "rebuild/config_state_invariant.yaml").read_text())
+
     from reid.nvidia_reid import NVIDIAReIDExtractor
     from reid.nvidia_swin import NVIDIASwinReIDExtractor
     from reid.solider_reid import SOLIDERReIDExtractor
-    import yaml
 
-    cfg = yaml.safe_load(Path("rebuild/config_state_invariant.yaml").read_text())
+    probe = np.zeros((384, 128, 3), dtype=np.uint8)
     resnet = NVIDIAReIDExtractor(cfg["reid"]["weights"], device="cuda", max_batch=1)
     swin = NVIDIASwinReIDExtractor(cfg["cross_camera_models"]["swin_weights"], device="cuda", max_batch=1)
     solider = SOLIDERReIDExtractor(cfg["cross_camera_models"]["solider_weights"], device="cuda", max_batch=1)
-    probe = np.zeros((384, 128, 3), dtype=np.uint8)
     assert resnet.extract_batch([probe]).shape[1] == 256
     assert swin.extract_batch([probe]).shape[1] == 1024
     assert solider.extract_batch([probe]).shape[1] == 1024
     print("[verify] Person ReID ResNet/Swin/SOLIDER inference: OK")
 
     from insightface.app import FaceAnalysis
-    face = FaceAnalysis(name=cfg["face"]["model"], providers=["CUDAExecutionProvider", "CPUExecutionProvider"])
+    face = FaceAnalysis(
+        name=cfg["face"]["model"],
+        providers=["CUDAExecutionProvider", "CPUExecutionProvider"],
+    )
     face.prepare(ctx_id=0, det_size=tuple(cfg["face"]["det_size"]))
-    print("[verify] FaceAnalysis CUDA runtime: OK")
+    if args.video:
+        cap = cv2.VideoCapture(args.video)
+        ok, image = cap.read()
+        cap.release()
+        if not ok:
+            raise RuntimeError(f"Could not read first frame from {args.video}")
+        face.get(image)
+        face_probe = image
+    else:
+        face_probe = probe
+        face.get(face_probe)
+    print("[verify] FaceAnalysis + SCRFD/ArcFace inference: OK")
 
     from ultralytics import YOLO
     pose = YOLO(str(cfg["pose"]["model"]))
-    result = pose(probe, classes=[0], conf=0.20, verbose=False)
+    result = pose(face_probe, classes=[0], conf=0.20, verbose=False)
     if not result:
         raise RuntimeError("Pose inference returned no result object")
-    print("[verify] Pose model inference: OK")
+    print("[verify] Pose inference: OK")
 
     from rebuild.person_attributes import pack
-    attrs = pack(probe, probe, [0, 0, 128, 384])
+    attrs = pack(face_probe, face_probe, [0, 0, face_probe.shape[1], face_probe.shape[0]])
     if attrs.shape != (112,):
         raise RuntimeError(f"Clothing feature dimension mismatch: {attrs.shape}")
-    print("[verify] Top/bottom clothing feature extraction: OK")
+    if not np.isfinite(attrs[:40]).all() or float(np.linalg.norm(attrs[:20])) <= 0.0 or float(np.linalg.norm(attrs[20:40])) <= 0.0:
+        raise RuntimeError("Top/bottom clothing descriptors are not populated")
+    print("[verify] Top + bottom clothing extraction: OK")
 
     from src.live.qdrant_gallery import QdrantGallery
-    with tempfile.TemporaryDirectory(prefix="reid_qdrant_verify_") as qroot:
-        q = QdrantGallery(qroot, "verify_reid", 8)
-        probevec = np.ones(256, np.float32)
-        q._upsert(1, "resnet", "full", [probevec])
-        hits = q._query("resnet", probevec)
-        if not hits or int((hits[0].payload or {}).get("gid", -1)) != 1:
-            raise RuntimeError("Qdrant vector was stored but could not be retrieved")
-    print("[verify] Qdrant write + retrieval: OK")
+    qurl = os.environ.get("QDRANT_URL")
+    if not qurl:
+        raise RuntimeError("QDRANT_URL is required")
+    prefix = "runtime_verify"
+    q = QdrantGallery(prefix=prefix, limit=8, url=qurl)
+    probevec = np.ones(256, np.float32)
+    q._upsert(987654, "resnet", "full", [probevec])
+    hits = q._query("resnet", probevec)
+    if not hits or int((hits[0].payload or {}).get("gid", -1)) != 987654:
+        raise RuntimeError("Qdrant remote write/retrieval failed")
+    for collection in q.collections.values():
+        try:
+            q.client.delete_collection(collection)
+        except Exception:
+            pass
+    print("[verify] Qdrant remote write + retrieval: OK")
 
     if args.video:
         from rebuild.nvdcf_tracker import NvDCF
         detector = NvDCF(cfg["detector"])
         with tempfile.NamedTemporaryFile(suffix=".jsonl") as handle:
-            detector.track("verify", args.video, Path(handle.name))
+            target = Path(handle.name)
+            fps, width, height = detector.track("verify", args.video, target)
+        if fps <= 0 or width <= 0 or height <= 0:
+            raise RuntimeError("NvDCF returned invalid video metadata")
+        rows = target.read_text(encoding="utf-8").strip().splitlines()
+        if not rows:
+            raise RuntimeError("NvDCF produced no tracker rows for the real video")
         print("[verify] Real-video NvDCF tracking smoke test: OK")
 
     print("[verify] STRICT RUNTIME: PASS")

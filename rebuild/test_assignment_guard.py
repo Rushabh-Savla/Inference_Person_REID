@@ -13,11 +13,15 @@ def test_competing_rows_are_one_to_one():
 
 def test_rejected_pair_is_reassigned():
     sets = [
-        {1: {"score": 0.70}, 2: {"score": 0.69}},
-        {1: {"score": 0.99}},
+        {1: {"score": 0.99, "bad": True}, 2: {"score": 0.90}},
+        {1: {"score": 0.98}, 2: {"score": 0.89}},
     ]
-    chosen = solve(sets, lambda row, second: row["score"] >= 0.80, 0.35)
-    assert chosen == {0: 2}
+    chosen = solve(
+        sets,
+        lambda row, second: not row.get("bad") and row["score"] >= 0.35,
+        0.35,
+    )
+    assert chosen == {0: 2, 1: 1}
 
 
 def test_weak_match_is_not_forced():

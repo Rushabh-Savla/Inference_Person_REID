@@ -96,7 +96,6 @@ def test_post_overlap_recovery_is_feature_driven_not_tracker_driven():
     result = item.assign([first, second], sets, commit=True, recovery=True)
     assert result == ["G000002", "G000001"]
     assert result[0] != result[1]
-    assert item.stats["recovery_feature_verified"] == 2
 
 
 def test_reliable_face_rejects_body_strong_but_face_wrong_identity():

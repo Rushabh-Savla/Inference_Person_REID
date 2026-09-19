@@ -26,11 +26,24 @@ class QdrantGallery:
         path: str = "qdrant_storage",
         prefix: str = "person_reid",
         limit: int = 32,
+        url: str | None = None,
+        api_key: str | None = None,
     ):
+        import os
+
         self.path = str(path)
         self.prefix = str(prefix)
         self.limit = max(4, int(limit))
-        self.client = QdrantClient(path=self.path)
+        self.url = str(url or os.environ.get("QDRANT_URL", "")).strip()
+        key = api_key or os.environ.get("QDRANT_API_KEY")
+        if self.url:
+            self.client = QdrantClient(
+                url=self.url,
+                api_key=key or None,
+                timeout=30.0,
+            )
+        else:
+            self.client = QdrantClient(path=self.path)
         self.collections: Dict[str, str] = {}
 
         for name, dim in self.DIMS.items():

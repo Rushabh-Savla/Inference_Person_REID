@@ -76,6 +76,9 @@ class MultiModalStrict:
         self.pending_model_min = float(self.icfg.get("new_pending_model_min", 0.55))
         self.pending_clothing_min = float(self.icfg.get("new_pending_clothing_min", 0.58))
         self.pending_required_models = 3
+        self.pending_ttl = int(self.icfg.get("pending_ttl_seconds", 300))
+        self.pending_max = int(self.icfg.get("pending_max", 64))
+        self.pending_time_gap = float(self.icfg.get("pending_time_gap", 0.75))
         self.stats = {
             "feature": 0,
             "recovery": 0,
@@ -466,57 +469,8 @@ class MultiModalStrict:
             "quality": crop_quality,
         }
 
-    def stage_new(self, obs):
-        frame = int(obs["row"].get("frame", -1))
-        camera = str(obs["camera"])
-        ranked = []
-        for index, item in enumerate(self.pending):
-            if (
-                item.get("last_camera") == camera
-                and int(item.get("last_frame", -2)) == frame
-            ):
-                continue
-            score = self.pending_score(obs, item)
-            if score is None:
-                continue
-            if (
-                score["top"] < self.pending_clothing_min
-                or score["bottom"] < self.pending_clothing_min
-                or score["support"] < self.pending_required_models
-            ):
-                continue
-            ranked.append((float(score["score"]), index, score))
-        ranked.sort(reverse=True)
-        if ranked:
-            best, index, _ = ranked[0]
-            second = float(ranked[1][0]) if len(ranked) > 1 else 0.0
-            margin = best - second
-            if best >= self.pending_match and margin >= self.pending_margin:
-                item = self.pending[index]
-                item["resnet"].append(np.asarray(obs["resnet"], np.float32))
-                item["swin"].append(np.asarray(obs["swin"], np.float32))
-                item["solider"].append(np.asarray(obs["solider"], np.float32))
-                item["attributes"].append(np.asarray(obs["attributes"], np.float32))
-                if obs.get("pose") is not None:
-                    item["pose"].append(np.asarray(obs["pose"], np.float32))
-                if obs.get("face") is not None and obs["face"].get("valid"):
-                    item["face"].append(np.asarray(obs["face"]["vector"], np.float32))
-                item["observations"].append(obs)
-                item["count"] += 1
-                item["last_camera"] = camera
-                item["last_frame"] = frame
-                self.stats["pending_new_observations"] += 1
-                if item["count"] >= self.pending_min:
-                    seed = item["observations"][0]
-                    gid = self.new(seed)
-                    for extra in item["observations"][1:]:
-                        self.save(gid, extra)
-                    self.pending.pop(index)
-                    self.stats["pending_new_confirmed"] += 1
-                    return gid
-                return None
-
-        self.pending.append({
+    def _pending_add(self, obs):
+        item = {
             "resnet": [np.asarray(obs["resnet"], np.float32)],
             "swin": [np.asarray(obs["swin"], np.float32)],
             "solider": [np.asarray(obs["solider"], np.float32)],
@@ -531,18 +485,116 @@ class MultiModalStrict:
                 else []
             ),
             "observations": [obs],
+            "frames": {int(obs["row"].get("frame", -1))},
+            "cameras": {str(obs["camera"])},
             "count": 1,
-            "last_camera": camera,
-            "last_frame": frame,
-        })
+            "last_camera": str(obs["camera"]),
+            "last_frame": int(obs["row"].get("frame", -1)),
+            "last_time": float(obs["time"]),
+        }
+        self.pending.append(item)
+        self.pending = self.pending[-self.pending_max:]
         self.stats["pending_new_observations"] += 1
+
+    def _pending_update(self, item, obs):
+        item["resnet"].append(np.asarray(obs["resnet"], np.float32))
+        item["swin"].append(np.asarray(obs["swin"], np.float32))
+        item["solider"].append(np.asarray(obs["solider"], np.float32))
+        item["attributes"].append(np.asarray(obs["attributes"], np.float32))
+        if obs.get("pose") is not None:
+            item["pose"].append(np.asarray(obs["pose"], np.float32))
+        if obs.get("face") is not None and obs["face"].get("valid"):
+            item["face"].append(np.asarray(obs["face"]["vector"], np.float32))
+        item["observations"].append(obs)
+        item["frames"].add(int(obs["row"].get("frame", -1)))
+        item["cameras"].add(str(obs["camera"]))
+        item["count"] += 1
+        item["last_camera"] = str(obs["camera"])
+        item["last_frame"] = int(obs["row"].get("frame", -1))
+        item["last_time"] = float(obs["time"])
+        for name, size in (
+            ("resnet", 96),
+            ("swin", 96),
+            ("solider", 96),
+            ("attributes", 64),
+            ("pose", 64),
+            ("face", 48),
+        ):
+            item[name] = item[name][-size:]
+        item["observations"] = item["observations"][-96:]
+        self.stats["pending_new_observations"] += 1
+
+    def _pending_prune(self, obs):
+        now = float(obs["time"])
+        self.pending = [
+            item for item in self.pending
+            if now - float(item.get("last_time", now)) <= self.pending_ttl
+        ]
+        self.pending = self.pending[-self.pending_max:]
+
+    def stage_new(self, obs):
+        self._pending_prune(obs)
+        camera = str(obs["camera"])
+        frame = int(obs["row"].get("frame", -1))
+        now = float(obs["time"])
+        ranked = []
+
+        for index, item in enumerate(self.pending):
+            if (
+                item.get("last_camera") == camera
+                and int(item.get("last_frame", -2)) == frame
+            ):
+                continue
+            # Prevent simultaneous observations from different cameras from
+            # being absorbed into the same not-yet-confirmed identity.
+            if abs(now - float(item.get("last_time", now))) < self.pending_time_gap:
+                continue
+
+            score = self.pending_score(obs, item)
+            if score is None:
+                continue
+            if (
+                score["top"] < self.pending_clothing_min
+                or score["bottom"] < self.pending_clothing_min
+                or score["support"] < self.pending_required_models
+            ):
+                continue
+            ranked.append((float(score["score"]), index, score))
+
+        ranked.sort(key=lambda value: value[0], reverse=True)
+        if ranked:
+            best, index, _ = ranked[0]
+            second = float(ranked[1][0]) if len(ranked) > 1 else 0.0
+            if best >= self.pending_match and best - second >= self.pending_margin:
+                item = self.pending[index]
+                self._pending_update(item, obs)
+
+                if (
+                    item["count"] >= self.pending_min
+                    and len(item["frames"]) >= 3
+                ):
+                    seed = item["observations"][0]
+                    gid = self.new(seed)
+                    for extra in item["observations"][1:]:
+                        self.save(gid, extra)
+                    self.pending.pop(index)
+                    self.stats["pending_new_confirmed"] += 1
+                    return gid
+                return None
+
+        self._pending_add(obs)
         return None
 
     def new(self, obs):
         gid = int(self.reg.allocate_gid())
         self.pro[gid] = {
-            "resnet": [], "swin": [], "solider": [],
-            "attributes": [], "face": [], "pose": [], "camera": set(),
+            "resnet": [],
+            "swin": [],
+            "solider": [],
+            "attributes": [],
+            "face": [],
+            "pose": [],
+            "camera": set(),
         }
         self.save(gid, obs)
         self.stats["new"] += 1
@@ -553,73 +605,96 @@ class MultiModalStrict:
         gids = sorted(self.pro)
         if count == 0:
             return []
+
         floor = float(self.icfg.get("dummy_floor", 0.35))
-        cols = len(gids) + count
-        mat = np.full((count, cols), floor, np.float32)
-        for i, rows in enumerate(sets):
-            for j, gid in enumerate(gids):
-                item = rows.get(gid)
-                if item is not None:
-                    mat[i, j] = float(item["score"])
-        rr, cc = linear_sum_assignment(-mat)
-        assignments = {
-            int(i): int(gids[j])
-            for i, j in zip(rr.tolist(), cc.tolist())
-            if j < len(gids)
-        }
-        take = {}
-        for i, j in zip(rr.tolist(), cc.tolist()):
-            rows = sets[i]
-            ranked = sorted(rows.items(), key=lambda x: x[1]["score"], reverse=True)
-            second = float(ranked[1][1]["score"]) if len(ranked) > 1 else 0.0
-            item = rows.get(gids[j]) if j < len(gids) else None
-            gid = None
-            if item is not None:
-                selected_gid = int(gids[j])
-                pair_second = max(
-                    (
-                        float(value["score"])
-                        for other_gid, value in rows.items()
-                        if (
-                            int(other_gid) != selected_gid
-                            and int(other_gid) not in assignments.values()
-                        )
-                    ),
-                    default=0.0,
-                )
-                if self.accept(item, pair_second, recovery=recovery):
-                    gid = selected_gid
-            if gid is None and not recovery and commit:
-                best = float(ranked[0][1]["score"]) if ranked else 0.0
-                deep = float(ranked[0][1]["deep"]) if ranked else 0.0
-                if (
-                    best < float(self.icfg.get("new_max", 0.48))
-                    and deep < float(self.icfg.get("new_deep_max", 0.54))
-                ):
-                    gid = self.stage_new(obs[i])
-            if gid is not None:
-                take[i] = gid
-        used = set()
+        banned = set()
+
+        # Assignment is solved globally, then any rejected pair is banned and
+        # Hungarian is rerun so its observation can compete for its next-best
+        # identity. This avoids a locally rejected match poisoning the whole row.
+        while True:
+            cols = len(gids) + count
+            mat = np.full((count, cols), floor, np.float32)
+            for i, rows in enumerate(sets):
+                for j, gid in enumerate(gids):
+                    if (i, gid) in banned:
+                        continue
+                    item = rows.get(gid)
+                    if item is not None:
+                        mat[i, j] = float(item["score"])
+
+            rr, cc = linear_sum_assignment(-mat)
+            chosen = {}
+            for i, j in zip(rr.tolist(), cc.tolist()):
+                if j < len(gids) and mat[i, j] > floor:
+                    chosen[int(i)] = int(gids[j])
+
+            rejected = []
+            for i, gid in chosen.items():
+                item = sets[i].get(gid)
+                if item is None:
+                    rejected.append((i, gid))
+                    continue
+
+                used_elsewhere = {
+                    other
+                    for row, other in chosen.items()
+                    if row != i
+                }
+                alternatives = [
+                    float(value["score"])
+                    for other_gid, value in sets[i].items()
+                    if int(other_gid) != int(gid)
+                    and int(other_gid) not in used_elsewhere
+                    and (i, int(other_gid)) not in banned
+                ]
+                second = max(alternatives, default=0.0)
+                if not self.accept(item, second, recovery=recovery):
+                    rejected.append((i, gid))
+
+            if not rejected:
+                break
+
+            before = len(banned)
+            banned.update((int(i), int(gid)) for i, gid in rejected)
+            if len(banned) == before:
+                break
+
         out = ["PENDING"] * count
-        for i in range(count):
-            gid = take.get(i)
-            if gid is None:
-                self.stats["pending"] += 1
-                continue
+        used = set()
+        matched = {}
+
+        for i, gid in chosen.items():
             if gid in used:
                 self.stats["duplicate"] += 1
                 continue
             used.add(gid)
+            matched[i] = gid
             out[i] = f"G{gid:06d}"
-        for i, gid in take.items():
-            if out[i] == "PENDING" or not commit:
-                continue
-            item = obs[i]
-            self.save(gid, item)
-            if recovery:
-                self.stats["recovery_match"] += 1
-            if len(self.pro[gid]["camera"]) > 1:
-                self.stats["cross"] += 1
+
+        # New-ID admission happens only after all existing identities have had
+        # their chance. Recovery never creates a new GID.
+        if not recovery and commit:
+            for i in range(count):
+                if out[i] != "PENDING":
+                    continue
+                gid = self.stage_new(obs[i])
+                if gid is None:
+                    continue
+                label = f"G{gid:06d}"
+                if label in used:
+                    continue
+                used.add(label)
+                out[i] = label
+
+        if commit:
+            for i, gid in matched.items():
+                if out[i] != "PENDING":
+                    self.save(gid, obs[i])
+                    if recovery:
+                        self.stats["recovery_match"] += 1
+                    if len(self.pro[gid]["camera"]) > 1:
+                        self.stats["cross"] += 1
         return out
 
     def observe(self, frame, rows, commit=True, recovery=False):

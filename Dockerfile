@@ -38,7 +38,7 @@ RUN python3 -m pip install --upgrade pip setuptools wheel --ignore-installed && 
     python3 -m pip install --no-cache-dir --no-deps insightface==2.0
 
 COPY docker/requirements-extra.txt /tmp/reid-extra.txt
-RUN python3 -m pip install --no-cache-dir -r /tmp/reid-extra.txt --constraint /tmp/reid-requirements.txt
+RUN python3 -m pip install --no-cache-dir -r /tmp/reid-extra.txt --constraint /tmp/reid-requirements.txt\n\nRUN python3 - <<'PY'\nimport cv2\nimport numpy\nimport onnxruntime\n\nassert numpy.__version__.startswith("1.26."), numpy.__version__\nassert cv2.__version__ == "4.10.0", cv2.__version__\nassert "CUDAExecutionProvider" in onnxruntime.get_available_providers(), onnxruntime.get_available_providers()\nprint("[docker] NumPy:", numpy.__version__)\nprint("[docker] OpenCV:", cv2.__version__)\nprint("[docker] ORT:", onnxruntime.__version__)\nprint("[docker] ORT providers:", onnxruntime.get_available_providers())\nPY
 
 ENV PYTHONPATH=/workspace/inference_person_reid:/workspace/inference_person_reid/src
 ENV NVDCF_DEEPSTREAM_ROOT=/opt/nvidia/deepstream/deepstream

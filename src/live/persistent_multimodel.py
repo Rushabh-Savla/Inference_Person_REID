@@ -159,6 +159,26 @@ class PersistentMultimodelRegistry:
                             (gid, str(model), idx, dim, sqlite3.Binary(blob)),
                         )
 
+    def identity_meta(self) -> Dict[int, Dict[str, object]]:
+        rows = self._db.execute(
+            "SELECT gid, obs, last_ts, last_cam, spans_json FROM identities ORDER BY gid"
+        ).fetchall()
+        result: Dict[int, Dict[str, object]] = {}
+        for gid, obs, last_ts, last_cam, spans in rows:
+            try:
+                cameras = json.loads(spans) if spans else []
+            except json.JSONDecodeError:
+                cameras = []
+            if not isinstance(cameras, list):
+                cameras = []
+            result[int(gid)] = {
+                "obs": int(obs),
+                "last_ts": float(last_ts),
+                "last_camera": str(last_cam),
+                "cameras": [str(x) for x in cameras],
+            }
+        return result
+
     def load_gallery(self) -> Dict[int, Dict[str, list[np.ndarray]]]:
         rows = self._db.execute("SELECT gid, model, idx, dim, vector FROM embeddings ORDER BY gid, model, idx").fetchall()
         result: Dict[int, Dict[str, list[np.ndarray]]] = {}

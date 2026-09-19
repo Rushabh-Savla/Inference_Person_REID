@@ -27,7 +27,6 @@ qdrant-client==1.19.1
 
 # --- Core numerics / IO ----------------------------------------------------
 numpy==1.26.4
-opencv-python==4.10.0.84
 PyYAML==6.0.3
 
 # InsightFace 2.0 is installed separately with --no-deps in the DeepStream Docker image

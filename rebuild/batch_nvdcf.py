@@ -7,6 +7,8 @@ import cv2
 import numpy as np
 from scipy.optimize import linear_sum_assignment
 
+from rebuild.overlap_guard import carry, merge
+
 from rebuild.multimodal_identity import MultiModal
 from rebuild.nvdcf_tracker import NvDCF
 
@@ -137,63 +139,6 @@ class BatchNvDCF:
             writer.release()
         return output
 
-    @staticmethod
-    def _merge_rows(tracked, detections, frame):
-        if not detections:
-            return tracked
-        if not tracked:
-            base = []
-            matched = set()
-        else:
-            matrix = []
-            for det in detections:
-                row = []
-                for item in tracked:
-                    ax1, ay1, ax2, ay2 = [float(x) for x in det["bbox"]]
-                    bx1, by1, bx2, by2 = [float(x) for x in item["bbox"]]
-                    x1, y1 = max(ax1, bx1), max(ay1, by1)
-                    x2, y2 = min(ax2, bx2), min(ay2, by2)
-                    inter = max(0.0, x2 - x1) * max(0.0, y2 - y1)
-                    aa = max(1.0, (ax2 - ax1) * (ay2 - ay1))
-                    ab = max(1.0, (bx2 - bx1) * (by2 - by1))
-                    row.append(inter / max(1.0, aa + ab - inter))
-                matrix.append(row)
-            rr, cc = linear_sum_assignment(-np.asarray(matrix, dtype=np.float32))
-            matched = {
-                int(r): int(col)
-                for r, col in zip(rr.tolist(), cc.tolist())
-                if float(matrix[r][col]) >= 0.20
-            }
-            base = list(tracked)
-
-        for index, item in enumerate(detections):
-            if index in matched:
-                continue
-            base.append(
-                {
-                    "camera": str(item["camera"]),
-                    "frame": int(frame),
-                    "timestamp": float(item["timestamp"]),
-                    "track_id": -1000000 - int(frame) * 100 - int(index),
-                    "bbox": item["bbox"],
-                    "detection_score": float(item.get("detection_score", 0.0)),
-                    "tracker_confidence": 0.0,
-                    "shadow": True,
-                }
-            )
-        return base
-
-    @staticmethod
-    def _load_detections(path):
-        output = []
-        if not path.is_file():
-            return output
-        with path.open("r", encoding="utf-8") as handle:
-            for line in handle:
-                if line.strip():
-                    output.append(json.loads(line))
-        return output
-
     def _solve_camera(self, camera, path, tracker_rows):
         detections_path = self.cache / f"{camera}.tracker.detections.jsonl"
         detections = self._load_detections(detections_path)
@@ -205,7 +150,7 @@ class BatchNvDCF:
         for item in tracker_rows:
             byframe.setdefault(int(item["frame"]), []).append(item)
         for frame_id, values in detections_byframe.items():
-            byframe[frame_id] = self._merge_rows(
+            byframe[frame_id] = merge(
                 byframe.get(frame_id, []),
                 values,
                 frame_id,
@@ -222,29 +167,6 @@ class BatchNvDCF:
         overlap_anchors = []
         recovery_until = -1
         frame = 0
-
-        def carry(rows, anchors, gids_used):
-            if not rows or not anchors:
-                return {}
-            matrix = []
-            for row in rows:
-                values = []
-                for anchor in anchors:
-                    values.append(self._metrics(row["bbox"], anchor["bbox"])[0])
-                matrix.append(values)
-            rr, cc = linear_sum_assignment(-np.asarray(matrix, dtype=np.float32))
-            output = {}
-            for r, col in zip(rr.tolist(), cc.tolist()):
-                gid = str(anchors[col]["gid"])
-                score = float(matrix[r][col])
-                if (
-                    score >= 0.15
-                    and gid.startswith("G")
-                    and gid not in gids_used
-                ):
-                    output[int(r)] = gid
-                    gids_used.add(gid)
-            return output
 
         try:
             while True:

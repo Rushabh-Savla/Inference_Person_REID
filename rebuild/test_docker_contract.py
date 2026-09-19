@@ -17,6 +17,13 @@ def test_docker_stack_is_deepstream_and_qdrant():
     assert "shm_size: \"8gb\"" in compose
     assert "QDRANT_PORT" in compose
     assert "pyds-1.2.2-cp312-cp312-linux_x86_64.whl" in docker
+    assert "libx264-164" in docker
+    assert "libx265-199" in docker
+    assert "libmpg123-0t64" in docker
+    assert "libmp3lame0" in docker
+    assert "avdec_mpeg4" in docker
+    assert "avdec_h264" in docker
+    assert "opencv-python==4.10.0.84" in docker or "opencv-python==4.10.0.84" in (ROOT / "requirements.txt").read_text(encoding="utf-8")
 
 
 def test_container_runtime_is_strict():

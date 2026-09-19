@@ -242,9 +242,11 @@ class NvDCF:
     @classmethod
     def _split(cls, dets, poses):
         if not poses:
-            return dets
+            return list(dets)
 
         out = []
+        pose_keep = []
+
         for det in dets:
             inside = []
             for pose, _conf in poses:
@@ -268,48 +270,30 @@ class NvDCF:
 
             keep = []
             for item in inside:
-                if all(cls._iou(item, other) < 0.70 for other in keep):
+                if all(cls._iou(item, other) < 0.90 for other in keep):
                     keep.append(item)
-            if len(keep) >= 2:
-                out.extend(keep)
-            else:
-                out.append(det)
 
-        # Pose is also a secondary person detector. When YOLO main detection
-        # misses a person during occlusion, retain a sufficiently confident
-        # pose box if it is not already represented by a detector box.
+            if len(keep) >= 2:
+                for item in keep:
+                    if all(cls._iou(item, other) < 0.90 for other in pose_keep):
+                        pose_keep.append(item)
+                continue
+            out.append(det)
+
+        # Pose is a secondary person detector. It can recover a person missed
+        # by the detector or split a single detector crop containing multiple
+        # people. Do not run an aggressive NMS here: high-IoU boxes can be two
+        # physically distinct, heavily occluded people.
         for pose, pconf in poses:
             if pconf < 0.25:
                 continue
-            if not any(cls._iou(pose, item) >= 0.45 for item in out):
-                out.append(pose)
+            if any(cls._iou(pose, item) >= 0.45 for item in out):
+                continue
+            if all(cls._iou(pose, item) < 0.90 for item in pose_keep):
+                pose_keep.append(pose)
 
-        # A final deterministic NMS keeps duplicate pose/detector boxes from
-        # becoming two physical people.
-        ranked = []
-        for item in out:
-            score = self.conf
-            for det in dets:
-                if self._iou(item, det[:4]) >= 0.90:
-                    score = max(score, float(det[4]))
-            for pbox, pconf in poses:
-                if self._iou(item, pbox) >= 0.90:
-                    score = max(score, float(pconf))
-            ranked.append((float(score), item))
-        ranked.sort(
-            key=lambda value: (
-                -value[0],
-                -(
-                    (value[1][2] - value[1][0])
-                    * (value[1][3] - value[1][1])
-                ),
-            )
-        )
-        keep = []
-        for _score, item in ranked:
-            if all(self._iou(item, other) < 0.85 for other in keep):
-                keep.append(item)
-        return keep
+        out.extend(pose_keep)
+        return out
 
     def _detect(self, frame):
         result = self.model(

@@ -3,7 +3,7 @@ set -euo pipefail
 
 export PYTHONPATH="/workspace/inference_person_reid:/workspace/inference_person_reid/src:${PYTHONPATH:-}"
 export NVDCF_DEEPSTREAM_ROOT="${NVDCF_DEEPSTREAM_ROOT:-/opt/nvidia/deepstream/deepstream}"
-export NVDCF_TRACKER_LIBRARY="${NVDCF_TRACKER_LIBRARY:-/opt/nvidia/deepstream/deepstream/lib/gst-plugins/libnvds_nvmultiobjecttracker.so}"
+export NVDCF_TRACKER_LIBRARY="${NVDCF_TRACKER_LIBRARY:-/opt/nvidia/deepstream/deepstream/lib/libnvds_nvmultiobjecttracker.so}"
 export GST_PLUGIN_PATH="/opt/nvidia/deepstream/deepstream/lib/gst-plugins:${GST_PLUGIN_PATH:-}"
 export LD_LIBRARY_PATH="/opt/nvidia/deepstream/deepstream/lib:/opt/nvidia/deepstream/deepstream/lib/gst-plugins:${LD_LIBRARY_PATH:-}"
 export QDRANT_URL="${QDRANT_URL:-http://127.0.0.1:6333}"

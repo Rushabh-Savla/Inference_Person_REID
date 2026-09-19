@@ -5,7 +5,6 @@ from pathlib import Path
 
 import cv2
 import numpy as np
-from scipy.optimize import linear_sum_assignment
 
 from rebuild.overlap_guard import carry, merge
 
@@ -342,6 +341,7 @@ class BatchNvDCF:
                 "face_observations": int(self.identity.stats["face_observations"]),
                 "face_reliable": int(self.identity.stats["face_reliable"]),
                 "qdrant_retrievals": int(self.identity.stats["qdrant_retrievals"]),
+                "memory_reject": int(self.identity.stats.get("memory_reject", 0)),
             }
             (self.out / "nvdcf_identity_debug.json").write_text(json.dumps(debug, indent=2), encoding="utf-8")
             print(

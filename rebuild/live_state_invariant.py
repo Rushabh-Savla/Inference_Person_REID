@@ -209,7 +209,7 @@ class Camera(threading.Thread):
 def _manifest(session: Path, sources: Dict[str, str]):
     now = datetime.now(timezone.utc).isoformat()
     payload = {
-        "mode": "safe055_v6_live_record_then_reconcile",
+        "mode": "nvdcf_multimodal_live_record_then_reconcile",
         "created_utc": now,
         "cameras": {
             name: {"source": source, "recording": str(session / f"{name}.mp4")}
@@ -237,8 +237,8 @@ def run_live_state(cfg_path: str, sources: Dict[str, str], output_dir: str | Non
 
     workers = [Camera(name, source, session, show) for name, source in sources.items()]
 
-    print("[live-state] Safe055/V6 LIVE")
-    print("[live-state] RECORD ALL CAMERAS TO MP4 -> EXACT SAFE055/V6 JOINT RECONCILIATION")
+    print("[live-state] NVIDIA NvDCF + multimodal ReID LIVE")
+    print("[live-state] RECORD ALL CAMERAS TO MP4 -> NvDCF + multimodal joint reconciliation")
     print("[live-state] Old FastReID/GlobalIdentityV4 live engine: DISABLED")
     print(f"[live-state] session: {session}")
     if show:
@@ -280,7 +280,7 @@ def run_live_state(cfg_path: str, sources: Dict[str, str], output_dir: str | Non
         temp = handle.name
 
     try:
-        print("[live-state] PASS 1/2/3: exact Safe055/V6 joint video pipeline")
+        print("[live-state] RECONCILE: NVIDIA NvDCF + Qdrant + face + top/bottom clothing + ReID + pose")
         BatchPipelineStateInvariantJointAttributes(temp).run(paths)
     finally:
         Path(temp).unlink(missing_ok=True)
@@ -292,4 +292,4 @@ def run_live_state(cfg_path: str, sources: Dict[str, str], output_dir: str | Non
     print("[live-state] FINAL MP4 OUTPUTS:")
     for path in outputs:
         print(f"  {path}")
-    print(f"[live-state] final Safe055/V6 outputs: {final}")
+    print(f"[live-state] final NvDCF multimodal outputs: {final}")

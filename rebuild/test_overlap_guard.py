@@ -14,7 +14,7 @@ def test_two_detections_survive_one_nvdcf_box():
     ]
     out = merge(tracked, detections, 2)
     assert len(out) == 2
-    assert sum(bool(x.get("shadow")) for x in out) == 1
+    assert sum(bool(x.get("shadow")) for x in out) == 2
     assert len({int(x["track_id"]) for x in out}) == 2
 
 

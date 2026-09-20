@@ -44,6 +44,13 @@ RUN python3 -m pip install --no-cache-dir -r /tmp/reid-extra.txt --constraint /t
 RUN python3 -m pip install --no-cache-dir --no-deps insightface==2.0
 
 RUN set -eux; \
+    ldconfig; \
+    test -s /usr/lib/x86_64-linux-gnu/libmp3lame.so.0; \
+    test -s /usr/lib/x86_64-linux-gnu/libx264.so.164; \
+    test -s /usr/lib/x86_64-linux-gnu/libx265.so.199; \
+    test -s /usr/lib/x86_64-linux-gnu/libmpg123.so.0; \
+    test -s /usr/lib/x86_64-linux-gnu/libvpx.so.9; \
+    test -s /usr/lib/x86_64-linux-gnu/libxvidcore.so.4; \
     missing="$(ldd /usr/lib/x86_64-linux-gnu/gstreamer-1.0/libgstlibav.so | grep 'not found' || true)"; \
     test -z "$missing"; \
     GST_REGISTRY=/tmp/reid-gst-registry.bin \

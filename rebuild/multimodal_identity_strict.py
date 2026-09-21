@@ -743,7 +743,7 @@ class MultiModalStrict:
             "pose": [],
             "camera": set(),
         }
-        self.save(gid, obs)
+        self.save(gid, obs, force=True)
         self.stats["new"] += 1
         return gid
 

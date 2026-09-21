@@ -350,11 +350,6 @@ class NvDCF:
         fps = float(cap.get(cv2.CAP_PROP_FPS)) or 20.0
         cap.release()
 
-        twidth = self.width or width
-        theight = self.height or height
-        twidth = max(32, (twidth + 31) // 32 * 32)
-        theight = max(32, (theight + 31) // 32 * 32)
-
         if not self.library:
             raise RuntimeError(
                 "NvDCF low-level library not found. Install DeepStream "
@@ -366,10 +361,23 @@ class NvDCF:
                 "DeepStream config_tracker_NvDCF_accuracy.yml sample."
             )
 
-        # Decode with OpenCV/FFmpeg in CPU memory and inject raw RGBA frames
-        # through appsrc. This bypasses uridecodebin/nvv4l2decoder entirely,
-        # which is required for 2560x1440 MPEG-4 sources on this GPU because
-        # the NVIDIA hardware decoder advertises a 2048x2048 maximum.
+        # Keep NvDCF's internal processing surface bounded on high-resolution
+        # dGPU sources while retaining the original source resolution for
+        # detection, Re-ID, and final rendering.
+        if width > 1920 or height > 1088:
+            ratio = min(1920.0 / width, 1088.0 / height)
+            twidth = max(32, int(round(width * ratio)) // 32 * 32)
+            theight = max(32, int(round(height * ratio)) // 32 * 32)
+        else:
+            twidth = max(32, (width + 31) // 32 * 32)
+            theight = max(32, (height + 31) // 32 * 32)
+        twidth = max(32, twidth)
+        theight = max(32, theight)
+
+        # OpenCV/FFmpeg owns file decoding. appsrc injects CPU BGR frames into
+        # nvvideoconvert, which uploads them to NVMM before nvstreammux/NvDCF.
+        # This bypasses uridecodebin and nvv4l2decoder, including the GPU
+        # decoder's 2048x2048 restriction on the supplied 2560x1440 MPEG-4.
         pipeline = Gst.Pipeline.new(f"nvdcf_{camera}")
         source = Gst.ElementFactory.make("appsrc", f"source_{camera}")
         preconv = Gst.ElementFactory.make("nvvideoconvert", f"preconv_{camera}")
@@ -386,7 +394,7 @@ class NvDCF:
         source.set_property(
             "caps",
             Gst.Caps.from_string(
-                f"video/x-raw,format=RGBA,width={width},height={height},"
+                f"video/x-raw,format=BGR,width={width},height={height},"
                 f"framerate={max(1, int(round(fps)))}/1"
             ),
         )
@@ -399,6 +407,10 @@ class NvDCF:
         if source.find_property("max-bytes") is not None:
             source.set_property("max-bytes", 0)
 
+        # nvvideoconvert supports RAW input and NVMM output on dGPU.
+        # Explicitly select device memory for deterministic DeepStream input.
+        if preconv.find_property("nvbuf-memory-type") is not None:
+            preconv.set_property("nvbuf-memory-type", 0)
         prefilter.set_property(
             "caps",
             Gst.Caps.from_string("video/x-raw(memory:NVMM),format=NV12"),
@@ -453,14 +465,17 @@ class NvDCF:
         detections_target = Path(target).with_suffix(".detections.jsonl")
         det_handle = detections_target.open("w", encoding="utf-8")
         detection_cache = {}
-        frame_cache = {}
-        frame_lock = threading.Lock()
+        detection_lock = threading.Lock()
 
         def preprobe(_pad, info, _data):
             buf = info.get_buffer()
             if buf is None:
                 return Gst.PadProbeReturn.OK
             meta = pyds.gst_buffer_get_nvds_batch_meta(hash(buf))
+            if meta is None:
+                state["error"] = "NvDCF received a buffer without NvDsBatchMeta"
+                return Gst.PadProbeReturn.OK
+
             frames = meta.frame_meta_list
             while frames is not None:
                 try:
@@ -468,16 +483,18 @@ class NvDCF:
                 except StopIteration:
                     break
                 frame_number = int(fm.frame_num) + 1
+                with detection_lock:
+                    dets = detection_cache.pop(frame_number, None)
+                if dets is None:
+                    state["error"] = (
+                        f"NvDCF detection metadata missing for frame {frame_number}"
+                    )
+                    try:
+                        frames = frames.next
+                    except StopIteration:
+                        break
+                    continue
 
-                with frame_lock:
-                    image = frame_cache.pop(frame_number, None)
-
-                if image is None:
-                    # Keep metadata creation safe if a frame was flushed while
-                    # shutting down. Normal playback always has a cached frame.
-                    return Gst.PadProbeReturn.OK
-
-                dets = self._detect(image)
                 cached = []
                 for index, (x1, y1, x2, y2, conf) in enumerate(dets):
                     item = {
@@ -516,6 +533,8 @@ class NvDCF:
             if buf is None:
                 return Gst.PadProbeReturn.OK
             meta = pyds.gst_buffer_get_nvds_batch_meta(hash(buf))
+            if meta is None:
+                return Gst.PadProbeReturn.OK
             frames = meta.frame_meta_list
             while frames is not None:
                 try:
@@ -554,7 +573,8 @@ class NvDCF:
                     except StopIteration:
                         break
 
-                detections = detection_cache.pop(frame, [])
+                with detection_lock:
+                    detections = detection_cache.pop(frame, [])
                 merged = merge(tracked, detections, frame, minimum=0.20)
                 for item in merged:
                     handle.write(json.dumps(item, separators=(",", ":")) + "\n")
@@ -573,7 +593,6 @@ class NvDCF:
         )
 
         loop = GLib.MainLoop()
-        feeder = None
 
         def message(_bus, msg):
             if msg.type == Gst.MessageType.ERROR:
@@ -604,27 +623,17 @@ class NvDCF:
                     ok, frame = feed_cap.read()
                     if not ok:
                         break
-                    if frame.shape[1] != width or frame.shape[0] != height:
-                        frame = cv2.resize(frame, (width, height), interpolation=cv2.INTER_LINEAR)
+
+                    dets = self._detect(frame)
+                    frame_number = index + 1
+                    with detection_lock:
+                        detection_cache[frame_number] = dets
 
                     bgr = np.ascontiguousarray(frame)
-                    with frame_lock:
-                        frame_cache[index + 1] = bgr
-
-                        # Streaming is ordered and appsrc only queues two frames.
-                        # Keep the cache bounded if shutdown/backpressure races
-                        # leave a frame behind.
-                        if len(frame_cache) > 6:
-                            oldest = sorted(frame_cache)[:-6]
-                            for key in oldest:
-                                frame_cache.pop(key, None)
-
-                    rgba = cv2.cvtColor(bgr, cv2.COLOR_BGR2RGBA)
-                    payload = np.ascontiguousarray(rgba)
                     gst_buffer = Gst.Buffer.new_allocate(
-                        None, int(payload.nbytes), None
+                        None, int(bgr.nbytes), None
                     )
-                    gst_buffer.fill(0, payload.tobytes())
+                    gst_buffer.fill(0, bgr.tobytes())
                     gst_buffer.pts = index * duration
                     gst_buffer.dts = gst_buffer.pts
                     gst_buffer.duration = duration
@@ -661,7 +670,7 @@ class NvDCF:
         try:
             loop.run()
         finally:
-            feeder.join(timeout=15.0)
+            feeder.join(timeout=30.0)
             pipeline.set_state(Gst.State.NULL)
             handle.close()
             det_handle.close()
@@ -670,8 +679,8 @@ class NvDCF:
                     mux.release_request_pad(mux_sink)
                 except Exception:
                     pass
-            with frame_lock:
-                frame_cache.clear()
+            with detection_lock:
+                detection_cache.clear()
 
         if state["error"]:
             raise RuntimeError(f"NvDCF failed for {camera}: {state['error']}")

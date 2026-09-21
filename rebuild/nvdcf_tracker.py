@@ -10,6 +10,7 @@ import numpy as np
 from ultralytics import YOLO
 
 from rebuild.deepstream_runtime import DeepStreamRuntime
+from rebuild.overlap_guard import merge
 
 
 class NvDCF:
@@ -24,7 +25,7 @@ class NvDCF:
         self.cfg = dict(cfg or {})
         self.model = YOLO(self.cfg["model"])
         self.conf = float(self.cfg.get("conf", 0.55))
-        self.iou = float(self.cfg.get("iou", 0.60))
+        self.iou = float(self.cfg.get("iou", 0.85))
         self.pose = None
         pose = self.cfg.get("pose", {}) or {}
         if bool(pose.get("enabled", True)):
@@ -438,6 +439,7 @@ class NvDCF:
         handle = target.open("w", encoding="utf-8")
         detections_target = Path(target).with_suffix(".detections.jsonl")
         det_handle = detections_target.open("w", encoding="utf-8")
+        detection_cache = {}
 
         def preprobe(_pad, info, _data):
             buf = info.get_buffer()
@@ -456,20 +458,20 @@ class NvDCF:
                     cv2.COLOR_RGBA2BGR,
                 )
                 dets = self._detect(image)
+                frame_number = int(fm.frame_num) + 1
+                cached = []
                 for index, (x1, y1, x2, y2, conf) in enumerate(dets):
+                    item = {
+                        "camera": str(camera),
+                        "frame": frame_number,
+                        "timestamp": frame_number / fps,
+                        "bbox": [float(x1), float(y1), float(x2), float(y2)],
+                        "detection_score": float(conf),
+                        "index": int(index),
+                    }
+                    cached.append(item)
                     det_handle.write(
-                        json.dumps(
-                            {
-                                "camera": str(camera),
-                                "frame": int(fm.frame_num) + 1,
-                                "timestamp": (int(fm.frame_num) + 1) / fps,
-                                "bbox": [float(x1), float(y1), float(x2), float(y2)],
-                                "detection_score": float(conf),
-                                "index": int(index),
-                            },
-                            separators=(",", ":"),
-                        )
-                        + "\n"
+                        json.dumps(item, separators=(",", ":")) + "\n"
                     )
                     obj = pyds.nvds_acquire_obj_meta_from_pool(meta)
                     if obj is None:
@@ -482,6 +484,7 @@ class NvDCF:
                     obj.rect_params.width = float(x2 - x1)
                     obj.rect_params.height = float(y2 - y1)
                     pyds.nvds_add_obj_meta_to_frame(fm, obj, None)
+                detection_cache[frame_number] = cached
                 try:
                     frames = frames.next
                 except StopIteration:
@@ -500,6 +503,7 @@ class NvDCF:
                 except StopIteration:
                     break
                 frame = int(fm.frame_num) + 1
+                tracked = []
                 objs = fm.obj_meta_list
                 while objs is not None:
                     try:
@@ -509,34 +513,36 @@ class NvDCF:
                     if int(obj.class_id) == 0:
                         left = float(obj.rect_params.left)
                         top = float(obj.rect_params.top)
-                        box = [
-                            left,
-                            top,
-                            left + float(obj.rect_params.width),
-                            top + float(obj.rect_params.height),
-                        ]
-                        tid = int(obj.object_id)
-                        trk = float(getattr(obj, "tracker_confidence", 0.0))
-                        det = float(getattr(obj, "confidence", 0.0))
-                        handle.write(
-                            json.dumps(
-                                {
-                                    "camera": str(camera),
-                                    "frame": frame,
-                                    "timestamp": frame / fps,
-                                    "track_id": tid,
-                                    "bbox": box,
-                                    "detection_score": det,
-                                    "tracker_confidence": trk,
-                                },
-                                separators=(",", ":"),
-                            )
-                            + "\n"
+                        tracked.append(
+                            {
+                                "camera": str(camera),
+                                "frame": frame,
+                                "timestamp": frame / fps,
+                                "track_id": int(obj.object_id),
+                                "bbox": [
+                                    left,
+                                    top,
+                                    left + float(obj.rect_params.width),
+                                    top + float(obj.rect_params.height),
+                                ],
+                                "detection_score": float(getattr(obj, "confidence", 0.0)),
+                                "tracker_confidence": float(getattr(obj, "tracker_confidence", 0.0)),
+                            }
                         )
                     try:
                         objs = objs.next
                     except StopIteration:
                         break
+
+                # Never let a single NvDCF box erase multiple detector
+                # hypotheses. When one tracker box ambiguously covers two or
+                # more person detections, emit one-to-one shadow rows so the
+                # feature matcher sees every person independently.
+                detections = detection_cache.pop(frame, [])
+                merged = merge(tracked, detections, frame, minimum=0.20)
+                for item in merged:
+                    handle.write(json.dumps(item, separators=(",", ":")) + "\n")
+
                 try:
                     frames = frames.next
                 except StopIteration:

@@ -291,12 +291,21 @@ class MultiModalStrict:
         # every persistent GID here defeated retrieval and turned every frame
         # into an O(persons-in-gallery) comparison. Keep only retrieved IDs
         # plus deterministic same-track/overlap anchors.
-        ids = {int(x) for x in hits}
+        reserved = {
+            int(x)
+            for x in (obs.get("reserved_gids") or [])
+            if str(x).lstrip("-").isdigit()
+        }
+        ids = {
+            int(x)
+            for x in hits
+            if int(x) not in reserved
+        }
         track_hint = obs.get("track_hint")
         if track_hint is not None:
             try:
                 gid = int(track_hint)
-                if gid in self.pro:
+                if gid in self.pro and gid not in reserved:
                     ids.add(gid)
             except (TypeError, ValueError):
                 pass
@@ -305,7 +314,7 @@ class MultiModalStrict:
                 gid = int(value)
             except (TypeError, ValueError):
                 continue
-            if gid in self.pro:
+            if gid in self.pro and gid not in reserved:
                 ids.add(gid)
         return sorted(ids), got
 

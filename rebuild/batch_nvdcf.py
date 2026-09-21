@@ -1,13 +1,23 @@
 from __future__ import annotations
 
 import json
-from concurrent.futures import ThreadPoolExecutor, as_completed
+from concurrent.futures import ProcessPoolExecutor, as_completed
+import multiprocessing as mp
 from pathlib import Path
 
 import cv2
 import numpy as np
 
 from rebuild.overlap_guard import carry, merge
+
+
+def _track_camera_worker(camera, path, config, target):
+    """Run one NvDCF camera in an isolated process for DeepStream safety."""
+    from rebuild.nvdcf_tracker import NvDCF
+
+    detector = NvDCF(config)
+    detector.track(camera, path, target)
+    return camera, path, target
 
 
 
@@ -550,14 +560,6 @@ class BatchNvDCF:
         all_labels = []
         trackers = {}
 
-        def track_one(item):
-            camera, path = item
-            target = self.cache / f"{camera}.tracker.jsonl"
-            from rebuild.nvdcf_tracker import NvDCF
-            detector = NvDCF(self.cfg["detector"])
-            detector.track(camera, path, target)
-            return camera, path, target
-
         workers = min(
             len(sources),
             max(
@@ -570,13 +572,26 @@ class BatchNvDCF:
                 ),
             ),
         )
-        print(f"[nvdcf] parallel cameras: {len(sources)} workers={workers}")
+        print(
+            f"[nvdcf] parallel cameras: {len(sources)} workers={workers} "
+            "(isolated DeepStream processes)"
+        )
 
-        with ThreadPoolExecutor(
+        context = mp.get_context("spawn")
+        with ProcessPoolExecutor(
             max_workers=workers,
-            thread_name_prefix="camera",
+            mp_context=context,
         ) as pool:
-            futures = [pool.submit(track_one, item) for item in sources]
+            futures = [
+                pool.submit(
+                    _track_camera_worker,
+                    camera,
+                    path,
+                    self.cfg["detector"],
+                    self.cache / f"{camera}.tracker.jsonl",
+                )
+                for camera, path in sources
+            ]
             for future in as_completed(futures):
                 camera, path, target = future.result()
                 trackers[camera] = (path, target)

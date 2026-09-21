@@ -94,4 +94,5 @@ overlap:
 
 input:
   videos: []
+  parallel_cameras: 3
   output_dir: rebuild_outputs_nvdcf_strict_v4

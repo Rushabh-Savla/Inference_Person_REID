@@ -833,11 +833,16 @@ class MultiModalStrict:
                         self.stats["cross"] += 1
                 continue
 
-            # A tracked person remains tied to its identity even during a
-            # temporary score dip. The crop can be poor, but the tracker has
-            # not changed the person. Keep the prior GID rather than spawning
-            # another identity.
-            if hinted_gid not in used_ids and hinted_gid in self.pro:
+            # Outside an overlap-recovery event, NvDCF continuity may hold a
+            # previously verified identity through a temporary feature dip. This
+            # is temporal support, not identity creation.
+            # During recovery, however, the tracker hint is NEVER authoritative:
+            # the candidate must be accepted from the current multimodal evidence.
+            if (
+                not recovery
+                and hinted_gid not in used_ids
+                and hinted_gid in self.pro
+            ):
                 out[index] = f"G{hinted_gid:06d}"
                 used_ids.add(hinted_gid)
                 if commit:

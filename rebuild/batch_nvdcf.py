@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 
 import cv2
@@ -26,6 +27,8 @@ class BatchNvDCF:
         self.cache.mkdir(parents=True, exist_ok=True)
         self.det = NvDCF(self.cfg["detector"])
         self.identity = MultiModal(self.cfg)
+        self._display_gid = {}
+        self._next_display_gid = 1
 
     @staticmethod
     def _source(value):
@@ -122,6 +125,29 @@ class BatchNvDCF:
             ]
         return result
 
+    def _display(self, gid):
+        value = str(gid)
+        if not value.startswith("G"):
+            raise RuntimeError(f"Invalid internal GID: {gid}")
+        internal = int(value[1:])
+        if internal not in self._display_gid:
+            self._display_gid[internal] = self._next_display_gid
+            self._next_display_gid += 1
+        return f"G{self._display_gid[internal]:06d}"
+
+    @staticmethod
+    def _colour(gid):
+        import colorsys
+
+        number = max(1, int(str(gid)[1:]))
+        hue = (number * 0.618033988749895) % 1.0
+        red, green, blue = colorsys.hsv_to_rgb(hue, 0.82, 1.0)
+        return (
+            int(round(blue * 255.0)),
+            int(round(green * 255.0)),
+            int(round(red * 255.0)),
+        )
+
     def _render(self, camera, path, labels):
         cap = cv2.VideoCapture(path)
         if not cap.isOpened():
@@ -151,11 +177,9 @@ class BatchNvDCF:
                             raise RuntimeError(f"same-frame duplicate GID {gid} in {camera} frame {frame}")
                         used.add(gid)
                     x1, y1, x2, y2 = [int(round(float(value))) for value in item["bbox"]]
-                    if gid == "PENDING":
-                        draw = (40, 80, 220)
-                    else:
-                        number = int(gid[1:])
-                        draw = (40 + (number * 67) % 180, 90 + (number * 43) % 150, 70 + (number * 29) % 170)
+                    if not gid.startswith("G"):
+                        raise RuntimeError(f"Invalid output identity label {gid}")
+                    draw = self._colour(gid)
                     label = gid
                     if item.get("overlap"):
                         label += " OV"
@@ -237,7 +261,7 @@ class BatchNvDCF:
                 feature_map = self.identity.observe(
                     image,
                     current,
-                    commit=not bool(active_overlap),
+                    commit=True,
                     recovery=bool(active_overlap) or recovery_mode,
                     recovery_hints=hints,
                 )
@@ -319,7 +343,10 @@ class BatchNvDCF:
                 for tid in list(gids):
                     gid = gids[tid]
                     if gid.startswith("G") and gid in used:
-                        gids[tid] = "PENDING"
+                        if gid.startswith("G") and gid in used:
+                        raise RuntimeError(
+                            f"identity collision survived one-to-one assignment: {camera}:{frame}:{gid}"
+                        )
                     elif gid.startswith("G"):
                         used.add(gid)
 
@@ -341,7 +368,7 @@ class BatchNvDCF:
                         "frame": frame,
                         "track_id": tid,
                         "bbox": item["bbox"],
-                        "gid": gids[tid],
+                        "gid": self._display(gids[tid]),
                         "overlap": tid in active_overlap,
                         "recovery": bool(recovery_mode),
                         "recovery_feature_verified": bool(
@@ -388,12 +415,32 @@ class BatchNvDCF:
         print("[nvdcf] GID assignment: feature-only after overlap; Hungarian one-to-one every frame")
 
         all_labels = []
-        try:
-            for camera, path in sources:
-                target = self.cache / f"{camera}.tracker.jsonl"
-                fps, width, height = self.det.track(camera, path, target)
-                del fps, width, height
-                all_labels.extend(self._solve_camera(camera, path, self._load(target)))
+        trackers = {}
+
+        def track_one(item):
+            camera, path = item
+            target = self.cache / f"{camera}.tracker.jsonl"
+            from rebuild.nvdcf_tracker import NvDCF
+            detector = NvDCF(self.cfg["detector"])
+            detector.track(camera, path, target)
+            return camera, path, target
+
+        # The expensive video decode + YOLO detection + NvDCF tracking stage
+        # runs concurrently for every supplied camera. Identity resolution is
+        # intentionally performed afterward against one shared gallery so
+        # cross-camera matching and GID allocation remain deterministic.
+        workers = min(len(sources), max(1, int(self.cfg.get("input", {}).get("parallel_cameras", len(sources)))))
+        print(f"[nvdcf] parallel cameras: {len(sources)} workers={workers}")
+        with ThreadPoolExecutor(max_workers=workers, thread_name_prefix="camera") as pool:
+            futures = [pool.submit(track_one, item) for item in sources]
+            for future in as_completed(futures):
+                camera, path, target = future.result()
+                trackers[camera] = (path, target)
+                print(f"[nvdcf] tracked camera in parallel: {camera}")
+
+        for camera, path in sources:
+            target = trackers[camera][1]
+            all_labels.extend(self._solve_camera(camera, path, self._load(target)))
 
             unique_gids = sorted(
                 {

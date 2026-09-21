@@ -217,6 +217,10 @@ class BatchNvDCF:
         recovery_until = -1
         frame = 0
         track_gids = {}
+        recovery_tracks = set()
+        total = int(cap.get(cv2.CAP_PROP_FRAME_COUNT) or 0)
+        last_progress = 0
+        identity_runs = 0
         total = int(cap.get(cv2.CAP_PROP_FRAME_COUNT) or 0)
         last_progress = 0
         identity_runs = 0
@@ -262,6 +266,9 @@ class BatchNvDCF:
                 if previous_overlap - active_overlap:
                     recovery_until = max(recovery_until, frame + recovery_frames)
                     recovery_anchors = list(overlap_anchors)
+                    recovery_tracks = set(previous_overlap)
+                if not recovery_mode and frame > recovery_until:
+                    recovery_tracks = set()
                 recovery_mode = frame <= recovery_until
                 hints = {}
                 if active_overlap:
@@ -293,38 +300,65 @@ class BatchNvDCF:
                             for value in hints.get(tid, [])
                             if int(value) != known_id
                         ]
-                force_identity = bool(active_overlap or recovery_mode)
-                if not force_identity:
-                    for item in current:
-                        tid = int(item["track_id"])
-                        if tid < 0 or tid not in track_gids:
-                            force_identity = True
-                            break
-                if not force_identity:
-                    force_identity = (frame % self.identity_interval) == 0
+                # Heavy multimodal inference is selective. Stable NvDCF tracks
+                # reuse their last verified GID between checkpoints. Only new
+                # tracks, overlap/recovery tracks, or scheduled verification
+                # tracks enter the ResNet + Swin + SOLIDER + face + pose stack.
+                check = set()
+                for index, item in enumerate(current):
+                    tid = int(item["track_id"])
+                    if tid < 0 or tid not in track_gids:
+                        check.add(index)
+                if active_overlap:
+                    check.update(
+                        index
+                        for index, item in enumerate(current)
+                        if int(item["track_id"]) in active_overlap
+                    )
+                elif recovery_mode:
+                    check.update(
+                        index
+                        for index, item in enumerate(current)
+                        if int(item["track_id"]) in recovery_tracks
+                    )
+                elif frame % self.identity_interval == 0:
+                    check.update(range(len(current)))
 
-                if force_identity:
+                # GIDs held by untouched tracks are reserved so a probe from
+                # an overlapping person cannot steal a stable person's GID.
+                locked = {
+                    str(track_gids[int(item["track_id"])])
+                    for index, item in enumerate(current)
+                    if index not in check
+                    and int(item["track_id"]) in track_gids
+                }
+                for index, item in enumerate(current):
+                    if index in check:
+                        item["reserved_gids"] = sorted(locked)
+
+                gids = {}
+                if check:
                     identity_runs += 1
+                    probe = [current[index] for index in sorted(check)]
                     feature_map = self.identity.observe(
                         image,
-                        current,
+                        probe,
                         commit=True,
                         recovery=bool(active_overlap) or recovery_mode,
-                        recovery_hints=hints,
+                        recovery_hints={
+                            int(item["track_id"]): hints.get(
+                                int(item["track_id"]), []
+                            )
+                            for item in probe
+                        },
                     )
-                    gids = {
-                        int(item["track_id"]): str(
-                            feature_map.get(int(item["track_id"]))
-                        )
-                        for item in current
-                    }
-                else:
-                    gids = {
-                        int(item["track_id"]): str(
-                            track_gids[int(item["track_id"])]
-                        )
-                        for item in current
-                    }
+                    for item, value in zip(probe, feature_map.values()):
+                        gids[int(item["track_id"])] = str(value)
+
+                for index, item in enumerate(current):
+                    tid = int(item["track_id"])
+                    if index not in check:
+                        gids[tid] = str(track_gids[tid])
 
                 for item in current:
                     tid = int(item["track_id"])

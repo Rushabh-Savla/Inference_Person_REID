@@ -1004,6 +1004,7 @@ class MultiModalStrict:
             hints = list((recovery_hints or {}).get(int(row["track_id"]), []) or [])
             item = {
                 "row": row,
+                "track_hint": row.get("track_hint"),
                 "camera": str(row["camera"]),
                 "time": float(row["timestamp"]),
                 "person": person,

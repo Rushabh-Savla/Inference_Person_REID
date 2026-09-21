@@ -503,7 +503,16 @@ class NvDCF:
                         raise RuntimeError("NvDCF could not allocate NvDsObjectMeta")
                     obj.unique_component_id = 1
                     obj.class_id = 0
+                    # NvDsObjectMeta acquired from the pool must be marked as
+                    # untracked before nvtracker consumes it. DeepStream uses
+                    # UNTRACKED_OBJECT_ID (all bits set), not 0, for detector
+                    # objects without an existing tracking ID.
+                    obj.object_id = 0xFFFFFFFFFFFFFFFF
                     obj.confidence = float(conf)
+                    obj.detector_bbox_info.org_bbox_coords.left = float(x1)
+                    obj.detector_bbox_info.org_bbox_coords.top = float(y1)
+                    obj.detector_bbox_info.org_bbox_coords.width = float(x2 - x1)
+                    obj.detector_bbox_info.org_bbox_coords.height = float(y2 - y1)
                     obj.rect_params.left = float(x1)
                     obj.rect_params.top = float(y1)
                     obj.rect_params.width = float(x2 - x1)

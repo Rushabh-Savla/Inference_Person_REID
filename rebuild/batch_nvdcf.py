@@ -644,17 +644,20 @@ class BatchNvDCF:
                 elif not active_overlap and not recovery_mode:
                     recovery_anchors = []
 
-                # Refresh the same-camera spatial identity memory only from
-                # resolved GIDs. This prevents tracker-ID churn from repeatedly
-                # invoking the full multimodal stack on ordinary frames.
-                for item in current:
-                    tid = int(item["track_id"])
-                    gid = gids.get(tid)
-                    if gid is not None and str(gid).startswith("G"):
-                        identity_memory[str(gid)] = {
-                            "bbox": list(item["bbox"]),
-                            "frame": frame,
-                        }
+                # Refresh same-camera spatial memory only on clean frames.
+                # Ambiguous overlap/shadow boxes are deliberately excluded so
+                # a blended crop or spatial carry cannot poison future tracker-ID
+                # re-acquisition. Post-overlap recovery has already passed the
+                # mandatory multimodal verification before reaching this block.
+                if not active_overlap:
+                    for item in current:
+                        tid = int(item["track_id"])
+                        gid = gids.get(tid)
+                        if gid is not None and str(gid).startswith("G"):
+                            identity_memory[str(gid)] = {
+                                "bbox": list(item["bbox"]),
+                                "frame": frame,
+                            }
 
                 for item in current:
                     tid = int(item["track_id"])

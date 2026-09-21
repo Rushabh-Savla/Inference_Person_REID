@@ -25,7 +25,7 @@ class BatchNvDCF:
         self.cache = self.out / "cache_nvdcf"
         self.cache.mkdir(parents=True, exist_ok=True)
         self.identity = MultiModal(self.cfg)
-        self.identity_interval = max(1, int(self.cfg.get("identity", {}).get("interval", 3)))
+        self.identity_interval = max(0, int(self.cfg.get("identity", {}).get("interval", 0)))
         self._display_gid = {}
         self._next_display_gid = 1
 
@@ -211,6 +211,7 @@ class BatchNvDCF:
         recovery_frames = max(1, int(self.cfg["identity"].get("recovery_frames", 10)))
         labels = []
         previous_overlap = set()
+        previous_severe_overlap = set()
         last_clean = []
         overlap_anchors = []
         recovery_anchors = []
@@ -261,12 +262,34 @@ class BatchNvDCF:
                     if str(item.get("shadow_reason", "")) == "collapse"
                 }
                 active_overlap = geometric_overlap | collapse_overlap
+                severe_limit = float(
+                    self.cfg.get("overlap", {}).get(
+                        "severe_intersection",
+                        0.67,
+                    )
+                )
+                severe_overlap = set()
+                for first in range(len(current)):
+                    for second in range(first + 1, len(current)):
+                        _iou, iom = self._metrics(
+                            current[first]["bbox"],
+                            current[second]["bbox"],
+                        )
+                        if iom >= severe_limit:
+                            severe_overlap.add(
+                                int(current[first]["track_id"])
+                            )
+                            severe_overlap.add(
+                                int(current[second]["track_id"])
+                            )
+                severe_enter = severe_overlap - previous_severe_overlap
+                severe_exit = previous_severe_overlap - severe_overlap
                 if active_overlap and not overlap_anchors and last_clean:
                     overlap_anchors = list(last_clean)
-                if previous_overlap - active_overlap:
+                if severe_exit:
                     recovery_until = max(recovery_until, frame + recovery_frames)
                     recovery_anchors = list(overlap_anchors)
-                    recovery_tracks = set(previous_overlap)
+                    recovery_tracks = set(severe_exit)
                 recovery_mode = frame <= recovery_until
                 if not recovery_mode and frame > recovery_until:
                     recovery_tracks = set()
@@ -300,29 +323,36 @@ class BatchNvDCF:
                             for value in hints.get(tid, [])
                             if int(value) != known_id
                         ]
-                # Heavy multimodal inference is selective. Stable NvDCF tracks
-                # reuse their last verified GID between checkpoints. Only new
-                # tracks, overlap/recovery tracks, or scheduled verification
-                # tracks enter the ResNet + Swin + SOLIDER + face + pose stack.
+                # Heavy multimodal inference is event-driven. Normal
+                # frames and mild overlap stay on NvDCF continuity. Full
+                # ResNet + Swin + SOLIDER + face + pose is reserved for new
+                # tracks and the high-occlusion regime (intersection-over-
+                # smaller-box >= severe_intersection).
                 check = set()
                 for index, item in enumerate(current):
                     tid = int(item["track_id"])
-                    if tid < 0 or tid not in track_gids:
+                    shadow = str(item.get("shadow_reason", "")) == "collapse"
+                    if tid not in track_gids and not shadow:
                         check.add(index)
-                if active_overlap:
+                    elif tid < 0 and tid in severe_overlap:
+                        check.add(index)
+
+                # Severe overlap is allowed one heavyweight verification at
+                # event entry; identities are then held by NvDCF continuity
+                # through the occlusion. Verification after the severe event
+                # is handled by recovery_mode.
+                if severe_enter:
                     check.update(
                         index
                         for index, item in enumerate(current)
-                        if int(item["track_id"]) in active_overlap
+                        if int(item["track_id"]) in severe_enter
                     )
-                elif recovery_mode:
+                if recovery_mode:
                     check.update(
                         index
                         for index, item in enumerate(current)
                         if int(item["track_id"]) in recovery_tracks
                     )
-                elif frame % self.identity_interval == 0:
-                    check.update(range(len(current)))
 
                 # GIDs held by untouched tracks are reserved so a probe from
                 # an overlapping person cannot steal a stable person's GID.
@@ -357,8 +387,12 @@ class BatchNvDCF:
 
                 for index, item in enumerate(current):
                     tid = int(item["track_id"])
-                    if index not in check:
+                    if index in check:
+                        continue
+                    if tid in track_gids:
                         gids[tid] = str(track_gids[tid])
+                    elif str(item.get("shadow_reason", "")) == "collapse":
+                        gids[tid] = "PENDING"
 
                 for item in current:
                     tid = int(item["track_id"])
@@ -411,7 +445,10 @@ class BatchNvDCF:
                 for tid, gid in gids.items():
                     if gid.startswith("G"):
                         grouped.setdefault(gid, []).append(tid)
-                if any(len(items) > 1 for items in grouped.values()):
+                if (
+                    any(len(items) > 1 for items in grouped.values())
+                    and severe_overlap
+                ):
                     self.identity.stats["duplicate"] += 1
                     feature_map = self.identity.observe(
                         image,
@@ -469,6 +506,7 @@ class BatchNvDCF:
                     })
 
                 previous_overlap = set(active_overlap)
+                previous_severe_overlap = set(severe_overlap)
         finally:
             cap.release()
 
@@ -504,8 +542,9 @@ class BatchNvDCF:
         print("[nvdcf] POSE: YOLO pose participates in matching")
         print("[nvdcf] GID assignment: strict multimodal + sequential display GIDs + one-to-one per camera frame")
         print(
-            f"[nvdcf] identity verification interval: every {self.identity_interval} frame(s); "
-            "new tracks + overlap/recovery are always checked"
+            f"[nvdcf] identity policy: full stack for NEW tracks and severe overlap "
+            f"(IoM >= {float(self.cfg.get("overlap", {}).get("severe_intersection", 0.67)):.2f}); "
+            "mild overlap uses NvDCF continuity"
         )
 
         all_labels = []

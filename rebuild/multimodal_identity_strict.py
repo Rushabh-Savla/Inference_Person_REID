@@ -286,8 +286,12 @@ class MultiModalStrict:
         hits, got = self.q.search_component([self.group(obs)])
         if hits:
             self.stats["qdrant_retrievals"] += 1
+
+        # Qdrant already returns the cross-camera gallery candidates. Adding
+        # every persistent GID here defeated retrieval and turned every frame
+        # into an O(persons-in-gallery) comparison. Keep only retrieved IDs
+        # plus deterministic same-track/overlap anchors.
         ids = {int(x) for x in hits}
-        ids.update(int(x) for x in self.pro)
         track_hint = obs.get("track_hint")
         if track_hint is not None:
             try:

@@ -22,6 +22,8 @@ class NvDCF:
     tracker and returns the tracker-owned IDs.
     """
 
+    _factory_lock = threading.Lock()
+
     def __init__(self, cfg: dict):
         self.cfg = dict(cfg or {})
         self.model = YOLO(self.cfg["model"])
@@ -378,16 +380,36 @@ class NvDCF:
         # the batched surface directly to NvDCF. This deliberately avoids
         # uridecodebin/nvv4l2decoder and also avoids a second native converter
         # link, which was the site of the observed DeepStream segfault.
-        pipeline = Gst.Pipeline.new(f"nvdcf_{camera}")
-        source = Gst.ElementFactory.make("appsrc", f"source_{camera}")
-        preconv = Gst.ElementFactory.make("nvvideoconvert", f"preconv_{camera}")
-        prefilter = Gst.ElementFactory.make("capsfilter", f"prefilter_{camera}")
-        mux = Gst.ElementFactory.make("nvstreammux", f"mux_{camera}")
-        tracker = Gst.ElementFactory.make("nvtracker", f"tracker_{camera}")
-        sink = Gst.ElementFactory.make("fakesink", f"sink_{camera}")
+        # GStreamer/DeepStream element-factory initialization can race when
+        # multiple NvDCF pipelines are constructed simultaneously in Python
+        # threads. Serialize only factory construction; the actual pipelines
+        # still run concurrently on the same GPU.
+        with self._factory_lock:
+            pipeline = Gst.Pipeline.new(f"nvdcf_{camera}")
+            source = Gst.ElementFactory.make("appsrc", f"source_{camera}")
+            preconv = Gst.ElementFactory.make("nvvideoconvert", f"preconv_{camera}")
+            prefilter = Gst.ElementFactory.make("capsfilter", f"prefilter_{camera}")
+            mux = Gst.ElementFactory.make("nvstreammux", f"mux_{camera}")
+            tracker = Gst.ElementFactory.make("nvtracker", f"tracker_{camera}")
+            sink = Gst.ElementFactory.make("fakesink", f"sink_{camera}")
         elems = (source, preconv, prefilter, mux, tracker, sink)
         if any(x is None for x in elems):
-            raise RuntimeError("DeepStream elements for NvDCF could not be created")
+            missing = [
+                name
+                for name, value in (
+                    ("appsrc", source),
+                    ("nvvideoconvert", preconv),
+                    ("capsfilter", prefilter),
+                    ("nvstreammux", mux),
+                    ("nvtracker", tracker),
+                    ("fakesink", sink),
+                )
+                if value is None
+            ]
+            raise RuntimeError(
+                "DeepStream elements for NvDCF could not be created: "
+                + ", ".join(missing)
+            )
 
         source.set_property(
             "caps",

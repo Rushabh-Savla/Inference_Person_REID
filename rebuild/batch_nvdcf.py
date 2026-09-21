@@ -181,6 +181,60 @@ class BatchNvDCF:
         return result
 
     @classmethod
+    def _protected_assign(cls, rows, anchors, blocked=None):
+        """Assign overlap rows one-to-one to protected pre-overlap identities."""
+        rows = list(rows or [])
+        anchors = [
+            x for x in (anchors or [])
+            if str(x.get("gid", "")).startswith("G")
+        ]
+        blocked = set(blocked or set())
+        anchors = [
+            x for x in anchors
+            if str(x.get("gid")) not in blocked
+        ]
+        if not rows or not anchors:
+            return {}
+
+        matrix = np.zeros((len(rows), len(anchors)), dtype=np.float32)
+        for r, row in enumerate(rows):
+            for a, anchor in enumerate(anchors):
+                box = anchor.get("pred_bbox") or anchor.get("bbox")
+                if not box:
+                    continue
+                iou, iom = cls._metrics(row["bbox"], box)
+                rx1, ry1, rx2, ry2 = [float(x) for x in row["bbox"]]
+                ax1, ay1, ax2, ay2 = [float(x) for x in box]
+                rcx, rcy = 0.5 * (rx1 + rx2), 0.5 * (ry1 + ry2)
+                acx, acy = 0.5 * (ax1 + ax2), 0.5 * (ay1 + ay2)
+                rh = max(1.0, ry2 - ry1)
+                ah = max(1.0, ay2 - ay1)
+                distance = float(
+                    np.hypot(rcx - acx, rcy - acy) / max(rh, ah)
+                )
+                proximity = max(0.0, 1.0 - distance / 4.0)
+                scale = min(rh, ah) / max(rh, ah)
+                matrix[r, a] = (
+                    0.45 * float(iou)
+                    + 0.30 * float(iom)
+                    + 0.20 * float(proximity)
+                    + 0.05 * float(scale)
+                )
+
+        rr, cc = __import__("scipy.optimize", fromlist=["linear_sum_assignment"]).linear_sum_assignment(
+            -matrix
+        )
+        result = {}
+        used = set()
+        for r, a in zip(rr.tolist(), cc.tolist()):
+            gid = str(anchors[a]["gid"])
+            if gid in used:
+                continue
+            result[int(r)] = gid
+            used.add(gid)
+        return result
+
+    @classmethod
     def _recovery_hints(cls, rows, anchors, limit=3):
         """Produce spatial hypotheses; never convert an anchor directly to a GID."""
         result = {}
@@ -509,18 +563,6 @@ class BatchNvDCF:
                         if int(item["track_id"]) >= 0
                         and str(item.get("shadow_reason", "")) != "collapse"
                     )
-                # A severe event itself is allowed to continue for many frames
-                # without repeatedly running the full stack. Only genuinely
-                # unassigned live tracks need a feature pass while the overlap
-                # remains active.
-                if severe_active:
-                    check.update(
-                        index
-                        for index, item in enumerate(current)
-                        if int(item["track_id"]) >= 0
-                        and int(item["track_id"]) not in track_gids
-                        and str(item.get("shadow_reason", "")) != "collapse"
-                    )
                 if recovery_pending and not severe_active and not active_overlap:
                     # Explicit post-overlap feature re-identification. Wait for
                     # full geometric separation before probing so the crop is
@@ -608,6 +650,34 @@ class BatchNvDCF:
                     for local, gid in carried.items():
                         tid = int(subset[local]["track_id"])
                         gids[tid] = gid
+
+                    # During severe overlap, protect the identities involved as
+                    # a single one-to-one hypothesis set. NvDCF tracker-ID churn
+                    # cannot trigger a fresh Re-ID pass for every recreated track.
+                    if severe_active:
+                        protected_indices = [
+                            index
+                            for index, item in enumerate(current)
+                            if (
+                                int(item["track_id"]) in severe_overlap
+                                or str(item.get("shadow_reason", "")) == "collapse"
+                            )
+                        ]
+                        protected_rows = [current[index] for index in protected_indices]
+                        blocked = {
+                            str(gids[int(item["track_id"])])
+                            for index, item in enumerate(current)
+                            if index not in protected_indices
+                            and str(gids.get(int(item["track_id"]), "")).startswith("G")
+                        }
+                        protected = self._protected_assign(
+                            protected_rows,
+                            overlap_anchors or last_clean,
+                            blocked=blocked,
+                        )
+                        for local, gid in protected.items():
+                            tid = int(protected_rows[local]["track_id"])
+                            gids[tid] = gid
 
                     # Keep the original clean-frame anchors for the whole
                     # occlusion event. Do not replace them with partially

@@ -210,6 +210,11 @@ class DeepStreamRuntime:
 
     @staticmethod
     def config(root):
+        configured = os.environ.get("NVDCF_TRACKER_CONFIG")
+        if configured:
+            path = Path(configured).expanduser()
+            if path.is_file():
+                return str(path.resolve())
         if root is None:
             return None
         patterns = (

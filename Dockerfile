@@ -31,6 +31,19 @@ RUN set -eux; \
 
 WORKDIR /workspace/inference_person_reid
 
+# DeepStream 8 supplies the actual NVIDIA NvDCF low-level tracker.
+# Fail the image build if the core runtime or NvDCF library is absent.
+RUN set -eux; \
+    test -s /opt/nvidia/deepstream/deepstream/lib/libnvds_meta.so; \
+    test -s /opt/nvidia/deepstream/deepstream/lib/libnvds_nvmultiobjecttracker.so; \
+    echo "[docker] DeepStream core + NvDCF library: OK"
+
+# Ship the exact tracker configuration with the image so the container does
+# not depend on a host-side DeepStream sample path.
+COPY trackers/nvdcf_accuracy.yml /opt/reid/nvdcf_accuracy.yml
+ENV NVDCF_TRACKER_CONFIG=/opt/reid/nvdcf_accuracy.yml
+RUN test -s /opt/reid/nvdcf_accuracy.yml
+
 COPY requirements.txt /tmp/reid-requirements.txt
 
 RUN python3 -m pip install --upgrade pip setuptools wheel --ignore-installed && \

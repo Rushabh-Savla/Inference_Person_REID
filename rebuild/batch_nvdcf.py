@@ -25,6 +25,7 @@ class BatchNvDCF:
         self.cache = self.out / "cache_nvdcf"
         self.cache.mkdir(parents=True, exist_ok=True)
         self.identity = MultiModal(self.cfg)
+        self.identity_interval = max(1, int(self.cfg.get("identity", {}).get("interval", 3)))
         self._display_gid = {}
         self._next_display_gid = 1
 
@@ -216,6 +217,9 @@ class BatchNvDCF:
         recovery_until = -1
         frame = 0
         track_gids = {}
+        total = int(cap.get(cv2.CAP_PROP_FRAME_COUNT) or 0)
+        last_progress = 0
+        identity_runs = 0
 
         try:
             while True:
@@ -223,6 +227,19 @@ class BatchNvDCF:
                 if not ok:
                     break
                 frame += 1
+                if frame - last_progress >= 50:
+                    last_progress = frame
+                    if total > 0:
+                        percent = 100.0 * frame / total
+                        print(
+                            f"[nvdcf] identity {camera}: frame={frame}/{total} "
+                            f"({percent:.1f}%) checked={identity_runs}"
+                        )
+                    else:
+                        print(
+                            f"[nvdcf] identity {camera}: frame={frame} "
+                            f"checked={identity_runs}"
+                        )
                 current = byframe.get(frame, [])
                 if not current:
                     continue
@@ -274,20 +291,38 @@ class BatchNvDCF:
                             for value in hints.get(tid, [])
                             if int(value) != int(str(known)[1:])
                         ]
-                feature_map = self.identity.observe(
-                    image,
-                    current,
-                    commit=True,
-                    recovery=bool(active_overlap) or recovery_mode,
-                    recovery_hints=hints,
-                )
+                force_identity = bool(active_overlap or recovery_mode)
+                if not force_identity:
+                    for item in current:
+                        tid = int(item["track_id"])
+                        if tid < 0 or tid not in track_gids:
+                            force_identity = True
+                            break
+                if not force_identity:
+                    force_identity = (frame % self.identity_interval) == 0
 
-                gids = {
-                    int(item["track_id"]): str(
-                        feature_map.get(int(item["track_id"]))
+                if force_identity:
+                    identity_runs += 1
+                    feature_map = self.identity.observe(
+                        image,
+                        current,
+                        commit=True,
+                        recovery=bool(active_overlap) or recovery_mode,
+                        recovery_hints=hints,
                     )
-                    for item in current
-                }
+                    gids = {
+                        int(item["track_id"]): str(
+                            feature_map.get(int(item["track_id"]))
+                        )
+                        for item in current
+                    }
+                else:
+                    gids = {
+                        int(item["track_id"]): str(
+                            track_gids[int(item["track_id"])]
+                        )
+                        for item in current
+                    }
 
                 for item in current:
                     tid = int(item["track_id"])
@@ -432,6 +467,10 @@ class BatchNvDCF:
         print("[nvdcf] CLOTHING: top + bottom + upper/lower pattern every comparison")
         print("[nvdcf] POSE: YOLO pose participates in matching")
         print("[nvdcf] GID assignment: strict multimodal + sequential display GIDs + one-to-one per camera frame")
+        print(
+            f"[nvdcf] identity verification interval: every {self.identity_interval} frame(s); "
+            "new tracks + overlap/recovery are always checked"
+        )
 
         all_labels = []
         trackers = {}

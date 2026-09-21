@@ -821,6 +821,35 @@ class BatchNvDCF:
                         for item, value in feature_map.items():
                             gids[int(item)] = str(value)
 
+                # A collapse shadow is synthetic bookkeeping created only
+                # because NvDCF temporarily collapsed tracker handles. If all
+                # protected/spatial recovery paths fail, reject that synthetic
+                # row rather than inventing a GID or aborting the complete video.
+                # Real tracked rows still obey the hard GID invariant below.
+                dropped = {
+                    tid
+                    for tid, gid in list(gids.items())
+                    if (
+                        not str(gid).startswith("G")
+                        and any(
+                            int(item["track_id"]) == int(tid)
+                            and str(item.get("shadow_reason", "")) == "collapse"
+                            for item in current
+                        )
+                    )
+                }
+                if dropped:
+                    gids = {
+                        int(tid): gid
+                        for tid, gid in gids.items()
+                        if int(tid) not in dropped
+                    }
+                    current = [
+                        item
+                        for item in current
+                        if int(item["track_id"]) not in dropped
+                    ]
+
                 used = set()
                 for tid in list(gids):
                     gid = gids[tid]

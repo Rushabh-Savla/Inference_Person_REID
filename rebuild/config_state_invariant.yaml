@@ -2,7 +2,7 @@ detector:
   backend: nvdcf
   model: weights/yolo11m.pt
   conf: 0.55
-  iou: 0.60
+  iou: 0.85
   library: auto
   config: trackers/nvdcf_accuracy.yml
   width: 0
@@ -49,14 +49,15 @@ identity:
   new_pending_match_min: 0.84
   new_pending_margin: 0.08
   new_pending_model_min: 0.55
-  new_pending_clothing_min: 0.58
+  new_pending_clothing_min: 0.60
   new_pending_required_models: 3
   new_existing_guard: 0.58
   pending_ttl_seconds: 300
   pending_max: 64
   pending_time_gap: 0.75
-  top_min: 0.42
-  bottom_min: 0.42
+  top_min: 0.52
+  bottom_min: 0.52
+  clothing_joint_min: 0.52
   model_min: 0.46
   deep_min: 0.48
   face_min: 0.60

@@ -873,6 +873,13 @@ class MultiModalStrict:
                     for x in (item.get("recovery_hints") or [])
                     if str(x).lstrip("-").isdigit()
                 }
+                recovery_order = []
+                for value in (item.get("recovery_hints") or []):
+                    if not str(value).lstrip("-").isdigit():
+                        continue
+                    value = int(value)
+                    if value not in recovery_order:
+                        recovery_order.append(value)
                 ranked = sorted(
                     (
                         (int(gid), value)
@@ -910,9 +917,9 @@ class MultiModalStrict:
                     )
                     if shadow:
                         ordered = [
-                            int(value)
-                            for value in recovery_ids
-                            if int(value) not in used_ids
+                            value
+                            for value in recovery_order
+                            if value not in used_ids
                         ]
                         if ordered:
                             gid = ordered[0]

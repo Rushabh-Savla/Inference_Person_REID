@@ -102,8 +102,7 @@ class PersistentMultimodelRegistry:
                     "SELECT COALESCE(MAX(gid), 0) FROM identities"
                 ).fetchone()
                 last = int(row[0]) if row else 0
-                meta = self.next_gid
-                gid = max(1, last + 1, meta)
+                gid = max(1, last + 1)
                 self._db.execute(
                     "UPDATE meta SET value=? WHERE key='next_gid'",
                     (str(gid + 1),),

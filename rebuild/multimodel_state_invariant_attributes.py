@@ -74,10 +74,17 @@ class AttributeAwareResolver(StateInvariantFinalResolverFast):
         pairs = []
         for left_item in a:
             for right_item in b:
-                upper_color = float(self._unit(left_item[0:20]) @ self._unit(right_item[0:20]))
-                lower_color = float(self._unit(left_item[20:40]) @ self._unit(right_item[20:40]))
-                upper_pattern = float(self._unit(left_item[40:54]) @ self._unit(right_item[40:54]))
-                lower_pattern = float(self._unit(left_item[54:68]) @ self._unit(right_item[54:68]))
+                def sim(first, second):
+                    a = self._unit(first)
+                    b = self._unit(second)
+                    if a is None or b is None or a.shape != b.shape:
+                        return 0.0
+                    return float(a @ b)
+
+                upper_color = sim(left_item[0:20], right_item[0:20])
+                lower_color = sim(left_item[20:40], right_item[20:40])
+                upper_pattern = sim(left_item[40:54], right_item[40:54])
+                lower_pattern = sim(left_item[54:68], right_item[54:68])
                 upper = 0.62 * upper_color + 0.38 * upper_pattern
                 lower = 0.60 * lower_color + 0.40 * lower_pattern
                 pairs.append((

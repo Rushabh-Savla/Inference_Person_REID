@@ -279,7 +279,7 @@ class BatchNvDCF:
         recovery_frames = max(1, int(self.cfg["identity"].get("recovery_frames", 10)))
         labels = []
         previous_overlap = set()
-        previous_severe_overlap = set()
+        previous_severe_active = False
         last_clean = []
         overlap_anchors = []
         recovery_anchors = []
@@ -353,18 +353,28 @@ class BatchNvDCF:
                             severe_overlap.add(
                                 int(current[second]["track_id"])
                             )
-                severe_enter = severe_overlap - previous_severe_overlap
-                severe_exit = previous_severe_overlap - severe_overlap
+                severe_active = bool(severe_overlap)
+                severe_enter = severe_active and not previous_severe_active
+                severe_exit = previous_severe_active and not severe_active
                 if active_overlap and not overlap_anchors and last_clean:
                     overlap_anchors = list(last_clean)
+                if severe_enter:
+                    recovery_anchors = list(overlap_anchors or last_clean)
+                    recovery_tracks = set(severe_overlap)
                 if severe_exit:
-                    recovery_until = max(recovery_until, frame + recovery_frames)
-                    recovery_anchors = list(overlap_anchors)
-                    recovery_tracks = set(severe_exit)
-                    recovery_pending = True
-                recovery_mode = frame <= recovery_until
-                if not recovery_mode and frame > recovery_until:
+                    # One clean frame is a mandatory multimodal re-identification
+                    # checkpoint after the severe overlap. Never key this state
+                    # to old tracker IDs because NvDCF IDs can be recreated during
+                    # the interaction.
+                    recovery_anchors = list(overlap_anchors or last_clean)
                     recovery_tracks = set()
+                    recovery_pending = True
+                    recovery_until = frame + recovery_frames
+                recovery_mode = recovery_pending and frame <= recovery_until
+                if not recovery_pending:
+                    recovery_mode = False
+                if frame > recovery_until and recovery_pending:
+                    recovery_mode = False
                 hints = {}
                 if active_overlap:
                     hints.update(
@@ -461,17 +471,24 @@ class BatchNvDCF:
                     check.update(
                         index
                         for index, item in enumerate(current)
-                        if int(item["track_id"]) in severe_enter
-                        and int(item["track_id"]) >= 0
+                        if int(item["track_id"]) >= 0
+                        and str(item.get("shadow_reason", "")) != "collapse"
                     )
-                if recovery_mode:
+                # A severe event itself is allowed to continue for many frames
+                # without repeatedly running the full stack. Only genuinely
+                # unassigned live tracks need a feature pass while the overlap
+                # remains active.
+                if severe_active:
                     check.update(
                         index
                         for index, item in enumerate(current)
-                        if int(item["track_id"]) in recovery_tracks
-                        and int(item["track_id"]) >= 0
+                        if int(item["track_id"]) >= 0
+                        and int(item["track_id"]) not in track_gids
+                        and str(item.get("shadow_reason", "")) != "collapse"
                     )
-                if recovery_pending and not severe_overlap:
+                if recovery_pending and not severe_active:
+                    # Explicit post-overlap feature re-identification. This is
+                    # keyed to the overlap state, never to tracker-ID equality.
                     check.update(
                         index
                         for index, item in enumerate(current)
@@ -578,10 +595,7 @@ class BatchNvDCF:
                 for tid, gid in gids.items():
                     if gid.startswith("G"):
                         grouped.setdefault(gid, []).append(tid)
-                if (
-                    any(len(items) > 1 for items in grouped.values())
-                    and severe_overlap
-                ):
+                if any(len(items) > 1 for items in grouped.values()):
                     self.identity.stats["duplicate"] += 1
                     probe_indices = [
                         index
@@ -660,10 +674,12 @@ class BatchNvDCF:
                     })
 
                 previous_overlap = set(active_overlap)
-                previous_severe_overlap = set(severe_overlap)
+                previous_severe_active = severe_active
                 if not active_overlap:
                     last_clean_frame = frame
-                    if recovery_pending and not severe_overlap and check:
+                    # A recovery pass is complete only after this clean frame has
+                    # produced a fully resolved one-to-one feature assignment.
+                    if recovery_pending and not severe_active:
                         recovery_pending = False
                         recovery_tracks = set()
         finally:

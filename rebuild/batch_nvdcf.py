@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 from concurrent.futures import ProcessPoolExecutor, as_completed
 import multiprocessing as mp
+import os
 from pathlib import Path
 
 import cv2
@@ -13,6 +14,10 @@ from rebuild.overlap_guard import carry, merge
 
 def _track_camera_worker(camera, path, config, target):
     """Run one NvDCF camera in an isolated process for DeepStream safety."""
+    # Never let parallel workers share GStreamer's registry cache.
+    os.environ["GST_REGISTRY"] = (
+        f"/tmp/reid-gst-runtime-{os.getpid()}-{camera}.bin"
+    )
     from rebuild.nvdcf_tracker import NvDCF
 
     detector = NvDCF(config)

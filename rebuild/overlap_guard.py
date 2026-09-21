@@ -125,16 +125,52 @@ def carry(rows, anchors, gids_used: set[str], minimum: float = 0.15):
 
     rr, cc = linear_sum_assignment(-matrix)
     result = {}
-    for r, col in zip(rr.tolist(), cc.tolist()):
-        gid = str(anchors[col].get("gid", ""))
+    free = [
+        (r, col)
+        for r, col in zip(rr.tolist(), cc.tolist())
+        if str(anchors[col].get("gid", "")).startswith("G")
+        and str(anchors[col].get("gid", "")) not in used
+    ]
+    for r, col in free:
+        gid = str(anchors[col]["gid"])
         value = float(matrix[r, col])
-        # A spatial carry is only a temporary overlap hypothesis. Require a
-        # meaningful association and never permit the same identity twice.
-        if (
-            value >= float(minimum)
-            and gid.startswith("G")
-            and gid not in used
-        ):
+        if value >= float(minimum):
             result[int(r)] = gid
             used.add(gid)
+
+    # Collapse rows are detector hypotheses for real people that NvDCF could
+    # not keep as separate tracks. Leaving one of these rows as PENDING would
+    # destroy the required one-person/one-GID invariant. When there are still
+    # unassigned rows and protected anchor GIDs available, consume the remaining
+    # one-to-one pairs by descending spatial evidence. This remains an explicit
+    # overlap hypothesis; post-separation feature verification is authoritative.
+    remaining_rows = [
+        r for r in range(len(rows))
+        if r not in result
+    ]
+    remaining_cols = [
+        col for col in range(len(anchors))
+        if col not in {cc for _, cc in free if str(anchors[cc].get("gid", "")).startswith("G")}
+        and str(anchors[col].get("gid", "")).startswith("G")
+        and str(anchors[col].get("gid", "")) not in used
+    ]
+    pairs = sorted(
+        (
+            (float(matrix[r, col]), r, col)
+            for r in remaining_rows
+            for col in remaining_cols
+        ),
+        reverse=True,
+    )
+    for value, r, col in pairs:
+        if r in result or col not in remaining_cols:
+            continue
+        gid = str(anchors[col]["gid"])
+        if gid in used:
+            continue
+        result[int(r)] = gid
+        used.add(gid)
+        remaining_cols.remove(col)
+        # Only one-to-one hypothesis assignments are permitted here.
+
     return result

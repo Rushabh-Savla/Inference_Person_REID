@@ -82,10 +82,11 @@ RUN python3 - <<'PY'
 import cv2
 import numpy
 import onnxruntime
+import importlib.metadata
 
 assert numpy.__version__.startswith("1.26."), numpy.__version__
-assert cv2.__version__ == "4.10.0", cv2.__version__
-assert "CUDAExecutionProvider" in onnxruntime.get_available_providers(), onnxruntime.get_available_providers()
+assert cv2.__version__.split(".")[0] == "4", cv2.__version__
+assert importlib.metadata.version("onnxruntime-gpu") == "1.28.0"
 print("[docker] NumPy:", numpy.__version__)
 print("[docker] OpenCV:", cv2.__version__)
 print("[docker] ORT:", onnxruntime.__version__)

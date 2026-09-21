@@ -28,6 +28,7 @@ services:
       QDRANT_URL: "${QDRANT_URL:-http://127.0.0.1:6333}"
       NVDCF_DEEPSTREAM_ROOT: /opt/nvidia/deepstream/deepstream
       NVDCF_TRACKER_LIBRARY: /opt/nvidia/deepstream/deepstream/lib/libnvds_nvmultiobjecttracker.so
+      NVDCF_TRACKER_CONFIG: /opt/reid/nvdcf_accuracy.yml
       GST_PLUGIN_PATH: /opt/nvidia/deepstream/deepstream/lib/gst-plugins
     volumes:
       - ./:/workspace/inference_person_reid

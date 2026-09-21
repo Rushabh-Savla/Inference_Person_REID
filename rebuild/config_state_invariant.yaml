@@ -37,7 +37,7 @@ identity_state:
   qdrant_url: http://127.0.0.1:6333
 
 identity:
-  interval: 1
+  interval: 3
   recovery_frames: 20
   existing_min: 0.62
   margin: 0.015

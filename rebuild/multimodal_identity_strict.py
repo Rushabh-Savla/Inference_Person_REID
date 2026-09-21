@@ -759,47 +759,48 @@ class MultiModalStrict:
         )
 
         out = ["UNKNOWN"] * count
-        used = set()
+        used_ids = set()
 
         for i, gid in sorted(chosen.items()):
-            if gid in used:
+            gid = int(gid)
+            if gid in used_ids:
                 self.stats["duplicate"] += 1
                 continue
-            used.add(gid)
-            out[int(i)] = f"G{int(gid):06d}"
+            used_ids.add(gid)
+            out[int(i)] = f"G{gid:06d}"
 
             if commit:
-                self.save(int(gid), obs[int(i)])
+                self.save(gid, obs[int(i)])
 
                 if recovery:
                     self.stats["recovery_match"] += 1
-                if len(self.pro.get(int(gid), {}).get("camera", set())) > 1:
+                if len(self.pro.get(gid, {}).get("camera", set())) > 1:
                     self.stats["cross"] += 1
 
-        # Never leave an observed person without a visible GID. Existing
-        # identities are still preferred. When an existing candidate is not
-        # accepted, a genuinely distinct/new GID is created instead of
-        # emitting PENDING/UNKNOWN. Top and bottom clothing remain mandatory
-        # for any candidate because score()/accept() hard-gate both portions.
+        # Every valid observation receives a concrete GID. Existing identities
+        # are preferred, but an unresolved observation is immediately admitted
+        # as a new identity rather than remaining PENDING/UNKNOWN. Existing
+        # candidates still cannot pass unless BOTH top and bottom clothing
+        # gates and the coupled clothing-joint gate pass.
         for i, item in enumerate(obs):
             if out[i].startswith("G"):
                 continue
-
             if item is None:
                 continue
 
-            best = max(
-                (sets[i].get(int(gid)) for gid in sets[i]),
-                key=lambda value: float(value["score"]),
-                default=None,
+            ranked = sorted(
+                (
+                    (int(gid), value)
+                    for gid, value in sets[i].items()
+                ),
+                key=lambda pair: float(pair[1]["score"]),
+                reverse=True,
             )
+            best_gid = ranked[0][0] if ranked else None
+            best = ranked[0][1] if ranked else None
             best_score = float(best["score"]) if best is not None else 0.0
             guard = float(self.icfg.get("new_existing_guard", 0.50))
 
-            # A candidate that survived the clothing hard gate but missed the
-            # strict margin/floor is retained when its evidence is stronger
-            # than the new-identity floor. This avoids false PENDING during
-            # overlap while preserving the top+bottom requirement.
             if best is not None:
                 support = sum(
                     float(best[name]) >= float(self.icfg.get("model_min", 0.46))
@@ -808,37 +809,36 @@ class MultiModalStrict:
                 clothing_ok = (
                     float(best.get("top", 0.0)) >= float(self.icfg.get("top_min", 0.52))
                     and float(best.get("bottom", 0.0)) >= float(self.icfg.get("bottom_min", 0.52))
-                    and float(best.get("clothing_joint", 0.0)) >= float(self.icfg.get("clothing_joint_min", 0.52))
+                    and float(best.get("clothing_joint", 0.0)) >= float(
+                        self.icfg.get("clothing_joint_min", 0.52)
+                    )
                 )
                 hinted = bool(best.get("recovery_hint", False))
                 relaxed = 0.52 if hinted else 0.58
                 if (
-                    clothing_ok
+                    best_gid is not None
+                    and best_gid not in used_ids
+                    and clothing_ok
                     and support >= 2
                     and best_score >= relaxed
                     and (best_score >= guard or hinted)
                 ):
-                    candidate_ids = [
-                        int(gid) for gid, value in sets[i].items()
-                        if value is best
-                    ]
-                    if candidate_ids and candidate_ids[0] not in used:
-                        gid = candidate_ids[0]
-                        out[i] = f"G{gid:06d}"
-                        used.add(gid)
-                        if commit:
-                            self.save(gid, item)
-                            if recovery:
-                                self.stats["recovery_match"] += 1
-                            if len(self.pro.get(gid, {}).get("camera", set())) > 1:
-                                self.stats["cross"] += 1
-                        continue
+                    gid = int(best_gid)
+                    out[i] = f"G{gid:06d}"
+                    used_ids.add(gid)
+                    if commit:
+                        self.save(gid, item)
+                        if recovery:
+                            self.stats["recovery_match"] += 1
+                        if len(self.pro.get(gid, {}).get("camera", set())) > 1:
+                            self.stats["cross"] += 1
+                    continue
 
-            # No acceptable existing identity: allocate immediately. This is
-            # what gives first-seen people a real GID without waiting for the
-            # old five-observation pending state.
+            # No accepted existing identity: create a real persistent identity
+            # immediately. The seed is forced into all model/clothing banks so
+            # the next frame has an actual gallery exemplar to match against.
             if commit:
-                gid = self.new(item)
+                gid = int(self.new(item))
             else:
                 gid = int(self.reg.allocate_gid())
                 self.pro[gid] = {
@@ -850,13 +850,21 @@ class MultiModalStrict:
                     "pose": [],
                     "camera": {str(item["camera"])},
                 }
-            label = f"G{gid:06d}"
-            if label in used:
-                while label in used:
+
+            while gid in used_ids:
+                if commit:
+                    gid = int(self.new(item))
+                else:
                     gid = int(self.reg.allocate_gid())
-                    label = f"G{gid:06d}"
-            used.add(label)
-            out[i] = label
+            used_ids.add(gid)
+            out[i] = f"G{gid:06d}"
+
+        for i, item in enumerate(obs):
+            if item is None:
+                # A failed crop is a detector/runtime anomaly, not an identity
+                # state. Refuse to emit a fake GID that cannot be backed by
+                # features.
+                raise RuntimeError(f"Invalid person crop for observation index {i}")
 
         return out
 

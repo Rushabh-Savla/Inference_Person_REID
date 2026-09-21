@@ -103,9 +103,20 @@ class QdrantAuthoritativeResolver(AttributeAwareResolver):
         # Lower clothing is a hard contradiction when both people are lower-body
         # visible. This prevents a strong upper-body match from overriding a
         # clearly different trouser/skirt/shorts appearance.
-        if attrs.get("ready") and attrs.get("lower_visible"):
+        if attrs.get("ready"):
             lower = float(attrs.get("lower", 0.0))
             upper = float(attrs.get("upper", 0.0))
+            joint = float(attrs.get("joint", min(upper, lower)))
+            floor = float(self.cfg.get("clothing_joint_min", 0.52))
+            if upper < floor or lower < floor or joint < floor:
+                return {
+                    "score": None,
+                    "model_scores": model_scores,
+                    "attrs": attrs,
+                    "face": {"valid": False, "score": 0.0, "quality": 0.0},
+                    "rejected": True,
+                    "reason": "hard_top_bottom_clothing_conflict",
+                }
             if lower < self.lower_floor and upper >= 0.70:
                 return {
                     "score": None,

@@ -724,6 +724,9 @@ class BatchNvDCF:
                             and str(gids[tid]).startswith("G")
                         ),
                         "recovery_hint_count": int(len(hints.get(tid, []))),
+                        "match_evidence": dict(
+                            self.identity.last_evidence.get(tid, {})
+                        ),
                     })
 
                 previous_overlap = set(active_overlap)
@@ -875,6 +878,48 @@ class BatchNvDCF:
             "face_reliable": int(self.identity.stats["face_reliable"]),
             "qdrant_retrievals": int(self.identity.stats["qdrant_retrievals"]),
             "memory_reject": int(self.identity.stats.get("memory_reject", 0)),
+            "feature_decisions": int(
+                sum(
+                    1
+                    for x in all_labels
+                    if x.get("match_evidence", {}).get("decision") == "feature"
+                )
+            ),
+            "temporal_decisions": int(
+                sum(
+                    1
+                    for x in all_labels
+                    if x.get("match_evidence", {}).get("decision") == "temporal"
+                )
+            ),
+            "face_used_decisions": int(
+                sum(
+                    1
+                    for x in all_labels
+                    if x.get("match_evidence", {}).get("face_used")
+                )
+            ),
+            "top_verified_decisions": int(
+                sum(
+                    1
+                    for x in all_labels
+                    if "top" in x.get("match_evidence", {})
+                )
+            ),
+            "bottom_verified_decisions": int(
+                sum(
+                    1
+                    for x in all_labels
+                    if "bottom" in x.get("match_evidence", {})
+                )
+            ),
+            "pose_scored_decisions": int(
+                sum(
+                    1
+                    for x in all_labels
+                    if "pose" in x.get("match_evidence", {})
+                )
+            ),
         }
         (self.out / "nvdcf_identity_debug.json").write_text(
             json.dumps(debug, indent=2),

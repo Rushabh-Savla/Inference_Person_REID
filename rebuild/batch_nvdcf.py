@@ -286,10 +286,12 @@ class BatchNvDCF:
                     tid = int(item["track_id"])
                     known = track_gids.get(tid)
                     if known is not None and str(known).startswith("G"):
-                        hints[tid] = [int(str(known)[1:])] + [
+                        known_id = int(str(known)[1:])
+                        item["track_hint"] = known_id
+                        hints[tid] = [known_id] + [
                             int(value)
                             for value in hints.get(tid, [])
-                            if int(value) != int(str(known)[1:])
+                            if int(value) != known_id
                         ]
                 force_identity = bool(active_overlap or recovery_mode)
                 if not force_identity:

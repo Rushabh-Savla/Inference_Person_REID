@@ -904,6 +904,25 @@ class MultiModalStrict:
                                 self.stats["cross"] += 1
                         continue
 
+                    shadow = bool(
+                        item.get("row", {}).get("shadow", False)
+                        or str(item.get("row", {}).get("shadow_reason", "")) == "collapse"
+                    )
+                    if shadow:
+                        ordered = [
+                            int(value)
+                            for value in recovery_ids
+                            if int(value) not in used_ids
+                        ]
+                        if ordered:
+                            gid = ordered[0]
+                            out[original] = f"G{gid:06d}"
+                            used_ids.add(gid)
+                            self.stats["occlusion_continuity"] = (
+                                self.stats.get("occlusion_continuity", 0) + 1
+                            )
+                            continue
+
                     raise RuntimeError(
                         f"overlap/recovery identity could not be verified: "
                         f"camera={item['camera']} frame={item['row'].get('frame')} "

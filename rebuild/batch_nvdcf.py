@@ -517,7 +517,7 @@ class BatchNvDCF:
                         if gid in seen:
                             continue
                         age = frame - int(value.get("frame", frame))
-                        if age <= 30:
+                        if age <= 90:
                             anchors.append(
                                 {
                                     "bbox": value["bbox"],
@@ -531,7 +531,7 @@ class BatchNvDCF:
                             [item for _, item in unseen],
                             anchors,
                             locked,
-                            minimum=0.08,
+                            minimum=0.03 if active_overlap else 0.08,
                         )
                         for local, gid in carried.items():
                             index = unseen[int(local)][0]
@@ -641,15 +641,104 @@ class BatchNvDCF:
                         if gids[int(item["track_id"])] == "PENDING"
                     ]
                     subset = [current[index] for index in indices]
+                    pool = list(overlap_anchors or last_clean)
+                    seen = {
+                        str(item.get("gid"))
+                        for item in pool
+                        if str(item.get("gid", "")).startswith("G")
+                    }
+                    for gid, value in identity_memory.items():
+                        if gid in seen:
+                            continue
+                        age = frame - int(value.get("frame", frame))
+                        if age <= 90:
+                            pool.append(
+                                {
+                                    "bbox": value["bbox"],
+                                    "pred_bbox": value.get("pred_bbox"),
+                                    "gid": gid,
+                                }
+                            )
+                            seen.add(gid)
                     carried = carry(
                         subset,
-                        overlap_anchors,
+                        pool,
                         used,
-                        minimum=0.08,
+                        minimum=0.03 if active_overlap else 0.08,
                     )
                     for local, gid in carried.items():
                         tid = int(subset[local]["track_id"])
                         gids[tid] = gid
+
+                    # A collapse shadow is a detector hypothesis for a person
+                    # whose NvDCF handle was temporarily removed. It must never
+                    # reach the final output as PENDING. Resolve it from the
+                    # protected pre-overlap identities or recent same-camera
+                    # identity memory, one-to-one, without creating a new GID.
+                    shadows = [
+                        index
+                        for index, item in enumerate(current)
+                        if (
+                            str(item.get("shadow_reason", "")) == "collapse"
+                            and str(gids.get(int(item["track_id"]), "PENDING")) == "PENDING"
+                        )
+                    ]
+                    if shadows:
+                        pool = list(overlap_anchors or recovery_anchors or last_clean)
+                        seen = {
+                            str(item.get("gid"))
+                            for item in pool
+                            if str(item.get("gid", "")).startswith("G")
+                        }
+                        for gid, value in identity_memory.items():
+                            if gid in seen:
+                                continue
+                            age = frame - int(value.get("frame", frame))
+                            if age <= 90:
+                                pool.append(
+                                    {
+                                        "bbox": value["bbox"],
+                                        "pred_bbox": value.get("pred_bbox"),
+                                        "gid": gid,
+                                    }
+                                )
+                                seen.add(gid)
+                        rows = [current[index] for index in shadows]
+                        used = {
+                            str(value)
+                            for value in gids.values()
+                            if str(value).startswith("G")
+                        }
+                        carried = self._local_continuity(
+                            rows,
+                            pool,
+                            used,
+                            minimum=0.03,
+                        )
+                        for local, gid in carried.items():
+                            tid = int(rows[int(local)]["track_id"])
+                            gids[tid] = gid
+
+                        left = [
+                            index
+                            for index in shadows
+                            if str(gids.get(int(current[index]["track_id"]), "PENDING")) == "PENDING"
+                        ]
+                        if left and pool:
+                            blocked = {
+                                str(value)
+                                for value in gids.values()
+                                if str(value).startswith("G")
+                            }
+                            protected_rows = [current[index] for index in left]
+                            protected = self._protected_assign(
+                                protected_rows,
+                                pool,
+                                blocked=blocked,
+                            )
+                            for local, gid in protected.items():
+                                tid = int(protected_rows[int(local)]["track_id"])
+                                gids[tid] = gid
 
                     # During severe overlap, protect the identities involved as
                     # a single one-to-one hypothesis set. NvDCF tracker-ID churn

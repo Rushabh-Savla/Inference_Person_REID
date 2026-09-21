@@ -288,6 +288,14 @@ class MultiModalStrict:
             self.stats["qdrant_retrievals"] += 1
         ids = {int(x) for x in hits}
         ids.update(int(x) for x in self.pro)
+        track_hint = obs.get("track_hint")
+        if track_hint is not None:
+            try:
+                gid = int(track_hint)
+                if gid in self.pro:
+                    ids.add(gid)
+            except (TypeError, ValueError):
+                pass
         for value in obs.get("recovery_hints", []) or []:
             try:
                 gid = int(value)

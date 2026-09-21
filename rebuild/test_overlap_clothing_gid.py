@@ -1,7 +1,10 @@
 from __future__ import annotations
 
+import inspect
+
 import numpy as np
 
+from rebuild.multimodal_identity import MultiModal
 from rebuild.multimodal_identity_strict import MultiModalStrict
 from src.live.persistent_multimodel import PersistentMultimodelRegistry
 
@@ -76,3 +79,8 @@ def test_gid_allocation_starts_at_one_and_advances_from_persisted_max(tmp_path):
     )
     assert reg.allocate_gid() == 10
     reg.close()
+
+
+def test_active_multimodal_forwards_recovery_hints():
+    parameter = inspect.signature(MultiModal.observe).parameters
+    assert "recovery_hints" in parameter

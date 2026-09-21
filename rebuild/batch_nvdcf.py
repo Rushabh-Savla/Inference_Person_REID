@@ -115,7 +115,7 @@ class BatchNvDCF:
         return active
 
     @classmethod
-    def _local_continuity(cls, rows, anchors, used, minimum=0.28):
+    def _local_continuity(cls, rows, anchors, used, minimum=0.18):
         """Cheap same-camera re-acquisition without running the Re-ID stack."""
         rows = list(rows or [])
         anchors = [
@@ -137,19 +137,27 @@ class BatchNvDCF:
                 acx = 0.5 * (ax1 + ax2)
                 acy = 0.5 * (ay1 + ay2)
                 ah = max(1.0, ay2 - ay1)
+                anchor_box = anchor.get("pred_bbox") or anchor["bbox"]
                 iou, iom = cls._metrics(
                     row["bbox"],
-                    anchor["bbox"],
+                    anchor_box,
                 )
                 distance = float(
-                    np.hypot(rcx - acx, rcy - acy)
+                    np.hypot(rcx - 0.5 * (float(anchor_box[0]) + float(anchor_box[2])),
+                             rcy - 0.5 * (float(anchor_box[1]) + float(anchor_box[3])))
                     / max(rh, ah)
                 )
                 proximity = max(0.0, 1.0 - distance / 2.5)
+                actual_iou, actual_iom = cls._metrics(
+                    row["bbox"],
+                    anchor["bbox"],
+                )
                 matrix[r, a] = (
-                    0.55 * float(iou)
-                    + 0.45 * max(
+                    0.45 * float(iou)
+                    + 0.20 * float(actual_iou)
+                    + 0.35 * max(
                         float(iom),
+                        float(actual_iom),
                         0.5 * proximity,
                     )
                 )
@@ -286,6 +294,7 @@ class BatchNvDCF:
         recovery_until = -1
         frame = 0
         track_gids = {}
+        track_seen = {}
         recovery_tracks = set()
         recovery_pending = False
         # Spatial identity memory survives NvDCF tracker-ID churn and temporary
@@ -325,6 +334,21 @@ class BatchNvDCF:
                     raise RuntimeError(
                         f"NvDCF emitted duplicate tracker IDs in one frame: {camera}:{frame}:{tids}"
                     )
+
+                # NvDCF track IDs are short-lived temporal handles. Expire any
+                # handle that has not been observed recently so a recycled tracker
+                # ID can never silently inherit an old human identity.
+                stale = [
+                    tid for tid, seen in track_seen.items()
+                    if frame - int(seen) > 45
+                ]
+                for tid in stale:
+                    track_seen.pop(tid, None)
+                    track_gids.pop(tid, None)
+
+                for tid in tids:
+                    if tid >= 0:
+                        track_seen[tid] = frame
 
                 geometric_overlap = self._overlap_ids(current)
                 collapse_overlap = {
@@ -433,6 +457,7 @@ class BatchNvDCF:
                             anchors.append(
                                 {
                                     "bbox": value["bbox"],
+                                    "pred_bbox": value.get("pred_bbox"),
                                     "gid": gid,
                                 }
                             )
@@ -654,8 +679,29 @@ class BatchNvDCF:
                         tid = int(item["track_id"])
                         gid = gids.get(tid)
                         if gid is not None and str(gid).startswith("G"):
-                            identity_memory[str(gid)] = {
+                            key = str(gid)
+                            previous = identity_memory.get(key)
+                            previous_box = (
+                                list(previous["bbox"])
+                                if previous is not None
+                                else list(item["bbox"])
+                            )
+                            oldcx = 0.5 * (float(previous_box[0]) + float(previous_box[2]))
+                            oldcy = 0.5 * (float(previous_box[1]) + float(previous_box[3]))
+                            newcx = 0.5 * (float(item["bbox"][0]) + float(item["bbox"][2]))
+                            newcy = 0.5 * (float(item["bbox"][1]) + float(item["bbox"][3]))
+                            dx = newcx - oldcx
+                            dy = newcy - oldcy
+                            box = [float(x) for x in item["bbox"]]
+                            pred = [
+                                box[0] + dx,
+                                box[1] + dy,
+                                box[2] + dx,
+                                box[3] + dy,
+                            ]
+                            identity_memory[key] = {
                                 "bbox": list(item["bbox"]),
+                                "pred_bbox": pred,
                                 "frame": frame,
                             }
 

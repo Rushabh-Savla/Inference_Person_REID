@@ -268,7 +268,7 @@ class BatchNvDCF:
 
                 gids = {
                     int(item["track_id"]): str(
-                        feature_map.get(int(item["track_id"]), "PENDING")
+                        feature_map.get(int(item["track_id"]))
                     )
                     for item in current
                 }
@@ -328,7 +328,7 @@ class BatchNvDCF:
                     feature_map = self.identity.observe(
                         image,
                         current,
-                        commit=False,
+                        commit=True,
                         recovery=True,
                         recovery_hints=hints,
                     )
@@ -342,13 +342,15 @@ class BatchNvDCF:
                 used = set()
                 for tid in list(gids):
                     gid = gids[tid]
-                    if gid.startswith("G") and gid in used:
-                        if gid.startswith("G") and gid in used:
+                    if not gid.startswith("G"):
+                        raise RuntimeError(
+                            f"identity resolver returned a non-GID label: {camera}:{frame}:{tid}:{gid}"
+                        )
+                    if gid in used:
                         raise RuntimeError(
                             f"identity collision survived one-to-one assignment: {camera}:{frame}:{gid}"
                         )
-                    elif gid.startswith("G"):
-                        used.add(gid)
+                    used.add(gid)
 
                 if not active_overlap and recovery_mode:
                     confirmed = [

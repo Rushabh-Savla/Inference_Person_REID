@@ -389,33 +389,29 @@ class BatchNvDCF:
                             for value in hints.get(tid, [])
                             if int(value) != known_id
                         ]
-                # Heavy multimodal inference is event-driven. First try
-                # cheap same-camera re-acquisition for a fresh NvDCF tracker
-                # ID. This prevents tracker-ID churn from invoking the full
-                # Re-ID stack every frame.
+                # Heavy multimodal inference is event-driven. First recover
+                # fresh NvDCF IDs from the last clean spatial state. Tracker-ID
+                # churn must never by itself invoke the expensive stack.
                 check = set()
                 locked = {
                     str(track_gids[int(item["track_id"])])
                     for item in current
                     if int(item["track_id"]) in track_gids
                 }
-                if (
-                    not severe_overlap
-                    and last_clean_frame >= 0
-                    and frame - last_clean_frame <= 5
-                ):
-                    unseen = [
-                        (index, item)
-                        for index, item in enumerate(current)
-                        if int(item["track_id"]) not in track_gids
-                        and int(item["track_id"]) >= 0
-                        and str(item.get("shadow_reason", "")) != "collapse"
-                    ]
+                unseen = [
+                    (index, item)
+                    for index, item in enumerate(current)
+                    if int(item["track_id"]) not in track_gids
+                    and int(item["track_id"]) >= 0
+                    and str(item.get("shadow_reason", "")) != "collapse"
+                ]
+
+                if unseen and last_clean:
                     carried = self._local_continuity(
                         [item for _, item in unseen],
                         last_clean,
                         locked,
-                        minimum=0.32,
+                        minimum=0.16,
                     )
                     for local, gid in carried.items():
                         index = unseen[int(local)][0]
@@ -425,25 +421,31 @@ class BatchNvDCF:
                         hints[tid] = [int(gid[1:])]
                         locked.add(gid)
 
-                # Any remaining genuine new track needs full multimodal Re-ID.
-                for index, item in enumerate(current):
-                    tid = int(item["track_id"])
-                    shadow = str(item.get("shadow_reason", "")) == "collapse"
-                    if tid not in track_gids and not shadow:
-                        check.add(index)
+                # During a severe overlap event, do not treat a tracker-ID
+                # recreation as a genuinely new person. Verify the identities
+                # involved at event entry, then hold them temporally until the
+                # event ends. Genuinely unmatched people are deferred to the
+                # first clean frame.
+                if not severe_overlap:
+                    for index, item in enumerate(current):
+                        tid = int(item["track_id"])
+                        shadow = str(item.get("shadow_reason", "")) == "collapse"
+                        if tid not in track_gids and not shadow:
+                            check.add(index)
 
-                # Severe overlap is always verified by the full stack.
                 if severe_enter:
                     check.update(
                         index
                         for index, item in enumerate(current)
                         if int(item["track_id"]) in severe_enter
+                        and int(item["track_id"]) >= 0
                     )
                 if recovery_mode:
                     check.update(
                         index
                         for index, item in enumerate(current)
                         if int(item["track_id"]) in recovery_tracks
+                        and int(item["track_id"]) >= 0
                     )
 
                 # GIDs held by untouched tracks are reserved so a probe from
@@ -601,6 +603,10 @@ class BatchNvDCF:
                 previous_severe_overlap = set(severe_overlap)
                 if not active_overlap:
                     last_clean_frame = frame
+                    # Clear stale tracker aliases after the clean frame. The
+                    # current frame's spatially recovered aliases are retained.
+                    if recovery_mode and severe_exit:
+                        recovery_tracks = set()
         finally:
             cap.release()
 

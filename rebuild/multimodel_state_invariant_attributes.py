@@ -67,29 +67,59 @@ class AttributeAwareResolver(StateInvariantFinalResolverFast):
         if not first or not second:
             return {"ready": False}
         a, b = np.stack(first), np.stack(second)
-        upper_color = self._best(a[:, 0:20], b[:, 0:20])
-        lower_color = self._best(a[:, 20:40], b[:, 20:40])
-        upper_pattern = self._best(a[:, 40:54], b[:, 40:54])
-        lower_pattern = self._best(a[:, 54:68], b[:, 54:68])
+
+        # Evaluate upper and lower clothing on the same pair of stored
+        # exemplars. Independent maxima can create a false identity by taking
+        # the shirt from one view and trousers from another.
+        pairs = []
+        for left_item in a:
+            for right_item in b:
+                upper_color = float(self._unit(left_item[0:20]) @ self._unit(right_item[0:20]))
+                lower_color = float(self._unit(left_item[20:40]) @ self._unit(right_item[20:40]))
+                upper_pattern = float(self._unit(left_item[40:54]) @ self._unit(right_item[40:54]))
+                lower_pattern = float(self._unit(left_item[54:68]) @ self._unit(right_item[54:68]))
+                upper = 0.62 * upper_color + 0.38 * upper_pattern
+                lower = 0.60 * lower_color + 0.40 * lower_pattern
+                pairs.append((
+                    min(upper, lower),
+                    0.50 * upper + 0.50 * lower,
+                    upper,
+                    lower,
+                    upper_color,
+                    lower_color,
+                    upper_pattern,
+                    lower_pattern,
+                ))
+        pairs.sort(key=lambda item: (item[0], item[1]), reverse=True)
+        _, _, upper, lower, upper_color, lower_color, upper_pattern, lower_pattern = pairs[0]
+
         head = self._best(a[:, 68:102], b[:, 68:102])
         eye = self._best(a[:, 102:108], b[:, 102:108])
         upper_visible = bool(np.mean(a[:, 108] > 0.0) >= 0.5 and np.mean(b[:, 108] > 0.0) >= 0.5)
         lower_visible = bool(np.mean(a[:, 109] > 0.0) >= 0.5 and np.mean(b[:, 109] > 0.0) >= 0.5)
         head_visible = bool(np.mean(a[:, 110] > 0.0) >= 0.5 and np.mean(b[:, 110] > 0.0) >= 0.5)
         eye_visible = bool(np.mean(a[:, 111] > 0.0) >= 0.5 and np.mean(b[:, 111] > 0.0) >= 0.5)
-        upper = 0.62 * upper_color + 0.38 * upper_pattern
-        lower = 0.60 * lower_color + 0.40 * lower_pattern
-        pattern = 0.50 * upper_pattern + 0.50 * lower_pattern
-        clothing = 0.34 * upper + 0.52 * lower + 0.14 * pattern
+        clothing = 0.34 * upper + 0.52 * lower + 0.14 * (0.50 * upper_pattern + 0.50 * lower_pattern)
+        joint = min(upper, lower)
         conflict = lower_visible and upper >= 0.78 and lower < self.lower_conflict_floor
         return {
             "ready": True,
-            "upper": float(upper), "lower": float(lower), "pattern": float(pattern), "clothing": float(clothing),
-            "upper_color": float(upper_color), "lower_color": float(lower_color),
-            "upper_pattern": float(upper_pattern), "lower_pattern": float(lower_pattern),
-            "head": float(head), "eye": float(eye),
-            "upper_visible": upper_visible, "lower_visible": lower_visible,
-            "head_visible": head_visible, "eye_visible": eye_visible, "conflict": bool(conflict),
+            "upper": float(upper),
+            "lower": float(lower),
+            "joint": float(joint),
+            "pattern": float(0.50 * upper_pattern + 0.50 * lower_pattern),
+            "clothing": float(clothing),
+            "upper_color": float(upper_color),
+            "lower_color": float(lower_color),
+            "upper_pattern": float(upper_pattern),
+            "lower_pattern": float(lower_pattern),
+            "head": float(head),
+            "eye": float(eye),
+            "upper_visible": upper_visible,
+            "lower_visible": lower_visible,
+            "head_visible": head_visible,
+            "eye_visible": eye_visible,
+            "conflict": bool(conflict),
         }
 
     @classmethod

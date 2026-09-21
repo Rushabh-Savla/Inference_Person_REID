@@ -20,12 +20,10 @@ class BatchNvDCF:
         with open(config_path, "r", encoding="utf-8") as handle:
             self.cfg = yaml.safe_load(handle) or {}
         from rebuild.multimodal_identity import MultiModal
-        from rebuild.nvdcf_tracker import NvDCF
         self.out = Path(self.cfg["input"]["output_dir"])
         self.out.mkdir(parents=True, exist_ok=True)
         self.cache = self.out / "cache_nvdcf"
         self.cache.mkdir(parents=True, exist_ok=True)
-        self.det = NvDCF(self.cfg["detector"])
         self.identity = MultiModal(self.cfg)
         self._display_gid = {}
         self._next_display_gid = 1
@@ -414,7 +412,7 @@ class BatchNvDCF:
         print("[nvdcf] FACE: InsightFace SCRFD + ArcFace, reliable face has highest fusion priority")
         print("[nvdcf] CLOTHING: top + bottom + upper/lower pattern every comparison")
         print("[nvdcf] POSE: YOLO pose participates in matching")
-        print("[nvdcf] GID assignment: feature-only after overlap; Hungarian one-to-one every frame")
+        print("[nvdcf] GID assignment: strict multimodal + sequential display GIDs + one-to-one per camera frame")
 
         all_labels = []
         trackers = {}
@@ -427,13 +425,24 @@ class BatchNvDCF:
             detector.track(camera, path, target)
             return camera, path, target
 
-        # The expensive video decode + YOLO detection + NvDCF tracking stage
-        # runs concurrently for every supplied camera. Identity resolution is
-        # intentionally performed afterward against one shared gallery so
-        # cross-camera matching and GID allocation remain deterministic.
-        workers = min(len(sources), max(1, int(self.cfg.get("input", {}).get("parallel_cameras", len(sources)))))
+        workers = min(
+            len(sources),
+            max(
+                1,
+                int(
+                    self.cfg.get("input", {}).get(
+                        "parallel_cameras",
+                        len(sources),
+                    )
+                ),
+            ),
+        )
         print(f"[nvdcf] parallel cameras: {len(sources)} workers={workers}")
-        with ThreadPoolExecutor(max_workers=workers, thread_name_prefix="camera") as pool:
+
+        with ThreadPoolExecutor(
+            max_workers=workers,
+            thread_name_prefix="camera",
+        ) as pool:
             futures = [pool.submit(track_one, item) for item in sources]
             for future in as_completed(futures):
                 camera, path, target = future.result()
@@ -442,57 +451,79 @@ class BatchNvDCF:
 
         for camera, path in sources:
             target = trackers[camera][1]
-            all_labels.extend(self._solve_camera(camera, path, self._load(target)))
-
-            unique_gids = sorted(
-                {
-                    str(item["gid"])
-                    for item in all_labels
-                    if str(item["gid"]).startswith("G")
-                }
+            all_labels.extend(
+                self._solve_camera(
+                    camera,
+                    path,
+                    self._load(target),
+                )
             )
-            debug = {
-                "tracker": "NVIDIA NvDCF",
-                "identity": "Qdrant + top clothing + bottom clothing + NVIDIA ResNet + NVIDIA Swin + SOLIDER + pose",
-                "post_overlap_identity": "feature_only",
-                "tracker_gid_fallback": False,
-                "same_frame_gid_invariant": True,
-                "unique_global_ids": int(len(unique_gids)),
-                "max_global_id": int(max(
+
+        unique_gids = sorted(
+            {
+                str(item["gid"])
+                for item in all_labels
+                if str(item["gid"]).startswith("G")
+            }
+        )
+        debug = {
+            "tracker": "NVIDIA NvDCF",
+            "identity": "Qdrant + top clothing + bottom clothing + NVIDIA ResNet + NVIDIA Swin + SOLIDER + pose",
+            "post_overlap_identity": "feature_only",
+            "tracker_gid_fallback": False,
+            "same_frame_gid_invariant": True,
+            "unique_global_ids": int(len(unique_gids)),
+            "max_global_id": int(
+                max(
                     (int(value[1:]) for value in unique_gids),
                     default=0,
-                )),
-                "new_gids": int(self.identity.stats["new"]),
-                "duplicate_frames": int(self.identity.stats["duplicate"]),
-                "pending_frames": int(self.identity.stats["pending"]),
-                "recovery_frames": int(self.identity.stats["recovery"]),
-                "recovery_matches": int(self.identity.stats["recovery_match"]),
-                "recovery_feature_verified": int(
-                    self.identity.stats.get("recovery_feature_verified", 0)
-                ),
-                "cross_camera_matches": int(self.identity.stats["cross"]),
-                "pending_new_observations": int(self.identity.stats["pending_new_observations"]),
-                "pending_new_confirmed": int(self.identity.stats["pending_new_confirmed"]),
-                "overlap_frames": int(sum(1 for x in all_labels if x.get("overlap"))),
-                "collapse_frames": int(sum(1 for x in all_labels if x.get("overlap") and x.get("track_id", 0) < 0)),
-                "face_observations": int(self.identity.stats["face_observations"]),
-                "face_reliable": int(self.identity.stats["face_reliable"]),
-                "qdrant_retrievals": int(self.identity.stats["qdrant_retrievals"]),
-                "memory_reject": int(self.identity.stats.get("memory_reject", 0)),
-            }
-            (self.out / "nvdcf_identity_debug.json").write_text(json.dumps(debug, indent=2), encoding="utf-8")
-            print(
-                f"[nvdcf] result: new_gids={debug['new_gids']} "
-                f"recovery_matches={debug['recovery_matches']} "
-                f"cross_camera_matches={debug['cross_camera_matches']} "
-                f"duplicate_frames={debug['duplicate_frames']} "
-                f"pending_frames={debug['pending_frames']} "
-                f"face_reliable={debug['face_reliable']} "
-                f"qdrant_retrievals={debug['qdrant_retrievals']}"
-            )
-            return all_labels
-        finally:
-            self.identity.close()
+                )
+            ),
+            "new_gids": int(self.identity.stats["new"]),
+            "duplicate_frames": int(self.identity.stats["duplicate"]),
+            "pending_frames": int(self.identity.stats["pending"]),
+            "recovery_frames": int(self.identity.stats["recovery"]),
+            "recovery_matches": int(self.identity.stats["recovery_match"]),
+            "recovery_feature_verified": int(
+                self.identity.stats.get("recovery_feature_verified", 0)
+            ),
+            "cross_camera_matches": int(self.identity.stats["cross"]),
+            "pending_new_observations": int(
+                self.identity.stats["pending_new_observations"]
+            ),
+            "pending_new_confirmed": int(
+                self.identity.stats["pending_new_confirmed"]
+            ),
+            "overlap_frames": int(
+                sum(1 for x in all_labels if x.get("overlap"))
+            ),
+            "collapse_frames": int(
+                sum(
+                    1
+                    for x in all_labels
+                    if x.get("overlap")
+                    and x.get("track_id", 0) < 0
+                )
+            ),
+            "face_observations": int(self.identity.stats["face_observations"]),
+            "face_reliable": int(self.identity.stats["face_reliable"]),
+            "qdrant_retrievals": int(self.identity.stats["qdrant_retrievals"]),
+            "memory_reject": int(self.identity.stats.get("memory_reject", 0)),
+        }
+        (self.out / "nvdcf_identity_debug.json").write_text(
+            json.dumps(debug, indent=2),
+            encoding="utf-8",
+        )
+        print(
+            f"[nvdcf] result: new_gids={debug['new_gids']} "
+            f"recovery_matches={debug['recovery_matches']} "
+            f"cross_camera_matches={debug['cross_camera_matches']} "
+            f"duplicate_frames={debug['duplicate_frames']} "
+            f"pending_frames={debug['pending_frames']} "
+            f"face_reliable={debug['face_reliable']} "
+            f"qdrant_retrievals={debug['qdrant_retrievals']}"
+        )
+        return all_labels
 
 
 __all__ = ["BatchNvDCF"]

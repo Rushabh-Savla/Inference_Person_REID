@@ -288,6 +288,10 @@ class BatchNvDCF:
         track_gids = {}
         recovery_tracks = set()
         recovery_pending = False
+        # Spatial identity memory survives NvDCF tracker-ID churn and temporary
+        # overlap gaps. It is only a same-camera continuity aid; it never creates
+        # a cross-camera identity on its own.
+        identity_memory = {}
         total = int(cap.get(cv2.CAP_PROP_FRAME_COUNT) or 0)
         last_progress = 0
         identity_runs = 0
@@ -408,20 +412,35 @@ class BatchNvDCF:
                     and str(item.get("shadow_reason", "")) != "collapse"
                 ]
 
-                if unseen and last_clean:
-                    carried = self._local_continuity(
-                        [item for _, item in unseen],
-                        last_clean,
-                        locked,
-                        minimum=0.16,
-                    )
-                    for local, gid in carried.items():
-                        index = unseen[int(local)][0]
-                        tid = int(current[index]["track_id"])
-                        track_gids[tid] = gid
-                        current[index]["track_hint"] = int(gid[1:])
-                        hints[tid] = [int(gid[1:])]
-                        locked.add(gid)
+                if unseen:
+                    anchors = list(last_clean)
+                    seen = {str(item.get("gid")) for item in anchors}
+                    for gid, value in identity_memory.items():
+                        if gid in seen:
+                            continue
+                        age = frame - int(value.get("frame", frame))
+                        if age <= 30:
+                            anchors.append(
+                                {
+                                    "bbox": value["bbox"],
+                                    "gid": gid,
+                                }
+                            )
+                            seen.add(gid)
+                    if anchors:
+                        carried = self._local_continuity(
+                            [item for _, item in unseen],
+                            anchors,
+                            locked,
+                            minimum=0.08,
+                        )
+                        for local, gid in carried.items():
+                            index = unseen[int(local)][0]
+                            tid = int(current[index]["track_id"])
+                            track_gids[tid] = gid
+                            current[index]["track_hint"] = int(gid[1:])
+                            hints[tid] = [int(gid[1:])]
+                            locked.add(gid)
 
                 # During a severe overlap event, do not treat a tracker-ID
                 # recreation as a genuinely new person. Verify the identities
@@ -433,6 +452,9 @@ class BatchNvDCF:
                         tid = int(item["track_id"])
                         shadow = str(item.get("shadow_reason", "")) == "collapse"
                         if tid not in track_gids and not shadow:
+                            # At this point spatial continuity has already had a
+                            # chance to recover tracker-ID churn. Only genuinely
+                            # unmatched live tracks enter the expensive Re-ID pass.
                             check.add(index)
 
                 if severe_enter:
@@ -494,7 +516,10 @@ class BatchNvDCF:
                         continue
                     if tid in track_gids:
                         gids[tid] = str(track_gids[tid])
-                    elif str(item.get("shadow_reason", "")) == "collapse":
+                    else:
+                        # Every non-probed row must still receive a temporary
+                        # state. Both collapse and untracked detector shadows
+                        # are resolved below by overlap continuity.
                         gids[tid] = "PENDING"
 
                 for item in current:
@@ -604,6 +629,18 @@ class BatchNvDCF:
                         recovery_anchors = confirmed
                 elif not active_overlap and not recovery_mode:
                     recovery_anchors = []
+
+                # Refresh the same-camera spatial identity memory only from
+                # resolved GIDs. This prevents tracker-ID churn from repeatedly
+                # invoking the full multimodal stack on ordinary frames.
+                for item in current:
+                    tid = int(item["track_id"])
+                    gid = gids.get(tid)
+                    if gid is not None and str(gid).startswith("G"):
+                        identity_memory[str(gid)] = {
+                            "bbox": list(item["bbox"]),
+                            "frame": frame,
+                        }
 
                 for item in current:
                     tid = int(item["track_id"])

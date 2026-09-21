@@ -85,6 +85,7 @@ class MultiModalStrict:
         self.pending_ttl = int(self.icfg.get("pending_ttl_seconds", 300))
         self.pending_max = int(self.icfg.get("pending_max", 64))
         self.pending_time_gap = float(self.icfg.get("pending_time_gap", 0.75))
+        self.last_evidence = {}
         self.stats = {
             "feature": 0,
             "recovery": 0,
@@ -1001,6 +1002,48 @@ class MultiModalStrict:
                 raise RuntimeError(
                     f"identity resolver returned no GID for observation index {index}"
                 )
+
+        # Emit the actual evidence used for each decision. This is diagnostic
+        # metadata only; the assignment itself has already been completed above.
+        self.last_evidence = {}
+        for index, item in enumerate(obs):
+            value = str(out[index])
+            if not value.startswith("G"):
+                continue
+            gid = int(value[1:])
+            score = sets[index].get(gid) if index < len(sets) else None
+            evidence = {
+                "gid": value,
+                "decision": (
+                    "feature"
+                    if score is not None and (
+                        recovery or bool(item.get("track_hint") is None)
+                    )
+                    else "temporal"
+                ),
+            }
+            if score is not None:
+                for name in (
+                    "score",
+                    "deep",
+                    "resnet",
+                    "swin",
+                    "solider",
+                    "top",
+                    "bottom",
+                    "clothing_joint",
+                    "pose",
+                    "face",
+                    "face_used",
+                    "face_reliable",
+                    "face_quality",
+                    "face_visibility",
+                    "quality",
+                    "recovery_hint",
+                ):
+                    if name in score:
+                        evidence[name] = score[name]
+            self.last_evidence[int(item["row"].get("track_id", -1))] = evidence
 
         return out
 

@@ -11,12 +11,20 @@ class MultiModal(MultiModalStrict):
     def __init__(self, cfg):
         super().__init__(cfg)
 
-    def observe(self, frame, rows, commit=True, recovery=False):
+    def observe(
+        self,
+        frame,
+        rows,
+        commit=True,
+        recovery=False,
+        recovery_hints=None,
+    ):
         values = super().observe(
             frame,
             rows,
             commit=commit,
             recovery=recovery,
+            recovery_hints=recovery_hints,
         )
         if len(values) != len(rows):
             raise RuntimeError(

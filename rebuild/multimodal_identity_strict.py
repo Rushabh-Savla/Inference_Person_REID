@@ -138,16 +138,40 @@ class MultiModalStrict:
         bank = [x for x in bank if x.size == 112 and np.isfinite(x).all()]
         if query.size != 112 or not bank:
             return None
-        top = cls.best([query[:20]], [x[:20] for x in bank])
-        bot = cls.best([query[20:40]], [x[20:40] for x in bank])
-        upp = cls.best([query[40:54]], [x[40:54] for x in bank])
-        low = cls.best([query[54:68]], [x[54:68] for x in bank])
+
+        # Couple upper and lower clothing to the same stored exemplar. The old
+        # implementation maximized top and bottom independently, which could
+        # combine the shirt of one gallery view with the trousers of another.
+        pairs = []
+        for item in bank:
+            upper = cls.sim(query[0:20], item[0:20])
+            lower = cls.sim(query[20:40], item[20:40])
+            upper_pattern = cls.sim(query[40:54], item[40:54])
+            lower_pattern = cls.sim(query[54:68], item[54:68])
+            joint = min(float(upper), float(lower))
+            pairs.append(
+                (
+                    joint,
+                    0.50 * float(upper) + 0.50 * float(lower),
+                    float(upper),
+                    float(lower),
+                    float(upper_pattern),
+                    float(lower_pattern),
+                )
+            )
+
+        pairs.sort(key=lambda value: (value[0], value[1]), reverse=True)
+        joint, clothing, upper, lower, upper_pattern, lower_pattern = pairs[0]
         return {
-            "top": float(top),
-            "bottom": float(bot),
-            "upper_pattern": float(upp),
-            "lower_pattern": float(low),
-            "pattern": float((upp + low) * 0.50),
+            "top": float(upper),
+            "bottom": float(lower),
+            "joint": float(joint),
+            "clothing": float(clothing),
+            "upper_pattern": float(upper_pattern),
+            "lower_pattern": float(lower_pattern),
+            "pattern": 0.50 * float(upper_pattern) + 0.50 * float(lower_pattern),
+            "upper_visible": bool(query[108] > 0.0),
+            "lower_visible": bool(query[109] > 0.0),
         }
 
     @classmethod
@@ -295,6 +319,17 @@ class MultiModalStrict:
         )
         if attrs is None:
             return None
+
+        top_floor = float(self.icfg.get("top_min", 0.52))
+        bottom_floor = float(self.icfg.get("bottom_min", 0.52))
+        joint_floor = float(self.icfg.get("clothing_joint_min", min(top_floor, bottom_floor)))
+        if (
+            float(attrs["top"]) < top_floor
+            or float(attrs["bottom"]) < bottom_floor
+            or float(attrs["joint"]) < joint_floor
+        ):
+            self.stats["clothing_reject"] = self.stats.get("clothing_reject", 0) + 1
+            return None
         pose = 0.0
         pbank = rem.get("pose", {}).get("pose", []) or prof.get("pose", [])
         if obs.get("pose") is not None and pbank:
@@ -353,6 +388,7 @@ class MultiModalStrict:
             "solider": float(vals["solider"]),
             "top": float(top),
             "bottom": float(bot),
+            "clothing_joint": float(attrs["joint"]),
             "upper_pattern": float(attrs["upper_pattern"]),
             "lower_pattern": float(attrs["lower_pattern"]),
             "pose": float(pose),
@@ -374,9 +410,13 @@ class MultiModalStrict:
             float(row[name]) >= float(self.icfg.get("model_min", 0.46))
             for name in self.models
         )
-        if float(row["top"]) < float(self.icfg.get("top_min", 0.42)):
+        if float(row["top"]) < float(self.icfg.get("top_min", 0.52)):
             return False
-        if float(row["bottom"]) < float(self.icfg.get("bottom_min", 0.42)):
+        if float(row["bottom"]) < float(self.icfg.get("bottom_min", 0.52)):
+            return False
+        if float(row.get("clothing_joint", min(row["top"], row["bottom"]))) < float(
+            self.icfg.get("clothing_joint_min", 0.52)
+        ):
             return False
         if support < 2:
             return False
@@ -456,6 +496,8 @@ class MultiModalStrict:
         if top < float(self.icfg.get("memory_top_min", 0.50)):
             return False
         if bottom < float(self.icfg.get("memory_bottom_min", 0.50)):
+            return False
+        if min(top, bottom) < float(self.icfg.get("clothing_joint_min", 0.52)):
             return False
 
         current_face = obs.get("face")
@@ -565,6 +607,7 @@ class MultiModalStrict:
             "solider": float(values["solider"]),
             "top": top,
             "bottom": bottom,
+            "clothing_joint": float(attrs["joint"]),
             "pose": float(pose),
             "face": float(face["score"]),
             "face_used": bool(face.get("used")),
@@ -659,6 +702,7 @@ class MultiModalStrict:
             if (
                 score["top"] < self.pending_clothing_min
                 or score["bottom"] < self.pending_clothing_min
+                or score["clothing_joint"] < self.pending_clothing_min
                 or score["support"] < self.pending_required_models
             ):
                 continue

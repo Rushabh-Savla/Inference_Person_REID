@@ -221,6 +221,7 @@ class BatchNvDCF:
         recovery_anchors = []
         recovery_until = -1
         frame = 0
+        track_gids = {}
 
         try:
             while True:
@@ -251,11 +252,34 @@ class BatchNvDCF:
                     recovery_until = max(recovery_until, frame + recovery_frames)
                     recovery_anchors = list(overlap_anchors)
                 recovery_mode = frame <= recovery_until
-                hints = (
-                    self._recovery_hints(current, recovery_anchors)
-                    if recovery_mode and not active_overlap
-                    else {}
-                )
+                hints = {}
+                if active_overlap:
+                    hints.update(
+                        self._recovery_hints(
+                            current,
+                            overlap_anchors or last_clean,
+                        )
+                    )
+                elif recovery_mode:
+                    hints.update(
+                        self._recovery_hints(
+                            current,
+                            recovery_anchors,
+                        )
+                    )
+
+                # Every live NvDCF track carries its last verified global
+                # identity as a Re-ID candidate. This prevents normal frames
+                # from generating a fresh GID when one model temporarily dips.
+                for item in current:
+                    tid = int(item["track_id"])
+                    known = track_gids.get(tid)
+                    if known is not None and str(known).startswith("G"):
+                        hints[tid] = [int(str(known)[1:])] + [
+                            int(value)
+                            for value in hints.get(tid, [])
+                            if int(value) != int(str(known)[1:])
+                        ]
                 feature_map = self.identity.observe(
                     image,
                     current,
@@ -270,6 +294,12 @@ class BatchNvDCF:
                     )
                     for item in current
                 }
+
+                for item in current:
+                    tid = int(item["track_id"])
+                    gid = gids[tid]
+                    if tid >= 0 and gid.startswith("G"):
+                        track_gids[tid] = gid
 
                 # During the actual overlap only, a prior clean identity can be
                 # carried by spatial continuity. This is temporary occlusion

@@ -659,7 +659,10 @@ class BatchNvDCF:
                             index
                             for index, item in enumerate(current)
                             if (
-                                int(item["track_id"]) in severe_overlap
+                                (
+                                    int(item["track_id"]) in severe_overlap
+                                    and str(gids.get(int(item["track_id"]), "PENDING")) == "PENDING"
+                                )
                                 or str(item.get("shadow_reason", "")) == "collapse"
                             )
                         ]

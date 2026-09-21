@@ -267,9 +267,9 @@ class BatchNvDCF:
                     recovery_until = max(recovery_until, frame + recovery_frames)
                     recovery_anchors = list(overlap_anchors)
                     recovery_tracks = set(previous_overlap)
+                recovery_mode = frame <= recovery_until
                 if not recovery_mode and frame > recovery_until:
                     recovery_tracks = set()
-                recovery_mode = frame <= recovery_until
                 hints = {}
                 if active_overlap:
                     hints.update(

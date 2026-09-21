@@ -760,202 +760,202 @@ class MultiModalStrict:
         if count == 0:
             return []
 
-        chosen = solve(
-            sets,
-            lambda item, second: self.accept(item, second, recovery=recovery),
-            floor=float(self.icfg.get("dummy_floor", 0.35)),
-        )
-
         out = ["UNKNOWN"] * count
         used_ids = set()
 
-        for i, gid in sorted(chosen.items()):
-            gid = int(gid)
-            if gid in used_ids:
-                self.stats["duplicate"] += 1
-                continue
-            used_ids.add(gid)
-            out[int(i)] = f"G{gid:06d}"
-
-            if commit:
-                self.save(gid, obs[int(i)])
-
-                if recovery:
-                    self.stats["recovery_match"] += 1
-                if len(self.pro.get(gid, {}).get("camera", set())) > 1:
-                    self.stats["cross"] += 1
-
-        for i, item in enumerate(obs):
-            if out[i].startswith("G"):
-                continue
-            if item is None:
-                continue
-
-            ranked = sorted(
-                (
-                    (int(gid), value)
-                    for gid, value in sets[i].items()
-                ),
-                key=lambda pair: float(pair[1]["score"]),
-                reverse=True,
+        def good(value):
+            if value is None:
+                return False
+            support = sum(
+                float(value.get(name, 0.0))
+                >= float(self.icfg.get("model_min", 0.46))
+                for name in self.models
             )
-            best_gid = ranked[0][0] if ranked else None
-            best = ranked[0][1] if ranked else None
+            return (
+                float(value.get("top", 0.0))
+                >= float(self.icfg.get("top_min", 0.52))
+                and float(value.get("bottom", 0.0))
+                >= float(self.icfg.get("bottom_min", 0.52))
+                and float(value.get("clothing_joint", 0.0))
+                >= float(self.icfg.get("clothing_joint_min", 0.52))
+                and support >= 2
+            )
 
-            # Existing NvDCF track continuity is the primary same-camera
-            # protection. Once a track has a GID, a temporary Re-ID score dip
-            # must not create a second identity. The clothing hard gates still
-            # apply, so continuity cannot silently turn a different outfit into
-            # the same identity.
-            track_hint = item.get("track_hint")
-            hinted = None
-            if track_hint is not None:
-                try:
-                    hinted_id = int(track_hint)
-                    hinted = (
-                        hinted_id,
-                        sets[i].get(hinted_id),
-                    )
-                except (TypeError, ValueError):
-                    hinted = None
+        # First lock every continuing NvDCF track to its own previously
+        # verified identity. Re-ID still verifies the live crop and BOTH
+        # clothing halves, but another gallery person can never steal a stable
+        # tracker track because it happened to score slightly higher.
+        remaining_obs = []
+        remaining_sets = []
+        remaining_indices = []
+        for index, item in enumerate(obs):
+            hint = item.get("track_hint")
+            if hint is None:
+                remaining_obs.append(item)
+                remaining_sets.append(sets[index])
+                remaining_indices.append(index)
+                continue
+            try:
+                hinted_gid = int(hint)
+            except (TypeError, ValueError):
+                remaining_obs.append(item)
+                remaining_sets.append(sets[index])
+                remaining_indices.append(index)
+                continue
 
-            if hinted and hinted[1] is not None:
-                hinted_gid, value = hinted
-                clothing_ok = (
-                    float(value.get("top", 0.0)) >= float(self.icfg.get("top_min", 0.52))
-                    and float(value.get("bottom", 0.0)) >= float(self.icfg.get("bottom_min", 0.52))
-                    and float(value.get("clothing_joint", 0.0)) >= float(
-                        self.icfg.get("clothing_joint_min", 0.52)
-                    )
-                )
-                support = sum(
-                    float(value.get(name, 0.0)) >= float(self.icfg.get("model_min", 0.46))
-                    for name in self.models
-                )
-                continuity_floor = 0.44 if not recovery else 0.48
-                if (
-                    hinted_gid not in used_ids
-                    and clothing_ok
-                    and support >= 2
-                    and float(value.get("score", 0.0)) >= continuity_floor
-                ):
-                    out[i] = f"G{hinted_gid:06d}"
-                    used_ids.add(hinted_gid)
-                    if commit:
-                        self.save(hinted_gid, item)
-                        if recovery:
-                            self.stats["recovery_match"] += 1
-                        if len(self.pro.get(hinted_gid, {}).get("camera", set())) > 1:
-                            self.stats["cross"] += 1
+            value = sets[index].get(hinted_gid)
+            if (
+                hinted_gid not in used_ids
+                and good(value)
+                and float(value.get("score", 0.0))
+                >= (0.44 if not recovery else 0.48)
+            ):
+                out[index] = f"G{hinted_gid:06d}"
+                used_ids.add(hinted_gid)
+                if commit:
+                    self.save(hinted_gid, item)
+                    if recovery:
+                        self.stats["recovery_match"] += 1
+                    if len(self.pro.get(hinted_gid, {}).get("camera", set())) > 1:
+                        self.stats["cross"] += 1
+                continue
+
+            # A tracked person remains tied to its identity even during a
+            # temporary score dip. The crop can be poor, but the tracker has
+            # not changed the person. Keep the prior GID rather than spawning
+            # another identity.
+            if hinted_gid not in used_ids and hinted_gid in self.pro:
+                out[index] = f"G{hinted_gid:06d}"
+                used_ids.add(hinted_gid)
+                if commit:
+                    self.save(hinted_gid, item)
+                continue
+
+            remaining_obs.append(item)
+            remaining_sets.append(sets[index])
+            remaining_indices.append(index)
+
+        if remaining_obs:
+            chosen = solve(
+                remaining_sets,
+                lambda item, second: self.accept(
+                    item,
+                    second,
+                    recovery=recovery,
+                ),
+                floor=float(self.icfg.get("dummy_floor", 0.35)),
+            )
+            for local_index, gid in sorted(chosen.items()):
+                gid = int(gid)
+                original = remaining_indices[int(local_index)]
+                if gid in used_ids:
+                    self.stats["duplicate"] += 1
+                    continue
+                used_ids.add(gid)
+                out[original] = f"G{gid:06d}"
+                if commit:
+                    self.save(gid, remaining_obs[int(local_index)])
+                    if recovery:
+                        self.stats["recovery_match"] += 1
+                    if len(self.pro.get(gid, {}).get("camera", set())) > 1:
+                        self.stats["cross"] += 1
+
+            # Resolve new-track and overlap rows. Existing gallery matches must
+            # still pass the strict top+bottom clothing gates. During overlap we
+            # never invent a new identity from a difficult crop.
+            for local_index, item in enumerate(remaining_obs):
+                original = remaining_indices[local_index]
+                if out[original].startswith("G") or item is None:
                     continue
 
-            # For overlap/recovery shadows, prefer a spatially suggested
-            # existing identity. Never spawn a new permanent identity merely
-            # because an overlap frame is harder than a clean frame.
-            recovery_ids = {
-                int(x)
-                for x in (item.get("recovery_hints") or [])
-                if str(x).lstrip("-").isdigit()
-            }
-            if recovery:
-                hinted_rows = [
-                    (gid, value)
-                    for gid, value in sets[i].items()
-                    if int(gid) in recovery_ids
-                ]
-                hinted_rows.sort(
+                recovery_ids = {
+                    int(x)
+                    for x in (item.get("recovery_hints") or [])
+                    if str(x).lstrip("-").isdigit()
+                }
+                ranked = sorted(
+                    (
+                        (int(gid), value)
+                        for gid, value in remaining_sets[local_index].items()
+                    ),
                     key=lambda pair: float(pair[1].get("score", 0.0)),
                     reverse=True,
                 )
-                for hinted_gid, value in hinted_rows:
-                    if int(hinted_gid) in used_ids:
-                        continue
-                    clothing_ok = (
-                        float(value.get("top", 0.0)) >= float(self.icfg.get("top_min", 0.52))
-                        and float(value.get("bottom", 0.0)) >= float(self.icfg.get("bottom_min", 0.52))
-                        and float(value.get("clothing_joint", 0.0)) >= float(
-                            self.icfg.get("clothing_joint_min", 0.52)
-                        )
-                    )
-                    support = sum(
-                        float(value.get(name, 0.0)) >= float(self.icfg.get("model_min", 0.46))
-                        for name in self.models
-                    )
-                    if clothing_ok and support >= 2 and float(value.get("score", 0.0)) >= 0.48:
-                        gid = int(hinted_gid)
-                        out[i] = f"G{gid:06d}"
+
+                # Prefer a feature-verified overlap anchor over a generic
+                # gallery candidate. This is the key one-to-one overlap path.
+                if recovery:
+                    hinted_rows = [
+                        (gid, value)
+                        for gid, value in ranked
+                        if gid in recovery_ids
+                        and gid not in used_ids
+                        and good(value)
+                        and float(value.get("score", 0.0)) >= 0.48
+                    ]
+                    if hinted_rows:
+                        gid, value = hinted_rows[0]
+                        out[original] = f"G{gid:06d}"
                         used_ids.add(gid)
                         if commit:
                             self.save(gid, item)
                             self.stats["recovery_match"] += 1
                             if len(self.pro.get(gid, {}).get("camera", set())) > 1:
                                 self.stats["cross"] += 1
-                        break
-                if out[i].startswith("G"):
-                    continue
+                        continue
 
-            # A never-before-seen clean track can create a permanent identity.
-            # This is the only normal path that allocates a new GID.
-            if recovery:
-                raise RuntimeError(
-                    f"overlap/recovery identity could not be verified: "
-                    f"camera={item['camera']} frame={item['row'].get('frame')} "
-                    f"track={item['row'].get('track_id')}"
-                )
-
-            if best is not None:
-                support = sum(
-                    float(best.get(name, 0.0)) >= float(self.icfg.get("model_min", 0.46))
-                    for name in self.models
-                )
-                clothing_ok = (
-                    float(best.get("top", 0.0)) >= float(self.icfg.get("top_min", 0.52))
-                    and float(best.get("bottom", 0.0)) >= float(self.icfg.get("bottom_min", 0.52))
-                    and float(best.get("clothing_joint", 0.0)) >= float(
-                        self.icfg.get("clothing_joint_min", 0.52)
+                    raise RuntimeError(
+                        f"overlap/recovery identity could not be verified: "
+                        f"camera={item['camera']} frame={item['row'].get('frame')} "
+                        f"track={item['row'].get('track_id')} "
+                        f"anchors={sorted(recovery_ids)}"
                     )
-                )
-                if (
-                    best_gid is not None
-                    and best_gid not in used_ids
-                    and clothing_ok
-                    and support >= 2
-                    and float(best.get("score", 0.0)) >= float(
+
+                # New track: accept the strongest existing identity only if
+                # the complete strict multimodal gate passes.
+                for gid, value in ranked:
+                    if gid in used_ids or not good(value):
+                        continue
+                    if float(value.get("score", 0.0)) >= float(
                         self.icfg.get("existing_min", 0.62)
-                    )
-                ):
-                    gid = int(best_gid)
-                    out[i] = f"G{gid:06d}"
-                    used_ids.add(gid)
-                    if commit:
-                        self.save(gid, item)
-                        if len(self.pro.get(gid, {}).get("camera", set())) > 1:
-                            self.stats["cross"] += 1
+                    ):
+                        out[original] = f"G{gid:06d}"
+                        used_ids.add(gid)
+                        if commit:
+                            self.save(gid, item)
+                            if len(self.pro.get(gid, {}).get("camera", set())) > 1:
+                                self.stats["cross"] += 1
+                        break
+
+                if out[original].startswith("G"):
                     continue
 
-            if commit:
-                gid = int(self.new(item))
-            else:
-                gid = int(self.reg.allocate_gid())
-                self.pro[gid] = {
-                    "resnet": [np.asarray(item["resnet"], np.float32)],
-                    "swin": [np.asarray(item["swin"], np.float32)],
-                    "solider": [np.asarray(item["solider"], np.float32)],
-                    "attributes": [np.asarray(item["attributes"], np.float32)],
-                    "face": [],
-                    "pose": [],
-                    "camera": {str(item["camera"])},
-                }
+                if commit:
+                    gid = int(self.new(item))
+                else:
+                    gid = int(self.reg.allocate_gid())
+                    self.pro[gid] = {
+                        "resnet": [np.asarray(item["resnet"], np.float32)],
+                        "swin": [np.asarray(item["swin"], np.float32)],
+                        "solider": [np.asarray(item["solider"], np.float32)],
+                        "attributes": [np.asarray(item["attributes"], np.float32)],
+                        "face": [],
+                        "pose": [],
+                        "camera": {str(item["camera"])},
+                    }
+                while gid in used_ids:
+                    gid = int(self.new(item)) if commit else int(self.reg.allocate_gid())
+                used_ids.add(gid)
+                out[original] = f"G{gid:06d}"
 
-            while gid in used_ids:
-                gid = int(self.new(item)) if commit else int(self.reg.allocate_gid())
-            used_ids.add(gid)
-            out[i] = f"G{gid:06d}"
-
-        for i, item in enumerate(obs):
+        for index, item in enumerate(obs):
             if item is None:
                 raise RuntimeError(
-                    f"Invalid person crop for observation index {i}"
+                    f"Invalid person crop for observation index {index}"
+                )
+            if not out[index].startswith("G"):
+                raise RuntimeError(
+                    f"identity resolver returned no GID for observation index {index}"
                 )
 
         return out

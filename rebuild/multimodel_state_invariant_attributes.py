@@ -203,6 +203,13 @@ class AttributeAwareResolver(StateInvariantFinalResolverFast):
         threshold = self.partial_min if evidence.state_transition else (self.same_min if same else self.cross_min)
         if evidence.fused < threshold:
             return False
+        clothing_min = float(self.cfg.get("clothing_joint_min", 0.52))
+        if attrs.get("ready") and (
+            float(attrs.get("upper", 0.0)) < clothing_min
+            or float(attrs.get("lower", 0.0)) < clothing_min
+            or float(attrs.get("joint", 0.0)) < clothing_min
+        ):
+            return False
         if attrs.get("conflict"):
             if not (evidence.model_support == 3 and evidence.agreement >= 0.78 and face.get("valid") and face.get("score", 0.0) >= self.face_strong):
                 return False

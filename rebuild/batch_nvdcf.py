@@ -509,7 +509,12 @@ class BatchNvDCF:
                         if gids[int(item["track_id"])] == "PENDING"
                     ]
                     subset = [current[index] for index in indices]
-                    carried = carry(subset, overlap_anchors, used)
+                    carried = carry(
+                        subset,
+                        overlap_anchors,
+                        used,
+                        minimum=0.08,
+                    )
                     for local, gid in carried.items():
                         tid = int(subset[local]["track_id"])
                         gids[tid] = gid
@@ -544,19 +549,28 @@ class BatchNvDCF:
                     and severe_overlap
                 ):
                     self.identity.stats["duplicate"] += 1
-                    feature_map = self.identity.observe(
-                        image,
-                        current,
-                        commit=True,
-                        recovery=True,
-                        recovery_hints=hints,
-                    )
-                    gids = {
-                        int(item["track_id"]): str(
-                            feature_map.get(int(item["track_id"]), "PENDING")
+                    probe_indices = [
+                        index
+                        for index, item in enumerate(current)
+                        if int(item["track_id"]) >= 0
+                        and str(item.get("shadow_reason", "")) != "collapse"
+                    ]
+                    probe = [current[index] for index in probe_indices]
+                    if probe:
+                        feature_map = self.identity.observe(
+                            image,
+                            probe,
+                            commit=True,
+                            recovery=True,
+                            recovery_hints={
+                                int(item["track_id"]): hints.get(
+                                    int(item["track_id"]), []
+                                )
+                                for item in probe
+                            },
                         )
-                        for item in current
-                    }
+                        for item, value in feature_map.items():
+                            gids[int(item)] = str(value)
 
                 used = set()
                 for tid in list(gids):

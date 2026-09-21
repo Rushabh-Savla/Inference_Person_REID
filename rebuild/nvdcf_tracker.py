@@ -3,6 +3,7 @@ from __future__ import annotations
 import ctypes
 import json
 import os
+import threading
 from pathlib import Path
 
 import cv2
@@ -341,7 +342,7 @@ class NvDCF:
     def track(self, camera, path, target):
         Gst, GLib, pyds = self._deps()
 
-        cap = cv2.VideoCapture(path)
+        cap = cv2.VideoCapture(path, cv2.CAP_FFMPEG)
         if not cap.isOpened():
             raise RuntimeError(f"Cannot inspect input video: {path}")
         width = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH)) or 1920
@@ -354,10 +355,6 @@ class NvDCF:
         twidth = max(32, (twidth + 31) // 32 * 32)
         theight = max(32, (theight + 31) // 32 * 32)
 
-        # DeepStream's hardware decoder path on this GPU rejects frames
-        # larger than 2048x2048. Force software decode for such sources,
-        # then continue through the same NvDCF pipeline after upload to NVMM.
-        software = max(width, height) > 2048
         if not self.library:
             raise RuntimeError(
                 "NvDCF low-level library not found. Install DeepStream "
@@ -369,16 +366,12 @@ class NvDCF:
                 "DeepStream config_tracker_NvDCF_accuracy.yml sample."
             )
 
+        # Decode the input with OpenCV/FFmpeg and feed raw frames into
+        # DeepStream through appsrc. This deliberately bypasses uridecodebin
+        # and nvv4l2decoder so 2560x1440 MPEG-4 sources cannot hit the GPU
+        # decoder's 2048x2048 hardware limit.
         pipeline = Gst.Pipeline.new(f"nvdcf_{camera}")
-        feature = None
-        feature_rank = None
-        if software:
-            feature = Gst.Registry.get().lookup_feature("nvv4l2decoder")
-            if feature is not None:
-                feature_rank = feature.get_rank()
-                feature.set_rank(Gst.Rank.NONE)
-
-        source = Gst.ElementFactory.make("uridecodebin", f"source_{camera}")
+        source = Gst.ElementFactory.make("appsrc", f"source_{camera}")
         preconv = Gst.ElementFactory.make("nvvideoconvert", f"preconv_{camera}")
         prefilter = Gst.ElementFactory.make("capsfilter", f"prefilter_{camera}")
         mux = Gst.ElementFactory.make("nvstreammux", f"mux_{camera}")
@@ -390,13 +383,17 @@ class NvDCF:
         if any(x is None for x in elems):
             raise RuntimeError("DeepStream elements for NvDCF could not be created")
 
-        source.set_property("uri", self._uri(path))
-        mux.set_property("batch-size", 1)
-        mux.set_property("width", width)
-        mux.set_property("height", height)
-        mux.set_property("batched-push-timeout", int(1_000_000 / fps))
-        mux.set_property("live-source", 0)
-        mux.set_property("enable-padding", 0)
+        source.set_property(
+            "caps",
+            Gst.Caps.from_string(
+                f"video/x-raw,format=BGR,width={width},height={height},"
+                f"framerate={max(1, int(round(fps)))}/1"
+            ),
+        )
+        source.set_property("format", Gst.Format.TIME)
+        source.set_property("is-live", False)
+        source.set_property("block", True)
+        source.set_property("do-timestamp", False)
 
         prefilter.set_property(
             "caps",
@@ -406,6 +403,13 @@ class NvDCF:
             "caps",
             Gst.Caps.from_string("video/x-raw(memory:NVMM),format=RGBA"),
         )
+
+        mux.set_property("batch-size", 1)
+        mux.set_property("width", width)
+        mux.set_property("height", height)
+        mux.set_property("batched-push-timeout", int(1_000_000 / fps))
+        mux.set_property("live-source", 0)
+        mux.set_property("enable-padding", 0)
 
         tracker.set_property("ll-lib-file", self.library)
         tracker.set_property("ll-config-file", self.tracker)
@@ -418,22 +422,29 @@ class NvDCF:
             tracker.set_property("enable-past-frame", 1)
 
         pipeline.add(*elems)
-        sinkpad = mux.get_request_pad("sink_0")
-        if sinkpad is None:
-            raise RuntimeError("NvDCF could not request nvstreammux sink_0")
-        source_sink = preconv.get_static_pad("sink")
-        if source_sink is None:
-            raise RuntimeError("NvDCF could not access decode upload sink")
-        source.connect("pad-added", self._pad, source_sink)
-        if (
-            not preconv.link(prefilter)
-            or not prefilter.link(mux)
-            or not mux.link(conv)
-            or not conv.link(filt)
-            or not filt.link(tracker)
-            or not tracker.link(sink)
-        ):
-            raise RuntimeError("Could not link NvDCF DeepStream pipeline")
+
+        source_pad = source.get_static_pad("src")
+        pre_sink = preconv.get_static_pad("sink")
+        if source_pad is None or pre_sink is None:
+            raise RuntimeError("NvDCF could not access appsrc/video sink pads")
+        if not preconv.link(prefilter):
+            raise RuntimeError("Could not link NvDCF appsrc conversion stage")
+        if not prefilter.link(mux):
+            raise RuntimeError("Could not link NvDCF conversion to streammux")
+        if not mux.link(conv):
+            raise RuntimeError("Could not link NvDCF streammux to converter")
+        if not conv.link(filt):
+            raise RuntimeError("Could not link NvDCF converter to RGBA caps")
+        if not filt.link(tracker):
+            raise RuntimeError("Could not link NvDCF RGBA caps to tracker")
+        if not tracker.link(sink):
+            raise RuntimeError("Could not link NvDCF tracker to sink")
+        if source_pad is None or pre_sink is None:
+            raise RuntimeError("NvDCF could not access appsrc pads")
+        if source.link(preconv):
+            pass
+        else:
+            raise RuntimeError("Could not link NvDCF appsrc to converter")
 
         state = {"error": None}
         handle = target.open("w", encoding="utf-8")
@@ -534,10 +545,6 @@ class NvDCF:
                     except StopIteration:
                         break
 
-                # Never let a single NvDCF box erase multiple detector
-                # hypotheses. When one tracker box ambiguously covers two or
-                # more person detections, emit one-to-one shadow rows so the
-                # feature matcher sees every person independently.
                 detections = detection_cache.pop(frame, [])
                 merged = merge(tracked, detections, frame, minimum=0.20)
                 for item in merged:
@@ -570,17 +577,66 @@ class NvDCF:
         bus.add_signal_watch()
         bus.connect("message", message)
 
+        def feed():
+            feed_cap = cv2.VideoCapture(path, cv2.CAP_FFMPEG)
+            if not feed_cap.isOpened():
+                state["error"] = f"OpenCV/FFmpeg could not open input video: {path}"
+                try:
+                    source.emit("end-of-stream")
+                except Exception:
+                    pass
+                return
+
+            duration = max(1, int(round(Gst.SECOND / fps)))
+            index = 0
+            try:
+                while True:
+                    ok, frame = feed_cap.read()
+                    if not ok:
+                        break
+                    if frame.shape[1] != width or frame.shape[0] != height:
+                        frame = cv2.resize(frame, (width, height), interpolation=cv2.INTER_LINEAR)
+
+                    payload = np.ascontiguousarray(frame)
+                    gst_buffer = Gst.Buffer.new_allocate(None, int(payload.nbytes), None)
+                    gst_buffer.fill(0, payload.tobytes())
+                    gst_buffer.pts = index * duration
+                    gst_buffer.dts = gst_buffer.pts
+                    gst_buffer.duration = duration
+
+                    result = source.emit("push-buffer", gst_buffer)
+                    if result != Gst.FlowReturn.OK:
+                        if state["error"] is None and result not in (
+                            Gst.FlowReturn.FLUSHING,
+                            Gst.FlowReturn.EOS,
+                        ):
+                            state["error"] = (
+                                f"NvDCF appsrc stopped with flow result {result}"
+                            )
+                        break
+                    index += 1
+            except Exception as exc:
+                state["error"] = f"NvDCF OpenCV feed failed: {exc}"
+            finally:
+                feed_cap.release()
+                try:
+                    source.emit("end-of-stream")
+                except Exception:
+                    pass
+
+        feeder = threading.Thread(target=feed, name=f"nvdcf-feed-{camera}", daemon=True)
+
         pipeline.set_state(Gst.State.PLAYING)
+        feeder.start()
         try:
             loop.run()
         finally:
+            feeder.join(timeout=10.0)
             pipeline.set_state(Gst.State.NULL)
             handle.close()
             det_handle.close()
-            if feature is not None and feature_rank is not None:
-                feature.set_rank(feature_rank)
 
         if state["error"]:
             raise RuntimeError(f"NvDCF failed for {camera}: {state['error']}")
         return fps, width, height
-''
+

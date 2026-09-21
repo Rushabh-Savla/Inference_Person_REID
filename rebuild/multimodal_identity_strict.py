@@ -769,7 +769,7 @@ class MultiModalStrict:
         self.stats["new"] += 1
         return gid
 
-    def assign(self, obs, sets, commit=True, recovery=False):
+    def assign(self, obs, sets, commit=True, recovery=False, allow_new=True):
         count = len(obs)
         if count == 0:
             return []
@@ -975,6 +975,13 @@ class MultiModalStrict:
                 if out[original].startswith("G"):
                     continue
 
+                if not allow_new:
+                    # Recovery/shadow resolution is forbidden from inventing a
+                    # permanent identity. Spatial recovery hints are handled
+                    # above; an unresolved row remains invalid and is rejected
+                    # by the caller rather than poisoning the gallery.
+                    continue
+
                 if commit:
                     gid = int(self.new(item))
                 else:
@@ -1047,7 +1054,7 @@ class MultiModalStrict:
 
         return out
 
-    def observe(self, frame, rows, commit=True, recovery=False, recovery_hints=None):
+    def observe(self, frame, rows, commit=True, recovery=False, recovery_hints=None, allow_new=True):
         poses = self.poses(self.pose, frame)
         obs = []
         self.stats["feature"] += 1
@@ -1127,7 +1134,13 @@ class MultiModalStrict:
         # Preserve the one-to-one row alignment even when an observation has
         # no existing GID candidate. Empty candidate sets must still reach
         # stage_new() so genuine new people can be confirmed across frames.
-        amap = self.assign(good, scores, commit=commit, recovery=recovery)
+        amap = self.assign(
+            good,
+            scores,
+            commit=commit,
+            recovery=recovery,
+            allow_new=allow_new,
+        )
         out = []
         vi = 0
         for item in obs:

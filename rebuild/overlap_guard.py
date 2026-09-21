@@ -82,22 +82,59 @@ def merge(tracked, detections, frame: int, minimum: float = 0.20):
 
 
 def carry(rows, anchors, gids_used: set[str], minimum: float = 0.15):
+    """One-to-one spatial continuity for overlap/shadow rows.
+
+    IoU alone is too brittle after a collapse because detector boxes can shift
+    substantially while the person is still adjacent to the protected anchor.
+    Use predicted/last boxes plus normalized center/height agreement, but keep
+    the assignment strictly one-to-one.
+    """
     rows = list(rows or [])
     anchors = list(anchors or [])
     used = set(gids_used)
     if not rows or not anchors:
         return {}
 
-    matrix = np.asarray(
-        [[iou(row["bbox"], anchor["bbox"]) for anchor in anchors] for row in rows],
-        dtype=np.float32,
-    )
+    matrix = np.zeros((len(rows), len(anchors)), dtype=np.float32)
+    for r, row in enumerate(rows):
+        rx1, ry1, rx2, ry2 = [float(x) for x in row["bbox"]]
+        rcx = 0.5 * (rx1 + rx2)
+        rcy = 0.5 * (ry1 + ry2)
+        rh = max(1.0, ry2 - ry1)
+        for a, anchor in enumerate(anchors):
+            box = anchor.get("pred_bbox") or anchor.get("bbox")
+            if not box:
+                continue
+            ax1, ay1, ax2, ay2 = [float(x) for x in box]
+            acx = 0.5 * (ax1 + ax2)
+            acy = 0.5 * (ay1 + ay2)
+            ah = max(1.0, ay2 - ay1)
+            overlap = iou(row["bbox"], box)
+            distance = float(
+                np.hypot(rcx - acx, rcy - acy)
+                / max(rh, ah)
+            )
+            scale = min(rh, ah) / max(rh, ah)
+            proximity = max(0.0, 1.0 - distance / 3.5)
+            score = (
+                0.45 * float(overlap)
+                + 0.35 * float(proximity)
+                + 0.20 * float(scale)
+            )
+            matrix[r, a] = score
+
     rr, cc = linear_sum_assignment(-matrix)
     result = {}
     for r, col in zip(rr.tolist(), cc.tolist()):
-        gid = str(anchors[col]["gid"])
+        gid = str(anchors[col].get("gid", ""))
         value = float(matrix[r, col])
-        if value >= float(minimum) and gid.startswith("G") and gid not in used:
+        # A spatial carry is only a temporary overlap hypothesis. Require a
+        # meaningful association and never permit the same identity twice.
+        if (
+            value >= float(minimum)
+            and gid.startswith("G")
+            and gid not in used
+        ):
             result[int(r)] = gid
             used.add(gid)
     return result

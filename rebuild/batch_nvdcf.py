@@ -287,6 +287,7 @@ class BatchNvDCF:
         frame = 0
         track_gids = {}
         recovery_tracks = set()
+        recovery_pending = False
         total = int(cap.get(cv2.CAP_PROP_FRAME_COUNT) or 0)
         last_progress = 0
         identity_runs = 0
@@ -356,6 +357,7 @@ class BatchNvDCF:
                     recovery_until = max(recovery_until, frame + recovery_frames)
                     recovery_anchors = list(overlap_anchors)
                     recovery_tracks = set(severe_exit)
+                    recovery_pending = True
                 recovery_mode = frame <= recovery_until
                 if not recovery_mode and frame > recovery_until:
                     recovery_tracks = set()
@@ -446,6 +448,13 @@ class BatchNvDCF:
                         for index, item in enumerate(current)
                         if int(item["track_id"]) in recovery_tracks
                         and int(item["track_id"]) >= 0
+                    )
+                if recovery_pending and not severe_overlap:
+                    check.update(
+                        index
+                        for index, item in enumerate(current)
+                        if int(item["track_id"]) >= 0
+                        and str(item.get("shadow_reason", "")) != "collapse"
                     )
 
                 # GIDs held by untouched tracks are reserved so a probe from
@@ -617,9 +626,8 @@ class BatchNvDCF:
                 previous_severe_overlap = set(severe_overlap)
                 if not active_overlap:
                     last_clean_frame = frame
-                    # Clear stale tracker aliases after the clean frame. The
-                    # current frame's spatially recovered aliases are retained.
-                    if recovery_mode and severe_exit:
+                    if recovery_pending and not severe_overlap and check:
+                        recovery_pending = False
                         recovery_tracks = set()
         finally:
             cap.release()

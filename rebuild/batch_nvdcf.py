@@ -115,6 +115,59 @@ class BatchNvDCF:
         return active
 
     @classmethod
+    def _local_continuity(cls, rows, anchors, used, minimum=0.28):
+        """Cheap same-camera re-acquisition without running the Re-ID stack."""
+        rows = list(rows or [])
+        anchors = [
+            x for x in (anchors or [])
+            if str(x.get("gid", "")).startswith("G")
+        ]
+        used = set(used or set())
+        if not rows or not anchors:
+            return {}
+
+        matrix = np.zeros((len(rows), len(anchors)), dtype=np.float32)
+        for r, row in enumerate(rows):
+            rx1, ry1, rx2, ry2 = [float(x) for x in row["bbox"]]
+            rcx = 0.5 * (rx1 + rx2)
+            rcy = 0.5 * (ry1 + ry2)
+            rh = max(1.0, ry2 - ry1)
+            for a, anchor in enumerate(anchors):
+                ax1, ay1, ax2, ay2 = [float(x) for x in anchor["bbox"]]
+                acx = 0.5 * (ax1 + ax2)
+                acy = 0.5 * (ay1 + ay2)
+                ah = max(1.0, ay2 - ay1)
+                iou, iom = cls._metrics(
+                    row["bbox"],
+                    anchor["bbox"],
+                )
+                distance = float(
+                    np.hypot(rcx - acx, rcy - acy)
+                    / max(rh, ah)
+                )
+                proximity = max(0.0, 1.0 - distance / 2.5)
+                matrix[r, a] = (
+                    0.55 * float(iou)
+                    + 0.45 * max(
+                        float(iom),
+                        0.5 * proximity,
+                    )
+                )
+
+        rr, cc = __import__("scipy.optimize", fromlist=["linear_sum_assignment"]).linear_sum_assignment(
+            -matrix
+        )
+        result = {}
+        for r, a in zip(rr.tolist(), cc.tolist()):
+            score = float(matrix[r, a])
+            gid = str(anchors[a]["gid"])
+            if score < float(minimum) or gid in used:
+                continue
+            result[int(r)] = gid
+            used.add(gid)
+        return result
+
+    @classmethod
     def _recovery_hints(cls, rows, anchors, limit=3):
         """Produce spatial hypotheses; never convert an anchor directly to a GID."""
         result = {}
@@ -237,9 +290,7 @@ class BatchNvDCF:
         total = int(cap.get(cv2.CAP_PROP_FRAME_COUNT) or 0)
         last_progress = 0
         identity_runs = 0
-        total = int(cap.get(cv2.CAP_PROP_FRAME_COUNT) or 0)
-        last_progress = 0
-        identity_runs = 0
+        last_clean_frame = -1
 
         try:
             while True:
@@ -338,24 +389,50 @@ class BatchNvDCF:
                             for value in hints.get(tid, [])
                             if int(value) != known_id
                         ]
-                # Heavy multimodal inference is event-driven. Normal
-                # frames and mild overlap stay on NvDCF continuity. Full
-                # ResNet + Swin + SOLIDER + face + pose is reserved for new
-                # tracks and the high-occlusion regime (intersection-over-
-                # smaller-box >= severe_intersection).
+                # Heavy multimodal inference is event-driven. First try
+                # cheap same-camera re-acquisition for a fresh NvDCF tracker
+                # ID. This prevents tracker-ID churn from invoking the full
+                # Re-ID stack every frame.
                 check = set()
+                locked = {
+                    str(track_gids[int(item["track_id"])])
+                    for item in current
+                    if int(item["track_id"]) in track_gids
+                }
+                if (
+                    not severe_overlap
+                    and last_clean_frame >= 0
+                    and frame - last_clean_frame <= 5
+                ):
+                    unseen = [
+                        (index, item)
+                        for index, item in enumerate(current)
+                        if int(item["track_id"]) not in track_gids
+                        and int(item["track_id"]) >= 0
+                        and str(item.get("shadow_reason", "")) != "collapse"
+                    ]
+                    carried = self._local_continuity(
+                        [item for _, item in unseen],
+                        last_clean,
+                        locked,
+                        minimum=0.32,
+                    )
+                    for local, gid in carried.items():
+                        index = unseen[int(local)][0]
+                        tid = int(current[index]["track_id"])
+                        track_gids[tid] = gid
+                        current[index]["track_hint"] = int(gid[1:])
+                        hints[tid] = [int(gid[1:])]
+                        locked.add(gid)
+
+                # Any remaining genuine new track needs full multimodal Re-ID.
                 for index, item in enumerate(current):
                     tid = int(item["track_id"])
                     shadow = str(item.get("shadow_reason", "")) == "collapse"
                     if tid not in track_gids and not shadow:
                         check.add(index)
-                    elif tid < 0 and tid in severe_overlap:
-                        check.add(index)
 
-                # Severe overlap is allowed one heavyweight verification at
-                # event entry; identities are then held by NvDCF continuity
-                # through the occlusion. Verification after the severe event
-                # is handled by recovery_mode.
+                # Severe overlap is always verified by the full stack.
                 if severe_enter:
                     check.update(
                         index
@@ -522,6 +599,8 @@ class BatchNvDCF:
 
                 previous_overlap = set(active_overlap)
                 previous_severe_overlap = set(severe_overlap)
+                if not active_overlap:
+                    last_clean_frame = frame
         finally:
             cap.release()
 

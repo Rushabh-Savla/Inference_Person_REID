@@ -134,17 +134,11 @@ class BatchNvDCF:
         return f"G{self._display_gid[internal]:06d}"
 
     @staticmethod
-    def _colour(gid):
-        import colorsys
+    def _colour(_gid, overlap=False):
+        # Rendering is diagnostic only. Identity is the GID; boxes stay
+        # visually consistent rather than cycling through saturated colors.
+        return (0, 220, 0) if not overlap else (0, 165, 255)
 
-        number = max(1, int(str(gid)[1:]))
-        hue = (number * 0.618033988749895) % 1.0
-        red, green, blue = colorsys.hsv_to_rgb(hue, 0.82, 1.0)
-        return (
-            int(round(blue * 255.0)),
-            int(round(green * 255.0)),
-            int(round(red * 255.0)),
-        )
 
     def _render(self, camera, path, labels):
         cap = cv2.VideoCapture(path)
@@ -177,7 +171,7 @@ class BatchNvDCF:
                     x1, y1, x2, y2 = [int(round(float(value))) for value in item["bbox"]]
                     if not gid.startswith("G"):
                         raise RuntimeError(f"Invalid output identity label {gid}")
-                    draw = self._colour(gid)
+                    draw = self._colour(gid, overlap=bool(item.get("overlap")))
                     label = gid
                     if item.get("overlap"):
                         label += " OV"

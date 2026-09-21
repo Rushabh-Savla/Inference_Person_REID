@@ -24,6 +24,10 @@ def test_docker_stack_is_deepstream_and_qdrant():
     assert "libmp3lame0" in docker
     assert "avdec_mpeg4" in docker
     assert "avdec_h264" in docker
+    assert "libnvds_meta.so" in docker
+    assert "libnvds_nvmultiobjecttracker.so" in docker
+    assert "NVDCF_TRACKER_CONFIG=/opt/reid/nvdcf_accuracy.yml" in docker
+    assert "COPY trackers/nvdcf_accuracy.yml /opt/reid/nvdcf_accuracy.yml" in docker
     assert "opencv-python==4.10.0.84" in docker or "opencv-python==4.10.0.84" in (ROOT / "requirements.txt").read_text(encoding="utf-8")
 
 

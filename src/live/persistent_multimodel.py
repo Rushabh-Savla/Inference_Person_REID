@@ -90,11 +90,24 @@ class PersistentMultimodelRegistry:
         return int(row[0]) if row else 1
 
     def allocate_gid(self) -> int:
+        """Allocate permanent GIDs strictly as 1, 2, 3, ... .
+        
+        The identities table is authoritative, so a stale next_gid metadata
+        value can never reuse an existing identity or introduce a random
+        starting number.
+        """
         with self._lock:
             self._db.execute("BEGIN IMMEDIATE")
             try:
-                gid = self.next_gid
-                self._db.execute("UPDATE meta SET value=? WHERE key='next_gid'", (str(gid + 1),))
+                row = self._db.execute(
+                    "SELECT COALESCE(MAX(gid), 0) FROM identities"
+                ).fetchone()
+                last = int(row[0]) if row else 0
+                gid = max(1, last + 1)
+                self._db.execute(
+                    "UPDATE meta SET value=? WHERE key='next_gid'",
+                    (str(gid + 1),),
+                )
                 self._db.commit()
                 return gid
             except BaseException:

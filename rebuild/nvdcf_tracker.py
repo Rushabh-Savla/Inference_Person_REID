@@ -366,10 +366,10 @@ class NvDCF:
                 "DeepStream config_tracker_NvDCF_accuracy.yml sample."
             )
 
-        # Decode the input with OpenCV/FFmpeg and feed raw frames into
-        # DeepStream through appsrc. This deliberately bypasses uridecodebin
-        # and nvv4l2decoder so 2560x1440 MPEG-4 sources cannot hit the GPU
-        # decoder's 2048x2048 hardware limit.
+        # Decode with OpenCV/FFmpeg in CPU memory and inject raw RGBA frames
+        # through appsrc. This bypasses uridecodebin/nvv4l2decoder entirely,
+        # which is required for 2560x1440 MPEG-4 sources on this GPU because
+        # the NVIDIA hardware decoder advertises a 2048x2048 maximum.
         pipeline = Gst.Pipeline.new(f"nvdcf_{camera}")
         source = Gst.ElementFactory.make("appsrc", f"source_{camera}")
         preconv = Gst.ElementFactory.make("nvvideoconvert", f"preconv_{camera}")
@@ -386,7 +386,7 @@ class NvDCF:
         source.set_property(
             "caps",
             Gst.Caps.from_string(
-                f"video/x-raw,format=BGR,width={width},height={height},"
+                f"video/x-raw,format=RGBA,width={width},height={height},"
                 f"framerate={max(1, int(round(fps)))}/1"
             ),
         )
@@ -394,6 +394,10 @@ class NvDCF:
         source.set_property("is-live", False)
         source.set_property("block", True)
         source.set_property("do-timestamp", False)
+        if source.find_property("max-buffers") is not None:
+            source.set_property("max-buffers", 2)
+        if source.find_property("max-bytes") is not None:
+            source.set_property("max-bytes", 0)
 
         prefilter.set_property(
             "caps",
@@ -423,14 +427,18 @@ class NvDCF:
 
         pipeline.add(*elems)
 
-        source_pad = source.get_static_pad("src")
-        pre_sink = preconv.get_static_pad("sink")
-        if source_pad is None or pre_sink is None:
-            raise RuntimeError("NvDCF could not access appsrc/video sink pads")
+        if not source.link(preconv):
+            raise RuntimeError("Could not link NvDCF appsrc to nvvideoconvert")
         if not preconv.link(prefilter):
-            raise RuntimeError("Could not link NvDCF appsrc conversion stage")
-        if not prefilter.link(mux):
-            raise RuntimeError("Could not link NvDCF conversion to streammux")
+            raise RuntimeError("Could not link NvDCF converter to NVMM caps")
+
+        mux_sink = mux.get_request_pad("sink_0")
+        prefilter_src = prefilter.get_static_pad("src")
+        if mux_sink is None or prefilter_src is None:
+            raise RuntimeError("Could not acquire NvDCF nvstreammux sink_0")
+        if prefilter_src.link(mux_sink) != Gst.PadLinkReturn.OK:
+            raise RuntimeError("Could not link NvDCF NVMM frames to nvstreammux")
+
         if not mux.link(conv):
             raise RuntimeError("Could not link NvDCF streammux to converter")
         if not conv.link(filt):
@@ -439,18 +447,14 @@ class NvDCF:
             raise RuntimeError("Could not link NvDCF RGBA caps to tracker")
         if not tracker.link(sink):
             raise RuntimeError("Could not link NvDCF tracker to sink")
-        if source_pad is None or pre_sink is None:
-            raise RuntimeError("NvDCF could not access appsrc pads")
-        if source.link(preconv):
-            pass
-        else:
-            raise RuntimeError("Could not link NvDCF appsrc to converter")
 
         state = {"error": None}
         handle = target.open("w", encoding="utf-8")
         detections_target = Path(target).with_suffix(".detections.jsonl")
         det_handle = detections_target.open("w", encoding="utf-8")
         detection_cache = {}
+        frame_cache = {}
+        frame_lock = threading.Lock()
 
         def preprobe(_pad, info, _data):
             buf = info.get_buffer()
@@ -463,13 +467,17 @@ class NvDCF:
                     fm = pyds.NvDsFrameMeta.cast(frames.data)
                 except StopIteration:
                     break
-                surface = pyds.get_nvds_buf_surface(hash(buf), fm.batch_id)
-                image = cv2.cvtColor(
-                    np.array(surface, copy=True, order="C"),
-                    cv2.COLOR_RGBA2BGR,
-                )
-                dets = self._detect(image)
                 frame_number = int(fm.frame_num) + 1
+
+                with frame_lock:
+                    image = frame_cache.pop(frame_number, None)
+
+                if image is None:
+                    # Keep metadata creation safe if a frame was flushed while
+                    # shutting down. Normal playback always has a cached frame.
+                    return Gst.PadProbeReturn.OK
+
+                dets = self._detect(image)
                 cached = []
                 for index, (x1, y1, x2, y2, conf) in enumerate(dets):
                     item = {
@@ -495,6 +503,7 @@ class NvDCF:
                     obj.rect_params.width = float(x2 - x1)
                     obj.rect_params.height = float(y2 - y1)
                     pyds.nvds_add_obj_meta_to_frame(fm, obj, None)
+
                 detection_cache[frame_number] = cached
                 try:
                     frames = frames.next
@@ -564,6 +573,7 @@ class NvDCF:
         )
 
         loop = GLib.MainLoop()
+        feeder = None
 
         def message(_bus, msg):
             if msg.type == Gst.MessageType.ERROR:
@@ -597,12 +607,29 @@ class NvDCF:
                     if frame.shape[1] != width or frame.shape[0] != height:
                         frame = cv2.resize(frame, (width, height), interpolation=cv2.INTER_LINEAR)
 
-                    payload = np.ascontiguousarray(frame)
-                    gst_buffer = Gst.Buffer.new_allocate(None, int(payload.nbytes), None)
+                    bgr = np.ascontiguousarray(frame)
+                    with frame_lock:
+                        frame_cache[index + 1] = bgr
+
+                        # Streaming is ordered and appsrc only queues two frames.
+                        # Keep the cache bounded if shutdown/backpressure races
+                        # leave a frame behind.
+                        if len(frame_cache) > 6:
+                            oldest = sorted(frame_cache)[:-6]
+                            for key in oldest:
+                                frame_cache.pop(key, None)
+
+                    rgba = cv2.cvtColor(bgr, cv2.COLOR_BGR2RGBA)
+                    payload = np.ascontiguousarray(rgba)
+                    gst_buffer = Gst.Buffer.new_allocate(
+                        None, int(payload.nbytes), None
+                    )
                     gst_buffer.fill(0, payload.tobytes())
                     gst_buffer.pts = index * duration
                     gst_buffer.dts = gst_buffer.pts
                     gst_buffer.duration = duration
+                    gst_buffer.offset = index
+                    gst_buffer.offset_end = index + 1
 
                     result = source.emit("push-buffer", gst_buffer)
                     if result != Gst.FlowReturn.OK:
@@ -624,17 +651,27 @@ class NvDCF:
                 except Exception:
                     pass
 
-        feeder = threading.Thread(target=feed, name=f"nvdcf-feed-{camera}", daemon=True)
-
         pipeline.set_state(Gst.State.PLAYING)
+        feeder = threading.Thread(
+            target=feed,
+            name=f"nvdcf-feed-{camera}",
+            daemon=True,
+        )
         feeder.start()
         try:
             loop.run()
         finally:
-            feeder.join(timeout=10.0)
+            feeder.join(timeout=15.0)
             pipeline.set_state(Gst.State.NULL)
             handle.close()
             det_handle.close()
+            if mux_sink is not None:
+                try:
+                    mux.release_request_pad(mux_sink)
+                except Exception:
+                    pass
+            with frame_lock:
+                frame_cache.clear()
 
         if state["error"]:
             raise RuntimeError(f"NvDCF failed for {camera}: {state['error']}")

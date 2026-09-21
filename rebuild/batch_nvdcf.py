@@ -106,12 +106,17 @@ class BatchNvDCF:
         iou_min = float(overlap.get("iou", 0.35))
         iom_min = float(overlap.get("intersection", 0.50))
         active = set()
-        for first in range(len(current)):
-            for second in range(first + 1, len(current)):
-                iou, iom = self._metrics(current[first]["bbox"], current[second]["bbox"])
+        real = [
+            item for item in current
+            if int(item["track_id"]) >= 0
+            and str(item.get("shadow_reason", "")) != "collapse"
+        ]
+        for first in range(len(real)):
+            for second in range(first + 1, len(real)):
+                iou, iom = self._metrics(real[first]["bbox"], real[second]["bbox"])
                 if iou >= iou_min or iom >= iom_min:
-                    active.add(int(current[first]["track_id"]))
-                    active.add(int(current[second]["track_id"]))
+                    active.add(int(real[first]["track_id"]))
+                    active.add(int(real[second]["track_id"]))
         return active
 
     @classmethod
@@ -364,18 +369,23 @@ class BatchNvDCF:
                     )
                 )
                 severe_overlap = set()
-                for first in range(len(current)):
-                    for second in range(first + 1, len(current)):
+                severe_rows = [
+                    item for item in current
+                    if int(item["track_id"]) >= 0
+                    and str(item.get("shadow_reason", "")) != "collapse"
+                ]
+                for first in range(len(severe_rows)):
+                    for second in range(first + 1, len(severe_rows)):
                         _iou, iom = self._metrics(
-                            current[first]["bbox"],
-                            current[second]["bbox"],
+                            severe_rows[first]["bbox"],
+                            severe_rows[second]["bbox"],
                         )
                         if iom >= severe_limit:
                             severe_overlap.add(
-                                int(current[first]["track_id"])
+                                int(severe_rows[first]["track_id"])
                             )
                             severe_overlap.add(
-                                int(current[second]["track_id"])
+                                int(severe_rows[second]["track_id"])
                             )
                 severe_active = bool(severe_overlap)
                 severe_enter = severe_active and not previous_severe_active
@@ -678,36 +688,43 @@ class BatchNvDCF:
                 # a blended crop or spatial carry cannot poison future tracker-ID
                 # re-acquisition. Post-overlap recovery has already passed the
                 # mandatory multimodal verification before reaching this block.
-                if not active_overlap:
-                    for item in current:
-                        tid = int(item["track_id"])
-                        gid = gids.get(tid)
-                        if gid is not None and str(gid).startswith("G"):
-                            key = str(gid)
-                            previous = identity_memory.get(key)
-                            previous_box = (
-                                list(previous["bbox"])
-                                if previous is not None
-                                else list(item["bbox"])
-                            )
-                            oldcx = 0.5 * (float(previous_box[0]) + float(previous_box[2]))
-                            oldcy = 0.5 * (float(previous_box[1]) + float(previous_box[3]))
-                            newcx = 0.5 * (float(item["bbox"][0]) + float(item["bbox"][2]))
-                            newcy = 0.5 * (float(item["bbox"][1]) + float(item["bbox"][3]))
-                            dx = newcx - oldcx
-                            dy = newcy - oldcy
-                            box = [float(x) for x in item["bbox"]]
-                            pred = [
-                                box[0] + dx,
-                                box[1] + dy,
-                                box[2] + dx,
-                                box[3] + dy,
-                            ]
-                            identity_memory[key] = {
-                                "bbox": list(item["bbox"]),
-                                "pred_bbox": pred,
-                                "frame": frame,
-                            }
+                # Refresh memory independently for every person whose own
+                # box is not part of the overlap. Another person's overlap must
+                # not freeze all other identities or erase their clean anchors.
+                for item in current:
+                    tid = int(item["track_id"])
+                    gid = gids.get(tid)
+                    if (
+                        gid is not None
+                        and str(gid).startswith("G")
+                        and tid not in active_overlap
+                        and str(item.get("shadow_reason", "")) != "collapse"
+                    ):
+                        key = str(gid)
+                        previous = identity_memory.get(key)
+                        previous_box = (
+                            list(previous["bbox"])
+                            if previous is not None
+                            else list(item["bbox"])
+                        )
+                        oldcx = 0.5 * (float(previous_box[0]) + float(previous_box[2]))
+                        oldcy = 0.5 * (float(previous_box[1]) + float(previous_box[3]))
+                        newcx = 0.5 * (float(item["bbox"][0]) + float(item["bbox"][2]))
+                        newcy = 0.5 * (float(item["bbox"][1]) + float(item["bbox"][3]))
+                        dx = newcx - oldcx
+                        dy = newcy - oldcy
+                        box = [float(x) for x in item["bbox"]]
+                        pred = [
+                            box[0] + dx,
+                            box[1] + dy,
+                            box[2] + dx,
+                            box[3] + dy,
+                        ]
+                        identity_memory[key] = {
+                            "bbox": list(item["bbox"]),
+                            "pred_bbox": pred,
+                            "frame": frame,
+                        }
 
                 for item in current:
                     tid = int(item["track_id"])
@@ -735,7 +752,10 @@ class BatchNvDCF:
                     last_clean_frame = frame
                     # A recovery pass is complete only after this fully separated
                     # frame has produced a resolved one-to-one assignment.
-                    if recovery_pending and not severe_active and recovery_mode:
+                    if recovery_pending and not severe_active:
+                        # This clean frame is the explicit post-overlap
+                        # feature checkpoint. Once it has completed, do not
+                        # keep the resolver in recovery for the rest of the clip.
                         recovery_pending = False
                         recovery_tracks = set()
         finally:

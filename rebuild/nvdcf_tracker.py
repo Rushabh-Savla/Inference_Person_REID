@@ -361,9 +361,8 @@ class NvDCF:
                 "DeepStream config_tracker_NvDCF_accuracy.yml sample."
             )
 
-        # Keep NvDCF's internal processing surface bounded on high-resolution
-        # dGPU sources while retaining the original source resolution for
-        # detection, Re-ID, and final rendering.
+        # Keep the source at its original resolution for detection/Re-ID,
+        # while bounding only NvDCF's internal tracker surface.
         if width > 1920 or height > 1088:
             ratio = min(1920.0 / width, 1088.0 / height)
             twidth = max(32, int(round(width * ratio)) // 32 * 32)
@@ -374,20 +373,19 @@ class NvDCF:
         twidth = max(32, twidth)
         theight = max(32, theight)
 
-        # OpenCV/FFmpeg owns file decoding. appsrc injects CPU BGR frames into
-        # nvvideoconvert, which uploads them to NVMM before nvstreammux/NvDCF.
-        # This bypasses uridecodebin and nvv4l2decoder, including the GPU
-        # decoder's 2048x2048 restriction on the supplied 2560x1440 MPEG-4.
+        # OpenCV/FFmpeg owns file decoding. appsrc injects raw BGR frames;
+        # one nvvideoconvert uploads them to NVMM as RGBA; nvstreammux feeds
+        # the batched surface directly to NvDCF. This deliberately avoids
+        # uridecodebin/nvv4l2decoder and also avoids a second native converter
+        # link, which was the site of the observed DeepStream segfault.
         pipeline = Gst.Pipeline.new(f"nvdcf_{camera}")
         source = Gst.ElementFactory.make("appsrc", f"source_{camera}")
         preconv = Gst.ElementFactory.make("nvvideoconvert", f"preconv_{camera}")
         prefilter = Gst.ElementFactory.make("capsfilter", f"prefilter_{camera}")
         mux = Gst.ElementFactory.make("nvstreammux", f"mux_{camera}")
-        conv = Gst.ElementFactory.make("nvvideoconvert", f"conv_{camera}")
-        filt = Gst.ElementFactory.make("capsfilter", f"caps_{camera}")
         tracker = Gst.ElementFactory.make("nvtracker", f"tracker_{camera}")
         sink = Gst.ElementFactory.make("fakesink", f"sink_{camera}")
-        elems = (source, preconv, prefilter, mux, conv, filt, tracker, sink)
+        elems = (source, preconv, prefilter, mux, tracker, sink)
         if any(x is None for x in elems):
             raise RuntimeError("DeepStream elements for NvDCF could not be created")
 
@@ -407,15 +405,9 @@ class NvDCF:
         if source.find_property("max-bytes") is not None:
             source.set_property("max-bytes", 0)
 
-        # nvvideoconvert supports RAW input and NVMM output on dGPU.
-        # Explicitly select device memory for deterministic DeepStream input.
         if preconv.find_property("nvbuf-memory-type") is not None:
             preconv.set_property("nvbuf-memory-type", 0)
         prefilter.set_property(
-            "caps",
-            Gst.Caps.from_string("video/x-raw(memory:NVMM),format=NV12"),
-        )
-        filt.set_property(
             "caps",
             Gst.Caps.from_string("video/x-raw(memory:NVMM),format=RGBA"),
         )
@@ -442,7 +434,7 @@ class NvDCF:
         if not source.link(preconv):
             raise RuntimeError("Could not link NvDCF appsrc to nvvideoconvert")
         if not preconv.link(prefilter):
-            raise RuntimeError("Could not link NvDCF converter to NVMM caps")
+            raise RuntimeError("Could not link NvDCF converter to NVMM RGBA caps")
 
         mux_sink = mux.get_request_pad("sink_0")
         prefilter_src = prefilter.get_static_pad("src")
@@ -451,12 +443,8 @@ class NvDCF:
         if prefilter_src.link(mux_sink) != Gst.PadLinkReturn.OK:
             raise RuntimeError("Could not link NvDCF NVMM frames to nvstreammux")
 
-        if not mux.link(conv):
-            raise RuntimeError("Could not link NvDCF streammux to converter")
-        if not conv.link(filt):
-            raise RuntimeError("Could not link NvDCF converter to RGBA caps")
-        if not filt.link(tracker):
-            raise RuntimeError("Could not link NvDCF RGBA caps to tracker")
+        if not mux.link(tracker):
+            raise RuntimeError("Could not link NvDCF nvstreammux to tracker")
         if not tracker.link(sink):
             raise RuntimeError("Could not link NvDCF tracker to sink")
 
@@ -485,6 +473,7 @@ class NvDCF:
                 frame_number = int(fm.frame_num) + 1
                 with detection_lock:
                     dets = detection_cache.pop(frame_number, None)
+
                 if dets is None:
                     state["error"] = (
                         f"NvDCF detection metadata missing for frame {frame_number}"
@@ -573,8 +562,7 @@ class NvDCF:
                     except StopIteration:
                         break
 
-                with detection_lock:
-                    detections = detection_cache.pop(frame, [])
+                detections = detection_cache.pop(frame, [])
                 merged = merge(tracked, detections, frame, minimum=0.20)
                 for item in merged:
                     handle.write(json.dumps(item, separators=(",", ":")) + "\n")
@@ -585,7 +573,9 @@ class NvDCF:
                     break
             return Gst.PadProbeReturn.OK
 
-        filt.get_static_pad("src").add_probe(
+        # Metadata must be attached after nvstreammux has created NvDsBatchMeta
+        # but before nvtracker consumes the batch.
+        mux.get_static_pad("src").add_probe(
             Gst.PadProbeType.BUFFER, preprobe, None
         )
         tracker.get_static_pad("src").add_probe(
@@ -623,17 +613,30 @@ class NvDCF:
                     ok, frame = feed_cap.read()
                     if not ok:
                         break
+                    if frame.shape[1] != width or frame.shape[0] != height:
+                        frame = cv2.resize(frame, (width, height), interpolation=cv2.INTER_LINEAR)
 
+                    # Detect on the original CPU frame before handing the
+                    # buffer to DeepStream. This removes all dependence on
+                    # pyds surface mapping and keeps detection/Re-ID coordinates
+                    # in the original 2560x1440 source space.
                     dets = self._detect(frame)
-                    frame_number = index + 1
                     with detection_lock:
-                        detection_cache[frame_number] = dets
+                        detection_cache[index + 1] = dets
+                        if len(detection_cache) > 24:
+                            oldest = sorted(detection_cache)[:-24]
+                            for key in oldest:
+                                detection_cache.pop(key, None)
 
-                    bgr = np.ascontiguousarray(frame)
-                    gst_buffer = Gst.Buffer.new_allocate(
-                        None, int(bgr.nbytes), None
+                    rgba = cv2.cvtColor(
+                        np.ascontiguousarray(frame),
+                        cv2.COLOR_BGR2RGBA,
                     )
-                    gst_buffer.fill(0, bgr.tobytes())
+                    payload = np.ascontiguousarray(rgba)
+                    gst_buffer = Gst.Buffer.new_allocate(
+                        None, int(payload.nbytes), None
+                    )
+                    gst_buffer.fill(0, payload.tobytes())
                     gst_buffer.pts = index * duration
                     gst_buffer.dts = gst_buffer.pts
                     gst_buffer.duration = duration
@@ -660,17 +663,17 @@ class NvDCF:
                 except Exception:
                     pass
 
-        pipeline.set_state(Gst.State.PLAYING)
         feeder = threading.Thread(
             target=feed,
             name=f"nvdcf-feed-{camera}",
             daemon=True,
         )
+        pipeline.set_state(Gst.State.PLAYING)
         feeder.start()
         try:
             loop.run()
         finally:
-            feeder.join(timeout=30.0)
+            feeder.join(timeout=15.0)
             pipeline.set_state(Gst.State.NULL)
             handle.close()
             det_handle.close()

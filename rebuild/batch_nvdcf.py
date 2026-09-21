@@ -511,9 +511,10 @@ class BatchNvDCF:
                         and int(item["track_id"]) not in track_gids
                         and str(item.get("shadow_reason", "")) != "collapse"
                     )
-                if recovery_pending and not severe_active:
-                    # Explicit post-overlap feature re-identification. This is
-                    # keyed to the overlap state, never to tracker-ID equality.
+                if recovery_pending and not severe_active and not active_overlap:
+                    # Explicit post-overlap feature re-identification. Wait for
+                    # full geometric separation before probing so the crop is
+                    # clean enough to become an identity-memory update.
                     check.update(
                         index
                         for index, item in enumerate(current)
@@ -540,7 +541,10 @@ class BatchNvDCF:
                     feature_map = self.identity.observe(
                         image,
                         probe,
-                        commit=True,
+                        # Never write ambiguous overlap crops into profile/Qdrant.
+                        # A separated recovery frame is committed after feature
+                        # verification; normal overlap frames are read-only.
+                        commit=not active_overlap,
                         recovery=bool(active_overlap) or recovery_mode,
                         recovery_hints={
                             int(item["track_id"]): hints.get(
@@ -633,7 +637,7 @@ class BatchNvDCF:
                         feature_map = self.identity.observe(
                             image,
                             probe,
-                            commit=True,
+                            commit=not active_overlap,
                             recovery=True,
                             recovery_hints={
                                 int(item["track_id"]): hints.get(
@@ -726,9 +730,9 @@ class BatchNvDCF:
                 previous_severe_active = severe_active
                 if not active_overlap:
                     last_clean_frame = frame
-                    # A recovery pass is complete only after this clean frame has
-                    # produced a fully resolved one-to-one feature assignment.
-                    if recovery_pending and not severe_active:
+                    # A recovery pass is complete only after this fully separated
+                    # frame has produced a resolved one-to-one assignment.
+                    if recovery_pending and not severe_active and recovery_mode:
                         recovery_pending = False
                         recovery_tracks = set()
         finally:

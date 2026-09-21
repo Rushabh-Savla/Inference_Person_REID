@@ -508,9 +508,9 @@ class MultiModalStrict:
                 return False
         return True
 
-    def save(self, gid, obs):
+    def save(self, gid, obs, force=False):
         gid = int(gid)
-        if not self._memory_ok(gid, obs):
+        if not force and not self._memory_ok(gid, obs):
             self.stats["memory_reject"] = self.stats.get("memory_reject", 0) + 1
             return
 
@@ -758,54 +758,105 @@ class MultiModalStrict:
             floor=float(self.icfg.get("dummy_floor", 0.35)),
         )
 
-        out = ["PENDING"] * count
+        out = ["UNKNOWN"] * count
         used = set()
-        matched = {}
 
         for i, gid in sorted(chosen.items()):
             if gid in used:
                 self.stats["duplicate"] += 1
                 continue
             used.add(gid)
-            matched[int(i)] = int(gid)
             out[int(i)] = f"G{int(gid):06d}"
 
-        # Existing identities are always tested before new-ID admission.
-        # Recovery mode is deliberately unable to create a new identity.
-        if not recovery and commit:
-            guard = float(self.icfg.get("new_existing_guard", 0.50))
-            for i in range(count):
-                if out[i] != "PENDING":
-                    continue
-                best_existing = max(
-                    (float(value["score"]) for value in sets[i].values()),
-                    default=0.0,
-                )
-                # A new GID is forbidden while any established identity is
-                # reasonably similar. This prevents tracker changes or noisy
-                # crops from creating duplicate permanent identities.
-                if best_existing >= guard:
-                    continue
-                gid = self.stage_new(obs[i])
-                if gid is None:
-                    continue
-                label = f"G{int(gid):06d}"
-                if label not in used:
-                    used.add(label)
-                    out[i] = label
+            if commit:
+                self.save(int(gid), obs[int(i)])
 
-        if commit:
-            for i, gid in matched.items():
-                if out[i] == "PENDING":
-                    continue
-                item = sets[i].get(int(gid))
-                if item is None:
-                    continue
-                self.save(gid, obs[i])
                 if recovery:
                     self.stats["recovery_match"] += 1
-                if len(self.pro[gid]["camera"]) > 1:
+                if len(self.pro.get(int(gid), {}).get("camera", set())) > 1:
                     self.stats["cross"] += 1
+
+        # Never leave an observed person without a visible GID. Existing
+        # identities are still preferred. When an existing candidate is not
+        # accepted, a genuinely distinct/new GID is created instead of
+        # emitting PENDING/UNKNOWN. Top and bottom clothing remain mandatory
+        # for any candidate because score()/accept() hard-gate both portions.
+        for i, item in enumerate(obs):
+            if out[i].startswith("G"):
+                continue
+
+            if item is None:
+                continue
+
+            best = max(
+                (sets[i].get(int(gid)) for gid in sets[i]),
+                key=lambda value: float(value["score"]),
+                default=None,
+            )
+            best_score = float(best["score"]) if best is not None else 0.0
+            guard = float(self.icfg.get("new_existing_guard", 0.50))
+
+            # A candidate that survived the clothing hard gate but missed the
+            # strict margin/floor is retained when its evidence is stronger
+            # than the new-identity floor. This avoids false PENDING during
+            # overlap while preserving the top+bottom requirement.
+            if best is not None:
+                support = sum(
+                    float(best[name]) >= float(self.icfg.get("model_min", 0.46))
+                    for name in self.models
+                )
+                clothing_ok = (
+                    float(best.get("top", 0.0)) >= float(self.icfg.get("top_min", 0.52))
+                    and float(best.get("bottom", 0.0)) >= float(self.icfg.get("bottom_min", 0.52))
+                    and float(best.get("clothing_joint", 0.0)) >= float(self.icfg.get("clothing_joint_min", 0.52))
+                )
+                hinted = bool(best.get("recovery_hint", False))
+                relaxed = 0.52 if hinted else 0.58
+                if (
+                    clothing_ok
+                    and support >= 2
+                    and best_score >= relaxed
+                    and (best_score >= guard or hinted)
+                ):
+                    candidate_ids = [
+                        int(gid) for gid, value in sets[i].items()
+                        if value is best
+                    ]
+                    if candidate_ids and candidate_ids[0] not in used:
+                        gid = candidate_ids[0]
+                        out[i] = f"G{gid:06d}"
+                        used.add(gid)
+                        if commit:
+                            self.save(gid, item)
+                            if recovery:
+                                self.stats["recovery_match"] += 1
+                            if len(self.pro.get(gid, {}).get("camera", set())) > 1:
+                                self.stats["cross"] += 1
+                        continue
+
+            # No acceptable existing identity: allocate immediately. This is
+            # what gives first-seen people a real GID without waiting for the
+            # old five-observation pending state.
+            if commit:
+                gid = self.new(item)
+            else:
+                gid = int(self.reg.allocate_gid())
+                self.pro[gid] = {
+                    "resnet": [np.asarray(item["resnet"], np.float32)],
+                    "swin": [np.asarray(item["swin"], np.float32)],
+                    "solider": [np.asarray(item["solider"], np.float32)],
+                    "attributes": [np.asarray(item["attributes"], np.float32)],
+                    "face": [],
+                    "pose": [],
+                    "camera": {str(item["camera"])},
+                }
+            label = f"G{gid:06d}"
+            if label in used:
+                while label in used:
+                    gid = int(self.reg.allocate_gid())
+                    label = f"G{gid:06d}"
+            used.add(label)
+            out[i] = label
 
         return out
 

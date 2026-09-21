@@ -125,18 +125,18 @@ def carry(rows, anchors, gids_used: set[str], minimum: float = 0.15):
 
     rr, cc = linear_sum_assignment(-matrix)
     result = {}
-    free = [
-        (r, col)
-        for r, col in zip(rr.tolist(), cc.tolist())
-        if str(anchors[col].get("gid", "")).startswith("G")
-        and str(anchors[col].get("gid", "")) not in used
-    ]
-    for r, col in free:
-        gid = str(anchors[col]["gid"])
+    committed_cols = set()
+    for r, col in zip(rr.tolist(), cc.tolist()):
+        gid = str(anchors[col].get("gid", ""))
         value = float(matrix[r, col])
-        if value >= float(minimum):
+        if (
+            value >= float(minimum)
+            and gid.startswith("G")
+            and gid not in used
+        ):
             result[int(r)] = gid
             used.add(gid)
+            committed_cols.add(int(col))
 
     # Collapse rows are detector hypotheses for real people that NvDCF could
     # not keep as separate tracks. Leaving one of these rows as PENDING would
@@ -150,7 +150,7 @@ def carry(rows, anchors, gids_used: set[str], minimum: float = 0.15):
     ]
     remaining_cols = [
         col for col in range(len(anchors))
-        if col not in {cc for _, cc in free if str(anchors[cc].get("gid", "")).startswith("G")}
+        if col not in committed_cols
         and str(anchors[col].get("gid", "")).startswith("G")
         and str(anchors[col].get("gid", "")) not in used
     ]

@@ -50,6 +50,13 @@ class BatchNvDCF:
                     output.append(json.loads(line))
         return output
 
+    @staticmethod
+    def _load_detections(path):
+        """Load detector rows emitted by NvDCF without changing row semantics."""
+        if not path.is_file():
+            raise RuntimeError(f"NvDCF detection file not found: {path}")
+        return BatchNvDCF._load(path)
+
     def sources(self, values):
         if values:
             return [(self._name(value), self._source(value)) for value in values]

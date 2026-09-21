@@ -315,14 +315,9 @@ class BatchNvDCF:
                         tid = int(subset[local]["track_id"])
                         gids[tid] = gid
 
-                    overlap_anchors = [
-                        {
-                            "bbox": item["bbox"],
-                            "gid": gids[int(item["track_id"])],
-                        }
-                        for item in current
-                        if gids[int(item["track_id"])].startswith("G")
-                    ]
+                    # Keep the original clean-frame anchors for the whole
+                    # occlusion event. Do not replace them with partially
+                    # occluded/shadow assignments.
                 else:
                     overlap_anchors = []
 

@@ -198,7 +198,7 @@ class QdrantGallery:
             query=query.tolist(),
             limit=self.limit,
             with_payload=True,
-            with_vectors=True,
+            with_vectors=False,
         )
         return list(
             getattr(result, "points", []) or []

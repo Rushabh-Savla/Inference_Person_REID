@@ -63,6 +63,10 @@ def test_gid_allocation_starts_at_one_and_advances_from_persisted_max(tmp_path):
     )
     assert reg.allocate_gid() == 2
 
+    reg._db.execute("UPDATE meta SET value='1' WHERE key='next_gid'")
+    reg._db.commit()
+    assert reg.allocate_gid() == 2
+
     reg.save_component(
         9,
         model_banks={"resnet": [vector(4, 1)]},

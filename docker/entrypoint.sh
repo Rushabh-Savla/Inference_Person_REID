@@ -4,8 +4,12 @@ set -euo pipefail
 export PYTHONPATH="/workspace/inference_person_reid:/workspace/inference_person_reid/src:${PYTHONPATH:-}"
 export NVDCF_DEEPSTREAM_ROOT="${NVDCF_DEEPSTREAM_ROOT:-/opt/nvidia/deepstream/deepstream}"
 export NVDCF_TRACKER_LIBRARY="${NVDCF_TRACKER_LIBRARY:-/opt/nvidia/deepstream/deepstream/lib/libnvds_nvmultiobjecttracker.so}"
-export GST_PLUGIN_PATH="/opt/nvidia/deepstream/deepstream/lib/gst-plugins:${GST_PLUGIN_PATH:-}"
-export LD_LIBRARY_PATH="/opt/nvidia/deepstream/deepstream/lib:/opt/nvidia/deepstream/deepstream/lib/gst-plugins:${LD_LIBRARY_PATH:-}"
+export GST_PLUGIN_SYSTEM_PATH_1_0="/usr/lib/x86_64-linux-gnu/gstreamer-1.0"
+export GST_PLUGIN_SYSTEM_PATH="/usr/lib/x86_64-linux-gnu/gstreamer-1.0"
+export GST_PLUGIN_PATH="/usr/lib/x86_64-linux-gnu/gstreamer-1.0:/opt/nvidia/deepstream/deepstream/lib/gst-plugins:${GST_PLUGIN_PATH:-}"
+export GST_PLUGIN_PATH_1_0="/usr/lib/x86_64-linux-gnu/gstreamer-1.0:/opt/nvidia/deepstream/deepstream/lib/gst-plugins:${GST_PLUGIN_PATH_1_0:-}"
+export GST_REGISTRY="/tmp/reid-gst-runtime.bin"
+export LD_LIBRARY_PATH="/opt/nvidia/deepstream/deepstream/lib:/opt/nvidia/deepstream/deepstream/lib/gst-plugins:/usr/lib/x86_64-linux-gnu:${LD_LIBRARY_PATH:-}"
 export QDRANT_URL="${QDRANT_URL:-http://127.0.0.1:6333}"
 
 for attempt in $(seq 1 60); do
